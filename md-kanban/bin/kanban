@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Iterable, Optional
+
+
+STATES = ("backlog", "todo", "working", "done", "archived", "trash")
+TRANSITIONS = {
+    "backlog": {"todo", "archived", "trash"},
+    "todo": {"working", "archived", "trash"},
+    "working": {"done", "archived", "trash"},
+    "done": {"archived", "trash"},
+    "archived": {"trash"},
+    "trash": set(),
+}
+TASK_ID_RE = re.compile(r"^\d{8}-[a-z0-9]+(?:-[a-z0-9]+)*-task$")
+SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+TYPE_NAMES = {
+    "feature": "Feature",
+    "bug": "Bug",
+    "chore": "Chore",
+    "research": "Research",
+}
+READY_SECTIONS = ("任务目标", "预期成果", "验收条件", "不在本轮范围")
+ARCHIVE_RESULTS = {"completed", "cancelled", "duplicate", "wontfix"}
+AGENT_NAMES = ("codex", "claude")
+
+
+class KanbanError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Entry:
+    task_id: str
+    state: str
+    path: Path
+    document: Path
+    kind: str
+
+
+def git_main_worktree(directory: Path) -> Optional[Path]:
+    try:
+        git = subprocess.run(
+            ["git", "-C", str(directory), "worktree", "list", "--porcelain"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if git.returncode != 0:
+        return None
+    for line in git.stdout.splitlines():
+        if line.startswith("worktree "):
+            return Path(line.removeprefix("worktree ")).resolve()
+    return None
+
+
+def board_root() -> Path:
+    configured = os.environ.get("KANBAN_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    main_worktree = git_main_worktree(Path.cwd())
+    if main_worktree:
+        candidate = main_worktree / "kanban"
+        if candidate.is_dir():
+            return candidate.resolve()
+    current = Path.cwd().resolve()
+    for parent in (current, *current.parents):
+        candidate = parent / "kanban"
+        if candidate.is_dir():
+            return candidate.resolve()
+    raise KanbanError("找不到看板目录; 请在项目内运行或设置 KANBAN_DIR")
+
+
+def global_rules_path() -> Path:
+    return Path.home() / ".agents" / "KANBAN-RULES.md"
+
+
+def command_rules() -> None:
+    rules = global_rules_path()
+    if not rules.is_file():
+        raise KanbanError(f"全局规则不存在: {rules}")
+    sys.stdout.write(rules.read_text(encoding="utf-8"))
+
+
+def add_git_exclude(root: Path) -> Optional[Path]:
+    try:
+        git_root_result = subprocess.run(
+            ["git", "-C", str(root.parent), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if git_root_result.returncode != 0:
+        return None
+    git_root = Path(git_root_result.stdout.strip()).resolve()
+    try:
+        relative = root.resolve().relative_to(git_root)
+    except ValueError:
+        return None
+    exclude_result = subprocess.run(
+        ["git", "-C", str(git_root), "rev-parse", "--git-path", "info/exclude"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if exclude_result.returncode != 0:
+        raise KanbanError("无法定位 Git info/exclude")
+    exclude = Path(exclude_result.stdout.strip())
+    if not exclude.is_absolute():
+        exclude = git_root / exclude
+    pattern = f"/{relative.as_posix().strip('/')}/"
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    if pattern not in existing.splitlines():
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8", newline="\n") as file:
+            if existing and not existing.endswith("\n"):
+                file.write("\n")
+            file.write(pattern + "\n")
+    return exclude.resolve()
+
+
+def command_init(args: argparse.Namespace) -> None:
+    configured = os.environ.get("KANBAN_DIR")
+    if args.project and configured:
+        raise KanbanError("不能同时指定 project-path 和 KANBAN_DIR")
+    if args.project:
+        project = Path(args.project).expanduser().resolve()
+        if not project.is_dir():
+            raise KanbanError(f"项目目录不存在: {project}")
+        root = project / "kanban"
+    elif configured:
+        root = Path(configured).expanduser().resolve()
+    else:
+        project = git_main_worktree(Path.cwd()) or Path.cwd().resolve()
+        root = project / "kanban"
+    if root.exists() and not root.is_dir():
+        raise KanbanError(f"看板路径不是目录: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    for state in STATES:
+        path = root / state
+        if path.exists() and not path.is_dir():
+            raise KanbanError(f"状态路径不是目录: {path}")
+        path.mkdir(exist_ok=True)
+    exclude = add_git_exclude(root)
+    print(f"initialized: {root}")
+    if exclude:
+        print(f"git exclude: {exclude}")
+    print(f"rules: {global_rules_path()}")
+
+
+def ensure_layout(root: Path) -> None:
+    if not root.is_dir():
+        raise KanbanError(f"看板目录不存在: {root}")
+    for state in STATES:
+        path = root / state
+        if not path.is_dir():
+            raise KanbanError(f"状态目录不存在: {path}")
+
+
+def scan(root: Path) -> Dict[str, Entry]:
+    ensure_layout(root)
+    entries: Dict[str, Entry] = {}
+    for state in STATES:
+        for path in sorted((root / state).iterdir(), key=lambda item: item.name):
+            if path.name.startswith("."):
+                continue
+            if path.is_symlink():
+                raise KanbanError(f"任务入口不得是符号链接: {path}")
+            if path.is_file() and path.name.endswith("-task.md"):
+                task_id = path.name[:-3]
+                document = path
+                kind = "small"
+            elif path.is_dir() and path.name.endswith("-task"):
+                task_id = path.name
+                document = path / "spec.md"
+                kind = "large"
+                if not document.is_file():
+                    raise KanbanError(f"大任务缺少 spec.md: {path}")
+            else:
+                raise KanbanError(f"无效任务入口: {path}")
+            if not TASK_ID_RE.fullmatch(task_id):
+                raise KanbanError(f"无效任务 ID: {task_id}")
+            if task_id in entries:
+                other = entries[task_id].path
+                raise KanbanError(f"重复任务 ID: {other} 与 {path}")
+            entries[task_id] = Entry(task_id, state, path, document, kind)
+    return entries
+
+
+def normalize_task_id(value: str) -> str:
+    if "/" in value or "\\" in value:
+        raise KanbanError("任务参数只能使用任务 ID 或入口名")
+    task_id = value[:-3] if value.endswith(".md") else value
+    if not TASK_ID_RE.fullmatch(task_id):
+        raise KanbanError(f"无效任务 ID: {value}")
+    return task_id
+
+
+def locate(entries: Dict[str, Entry], value: str) -> Entry:
+    task_id = normalize_task_id(value)
+    try:
+        return entries[task_id]
+    except KeyError as error:
+        raise KanbanError(f"任务不存在: {task_id}") from error
+
+
+def read_document(entry: Entry) -> str:
+    try:
+        return entry.document.read_text(encoding="utf-8")
+    except UnicodeError as error:
+        raise KanbanError(f"任务文档不是有效 UTF-8: {entry.document}") from error
+
+
+def title_from(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return "(无标题)"
+
+
+def section_body(text: str, heading: str) -> Optional[str]:
+    match = re.search(rf"(?m)^## {re.escape(heading)}\s*$", text)
+    if not match:
+        return None
+    next_heading = re.search(r"(?m)^## ", text[match.end() :])
+    end = match.end() + next_heading.start() if next_heading else len(text)
+    return text[match.end() : end].strip()
+
+
+def result_from(text: str) -> str:
+    match = re.search(r"(?m)^- 结果:\s*(.*?)\s*$", text)
+    return match.group(1) if match else ""
+
+
+def validate_ready(entry: Entry, text: str) -> None:
+    missing = []
+    for heading in READY_SECTIONS:
+        body = section_body(text, heading)
+        if not body or "<填写>" in body:
+            missing.append(heading)
+    if missing:
+        raise KanbanError("任务未满足 todo 条件: " + ", ".join(missing))
+
+
+def validate_target(entry: Entry, target_state: str, text: str) -> None:
+    if target_state == "todo":
+        validate_ready(entry, text)
+    elif target_state == "done":
+        if result_from(text) != "completed":
+            raise KanbanError("移入 done 前必须填写: 结果: completed")
+        if entry.kind == "small":
+            summary = section_body(text, "完成总结")
+            if not summary or "<填写>" in summary:
+                raise KanbanError("小任务移入 done 前必须填写完成总结")
+        else:
+            report = entry.path / "report.md"
+            if not report.is_file() or not report.read_text(encoding="utf-8").strip():
+                raise KanbanError("大任务移入 done 前必须完成 report.md")
+    elif target_state == "archived":
+        result = result_from(text)
+        if result not in ARCHIVE_RESULTS:
+            allowed = ", ".join(sorted(ARCHIVE_RESULTS))
+            raise KanbanError(f"移入 archived 前必须填写有效结果: {allowed}")
+    elif target_state == "trash" and result_from(text) != "trashed":
+        raise KanbanError("移入 trash 前必须填写: 结果: trashed")
+
+
+def render_contract(title: str, task_type: str) -> str:
+    created = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return f"""# {title}
+
+- 类型: {TYPE_NAMES[task_type]}
+- 创建时间: {created}
+- 负责人:
+- 开始时间:
+- 任务分支:
+- 结果:
+
+## 任务目标
+
+<填写>
+
+## 用户决策
+
+N/A
+
+## 预期成果
+
+<填写>
+
+## 验收条件
+
+- [ ] <填写>
+
+## 威胁模型
+
+N/A
+
+## 不在本轮范围
+
+- <填写>
+
+## 讨论与决策
+
+"""
+
+
+def command_new(args: argparse.Namespace, root: Path) -> None:
+    if not SLUG_RE.fullmatch(args.slug):
+        raise KanbanError("slug 只能包含小写 ASCII 字母, 数字和连字符")
+    title = " ".join(args.title).strip()
+    if not title or "\n" in title or "\r" in title:
+        raise KanbanError("标题不能为空或包含换行")
+    entries = scan(root)
+    task_id = f"{datetime.now().strftime('%Y%m%d')}-{args.slug}-task"
+    if task_id in entries:
+        raise KanbanError(f"任务已存在: {task_id}")
+    contract = render_contract(title, args.type)
+    if args.large:
+        target = root / "backlog" / task_id
+        target.mkdir()
+        try:
+            (target / "spec.md").write_text(contract, encoding="utf-8")
+        except Exception:
+            (target / "spec.md").unlink(missing_ok=True)
+            target.rmdir()
+            raise
+    else:
+        target = root / "backlog" / f"{task_id}.md"
+        content = contract + """## 实施与验证
+
+<填写>
+
+## 完成总结
+
+<填写>
+"""
+        with target.open("x", encoding="utf-8", newline="\n") as file:
+            file.write(content)
+    print(target)
+
+
+def selected_entries(entries: Dict[str, Entry], state: Optional[str]) -> Iterable[Entry]:
+    state_order = {name: index for index, name in enumerate(STATES)}
+    return sorted(
+        (entry for entry in entries.values() if state is None or entry.state == state),
+        key=lambda entry: (state_order[entry.state], entry.task_id),
+    )
+
+
+def select_todo(entries: Dict[str, Entry], task: Optional[str]) -> Entry:
+    if task:
+        entry = locate(entries, task)
+        if entry.state != "todo":
+            raise KanbanError(f"只能启动 todo 任务: {entry.task_id} 当前位于 {entry.state}")
+        return entry
+
+    todo = list(selected_entries(entries, "todo"))
+    if not todo:
+        raise KanbanError("todo 中没有任务")
+    for index, entry in enumerate(todo, 1):
+        print(f"{index}. {entry.task_id}\t{title_from(read_document(entry))}")
+    while True:
+        try:
+            choice = input("选择任务编号: ").strip()
+        except EOFError as error:
+            raise KanbanError("未选择任务; 请指定 task-id") from error
+        if choice.isdecimal() and 1 <= int(choice) <= len(todo):
+            return todo[int(choice) - 1]
+        print(f"请输入 1-{len(todo)}")
+
+
+def command_list(args: argparse.Namespace, root: Path) -> None:
+    entries = scan(root)
+    for entry in selected_entries(entries, args.state):
+        title = title_from(read_document(entry))
+        print(f"{entry.state}\t{entry.kind}\t{entry.task_id}\t{title}")
+
+
+def command_show(args: argparse.Namespace, root: Path) -> None:
+    entry = locate(scan(root), args.task)
+    sys.stdout.write(read_document(entry))
+
+
+def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
+    if target_state not in TRANSITIONS[entry.state]:
+        raise KanbanError(f"不允许迁移: {entry.state} -> {target_state}")
+    text = read_document(entry)
+    validate_target(entry, target_state, text)
+    target = root / target_state / entry.path.name
+    if target.exists() or target.is_symlink():
+        raise KanbanError(f"目标已存在: {target}")
+    try:
+        entry.path.rename(target)
+    except OSError as error:
+        raise KanbanError(f"迁移失败: {error}") from error
+    if entry.path.exists() or not target.exists():
+        raise KanbanError("迁移后状态校验失败, 请保留现场")
+    document = target if entry.kind == "small" else target / "spec.md"
+    return Entry(entry.task_id, target_state, target, document, entry.kind)
+
+
+def command_move(args: argparse.Namespace, root: Path) -> None:
+    entry = locate(scan(root), args.task)
+    print(move_entry(entry, root, args.state).path)
+
+
+def start_metadata(text: str, agent: str) -> str:
+    for name, value in (
+        ("负责人", agent),
+        ("开始时间", datetime.now().strftime("%Y-%m-%d %H:%M")),
+    ):
+        pattern = rf"(?m)^- {name}:\s*$"
+        if len(re.findall(pattern, text)) != 1:
+            raise KanbanError(f"任务文档缺少唯一元数据字段: {name}")
+        text = re.sub(pattern, f"- {name}: {value}", text, count=1)
+    return text
+
+
+def tmux_session_id(tmux: str) -> str:
+    pane = os.environ.get("TMUX_PANE")
+    if not os.environ.get("TMUX") or not pane:
+        raise KanbanError("当前不在 tmux session")
+    result = subprocess.run(
+        [tmux, "display-message", "-p", "-t", pane, "#{session_id}"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    session = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"\$\d+", session):
+        detail = result.stderr.strip() or "无法确定当前 session"
+        raise KanbanError(f"读取 tmux session 失败: {detail}")
+    return session
+
+
+def command_start(args: argparse.Namespace, root: Path) -> None:
+    entry = select_todo(scan(root), args.task)
+    agent = shutil.which(args.agent)
+    tmux = shutil.which("tmux")
+    if not agent:
+        raise KanbanError(f"Agent 不在 PATH: {args.agent}")
+    if not tmux:
+        raise KanbanError("tmux 不在 PATH")
+    session = tmux_session_id(tmux)
+    original = read_document(entry)
+    updated = start_metadata(original, args.agent)
+    moved = move_entry(entry, root, "working")
+    prompt = (
+        f"执行 Kanban 任务 {entry.task_id}. 先运行 kanban rules, 再运行 "
+        f"kanban show {entry.task_id}. 卡片已进入 working. 遵守目标项目 AGENTS.md, "
+        "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
+    )
+    slug = entry.task_id[9:].removesuffix("-task")
+    command = shlex.join([agent, prompt])
+    try:
+        moved.document.write_text(updated, encoding="utf-8")
+        result = subprocess.run(
+            [
+                tmux,
+                "new-window",
+                "-P",
+                "-F",
+                "#{window_id}",
+                "-t",
+                session + ":",
+                "-c",
+                str(root.parent),
+                "-n",
+                f"kb-{slug}"[:50],
+                command,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or f"exit {result.returncode}"
+            raise KanbanError(f"tmux new-window 失败: {detail}")
+    except (KanbanError, OSError, UnicodeError) as error:
+        try:
+            moved.document.write_text(original, encoding="utf-8")
+            moved.path.rename(entry.path)
+        except (OSError, UnicodeError) as rollback_error:
+            raise KanbanError(
+                f"启动失败且回滚失败; 卡片保留在 working: {error}; {rollback_error}"
+            ) from error
+        raise
+    window = result.stdout.strip() or "unknown"
+    print(f"started: {entry.task_id}\tagent={args.agent}\twindow={window}")
+
+
+def command_check(root: Path) -> None:
+    entries = scan(root)
+    print(f"ok: {len(entries)} tasks")
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="kanban", description="本地文件看板")
+    commands = result.add_subparsers(dest="command", required=True)
+
+    init_parser = commands.add_parser("init", help="创建看板目录框架")
+    init_parser.add_argument("project", nargs="?", help="项目根目录, 默认当前项目")
+
+    commands.add_parser("rules", help="输出全局看板规则")
+
+    list_parser = commands.add_parser("list", aliases=["ls"], help="列出任务")
+    list_parser.add_argument("state", nargs="?", choices=STATES)
+
+    show_parser = commands.add_parser("show", help="输出入口任务文档")
+    show_parser.add_argument("task")
+
+    new_parser = commands.add_parser("new", help="在 backlog 创建任务")
+    new_parser.add_argument("--large", action="store_true", help="创建大任务目录")
+    new_parser.add_argument("type", choices=tuple(TYPE_NAMES))
+    new_parser.add_argument("slug")
+    new_parser.add_argument("title", nargs="+")
+
+    move_parser = commands.add_parser("move", help="迁移任务状态")
+    move_parser.add_argument("task")
+    move_parser.add_argument("state", choices=STATES)
+
+    start_parser = commands.add_parser("start", help="领取任务并在当前 tmux session 启动 Agent")
+    start_parser.add_argument("task", nargs="?")
+    start_parser.add_argument("--agent", choices=AGENT_NAMES, default="codex")
+
+    commands.add_parser("check", help="检查看板不变量")
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        if args.command == "init":
+            command_init(args)
+            return 0
+        if args.command == "rules":
+            command_rules()
+            return 0
+        root = board_root()
+        if args.command in ("list", "ls"):
+            command_list(args, root)
+        elif args.command == "show":
+            command_show(args, root)
+        elif args.command == "new":
+            command_new(args, root)
+        elif args.command == "move":
+            command_move(args, root)
+        elif args.command == "start":
+            command_start(args, root)
+        elif args.command == "check":
+            command_check(root)
+        return 0
+    except (KanbanError, OSError, UnicodeError) as error:
+        print(f"kanban: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
