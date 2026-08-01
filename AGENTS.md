@@ -50,8 +50,6 @@
 
 ## 探索, 编辑与验证
 
-- code-review-graph MCP 可用且仓库已有图谱时, 先调用 `get_minimal_context_tool`, 再按需使用 `semantic_search_nodes_tool`, `query_graph_tool`, `get_impact_radius_tool` 和 `detect_changes_tool`. 图谱未覆盖或工具不可用时, 使用 `rg` 和文件读取.
-- 完成代码修改后, 若 code-review-graph MCP 可用, 调用 `build_or_update_graph_tool` 增量刷新图谱. 纯文档修改无需刷新.
 - monorepo 命令按仓库文档和脚本指定的工作目录运行. 子项目命令从对应子项目目录运行; 根级编排命令从仓库根运行.
 - 修改后运行能直接证明改动的最小验证. 测试或环境失败时记录实际命令和错误, 不得标为通过; 既有环境故障同样处理. 错误含敏感值时以 `[REDACTED]` 替换该值, 其余文本保持原样.
 
