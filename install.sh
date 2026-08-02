@@ -4,7 +4,7 @@ set -eu
 
 if [ "$#" -gt 0 ]; then
   echo "Usage: install.sh" >&2
-  echo "Installs solo-mode commands to ~/.local/bin and rules to ~/.agents." >&2
+  echo "Installs Onevoke commands to ~/.local/bin and rules to ~/.agents." >&2
   exit 2
 fi
 
@@ -22,4 +22,4 @@ for rule in "$project_dir"/rules/*.md; do
   install -m 0644 "$rule" "$HOME/.agents/$(basename "$rule")"
 done
 
-printf '%s\n' 'solo-mode installed'
+printf '%s\n' 'Onevoke installed'

@@ -555,6 +555,7 @@ printf '%s\\n' '@9'
             check=False,
         )
         self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
 
         command = install_home / ".local" / "bin" / "kanban"
         self.assertTrue(os.access(command, os.X_OK))
