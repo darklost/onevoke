@@ -91,23 +91,7 @@ Onevoke 把需求讨论和任务执行分开. 人始终保留一个需求会话,
 - Codex 或 Claude 是执行 Agent: 读取规则与任务卡, 实现、验证、提交和集成.
 - Codex 审核角色是独立门禁: `PM` 检查需求完整性, `QA` 检查正确性与回归, 安全角色按风险触发.
 
-```text
-需求会话                                  tmux 协调与任务窗口
-   |                                               |
- /new                                             |
-   |                                               |
- Plan mode: 讨论需求与方案                         |
-   |                                               |
- 退出 Plan mode                                   |
-   |                                               |
- Agent: kanban new -> backlog                     |
-   |                                               |
-   +-------------------------------------> "开始任务卡 <task-id>"
-   |                                      pick -> todo -> start -> working
-   |                                               |
- /new -> Plan mode -> 讨论下一项                   +-> 实现 -> 审核 -> 验收
-                                                   +-> 集成 -> done
-```
+![Onevoke 工作流](docs/workflow.svg)
 
 ### 1. 新建计划会话
 
