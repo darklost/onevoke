@@ -170,6 +170,22 @@ printf '%s\\n' '@9'
         result = self.run_command("pick", task_id, succeeds=False)
         self.assertIn("不允许迁移: todo -> todo", result.stderr)
 
+    def test_done_metadata_error_keeps_task_in_working(self) -> None:
+        task_id, task = self.make_todo("bad-done-metadata")
+        self.run_command("move", task_id, "working")
+        task = self.root / "working" / task.name
+        self.complete(task)
+        text = task.read_text(encoding="utf-8").replace(
+            "- 完成时间:\n", "- 完成时间:\n- 完成时间:\n", 1
+        )
+        task.write_text(text, encoding="utf-8")
+
+        result = self.run_command("move", task_id, "done", succeeds=False)
+
+        self.assertIn("缺少唯一元数据字段: 完成时间", result.stderr)
+        self.assertTrue(task.exists())
+        self.assertFalse((self.root / "done" / task.name).exists())
+
     def test_list_formats_aligned_table(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-list-table-task"
         self.run_command("new", "chore", "list-table", "表格输出")

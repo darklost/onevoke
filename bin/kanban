@@ -512,6 +512,7 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
         raise KanbanError(f"不允许迁移: {entry.state} -> {target_state}")
     text = read_document(entry)
     validate_target(entry, target_state, text)
+    updated = completion_metadata(text) if target_state == "done" else text
     target = root / target_state / entry.path.name
     if target.exists() or target.is_symlink():
         raise KanbanError(f"目标已存在: {target}")
@@ -522,8 +523,7 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
     if entry.path.exists() or not target.exists():
         raise KanbanError("迁移后状态校验失败, 请保留现场")
     document = target if entry.kind == "small" else target / "spec.md"
-    if target_state == "done":
-        updated = completion_metadata(text)
+    if updated != text:
         try:
             document.write_text(updated, encoding="utf-8")
         except (OSError, UnicodeError) as error:
