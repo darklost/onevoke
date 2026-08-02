@@ -48,6 +48,26 @@ class Entry:
     kind: str
 
 
+@dataclass(frozen=True)
+class Board:
+    """一次扫描的结果.
+
+    无效入口不再让整个看板不可读: 它们进入 problems 由 `check` 汇报, 而与某个
+    任务 ID 绑定的违规 (重复 ID, 大任务缺 spec.md) 另外记入 blocked, 只让操作
+    该任务的命令失败. 未受影响的任务照常可读可迁移.
+    """
+
+    entries: Dict[str, Entry]
+    blocked: Dict[str, str]
+    problems: list["Problem"]
+
+
+@dataclass(frozen=True)
+class Problem:
+    path: Path
+    message: str
+
+
 def git_main_worktree(directory: Path) -> Optional[Path]:
     try:
         git = subprocess.run(
@@ -171,34 +191,56 @@ def ensure_layout(root: Path) -> None:
             raise KanbanError(f"状态目录不存在: {path}")
 
 
-def scan(root: Path) -> Dict[str, Entry]:
+def scan(root: Path) -> Board:
     ensure_layout(root)
     entries: Dict[str, Entry] = {}
+    blocked: Dict[str, str] = {}
+    problems: list[Problem] = []
+
+    def reject(path: Path, message: str, task_id: Optional[str] = None) -> None:
+        problems.append(Problem(path, message))
+        if task_id:
+            blocked[task_id] = message
+            entries.pop(task_id, None)
+
     for state in STATES:
         for path in sorted((root / state).iterdir(), key=lambda item: item.name):
             if path.name.startswith("."):
                 continue
             if path.is_symlink():
-                raise KanbanError(f"任务入口不得是符号链接: {path}")
+                reject(path, f"任务入口不得是符号链接: {path}")
+                continue
             if path.is_file() and path.name.endswith("-task.md"):
-                task_id = path.name[:-3]
-                document = path
-                kind = "small"
+                task_id, document, kind = path.name[:-3], path, "small"
             elif path.is_dir() and path.name.endswith("-task"):
-                task_id = path.name
-                document = path / "spec.md"
-                kind = "large"
-                if not document.is_file():
-                    raise KanbanError(f"大任务缺少 spec.md: {path}")
+                task_id, document, kind = path.name, path / "spec.md", "large"
             else:
-                raise KanbanError(f"无效任务入口: {path}")
+                reject(path, f"无效任务入口: {path}")
+                continue
             if not TASK_ID_RE.fullmatch(task_id):
-                raise KanbanError(f"无效任务 ID: {task_id}")
+                reject(path, f"无效任务 ID: {task_id}")
+                continue
+            if kind == "large" and not document.is_file():
+                reject(path, f"大任务缺少 spec.md: {path}", task_id)
+                continue
+            if task_id in blocked:
+                problems.append(Problem(path, f"任务 ID 存在冲突: {task_id}"))
+                continue
             if task_id in entries:
-                other = entries[task_id].path
-                raise KanbanError(f"重复任务 ID: {other} 与 {path}")
+                reject(path, f"重复任务 ID: {entries[task_id].path} 与 {path}", task_id)
+                continue
             entries[task_id] = Entry(task_id, state, path, document, kind)
-    return entries
+    return Board(entries, blocked, problems)
+
+
+def load_board(root: Path) -> Board:
+    board = scan(root)
+    if board.problems:
+        print(
+            f"kanban: 警告: {len(board.problems)} 个无效入口已忽略, 运行 kanban check 查看",
+            file=sys.stderr,
+        )
+    return board
 
 
 def normalize_task_id(value: str) -> str:
@@ -210,10 +252,12 @@ def normalize_task_id(value: str) -> str:
     return task_id
 
 
-def locate(entries: Dict[str, Entry], value: str) -> Entry:
+def locate(board: Board, value: str) -> Entry:
     task_id = normalize_task_id(value)
+    if task_id in board.blocked:
+        raise KanbanError(board.blocked[task_id])
     try:
-        return entries[task_id]
+        return board.entries[task_id]
     except KeyError as error:
         raise KanbanError(f"任务不存在: {task_id}") from error
 
@@ -325,9 +369,9 @@ def command_new(args: argparse.Namespace, root: Path) -> None:
     title = " ".join(args.title).strip()
     if not title or "\n" in title or "\r" in title:
         raise KanbanError("标题不能为空或包含换行")
-    entries = scan(root)
+    board = load_board(root)
     task_id = f"{datetime.now().strftime('%Y%m%d')}-{args.slug}-task"
-    if task_id in entries:
+    if task_id in board.entries or task_id in board.blocked:
         raise KanbanError(f"任务已存在: {task_id}")
     contract = render_contract(title, args.type)
     if args.large:
@@ -362,14 +406,14 @@ def selected_entries(entries: Dict[str, Entry], state: Optional[str]) -> Iterabl
     )
 
 
-def select_todo(entries: Dict[str, Entry], task: Optional[str]) -> Entry:
+def select_todo(board: Board, task: Optional[str]) -> Entry:
     if task:
-        entry = locate(entries, task)
+        entry = locate(board, task)
         if entry.state != "todo":
             raise KanbanError(f"只能启动 todo 任务: {entry.task_id} 当前位于 {entry.state}")
         return entry
 
-    todo = list(selected_entries(entries, "todo"))
+    todo = list(selected_entries(board.entries, "todo"))
     if not todo:
         raise KanbanError("todo 中没有任务")
     for index, entry in enumerate(todo, 1):
@@ -385,14 +429,14 @@ def select_todo(entries: Dict[str, Entry], task: Optional[str]) -> Entry:
 
 
 def command_list(args: argparse.Namespace, root: Path) -> None:
-    entries = scan(root)
-    for entry in selected_entries(entries, args.state):
+    board = load_board(root)
+    for entry in selected_entries(board.entries, args.state):
         title = title_from(read_document(entry))
         print(f"{entry.state}\t{entry.kind}\t{entry.task_id}\t{title}")
 
 
 def command_show(args: argparse.Namespace, root: Path) -> None:
-    entry = locate(scan(root), args.task)
+    entry = locate(load_board(root), args.task)
     sys.stdout.write(read_document(entry))
 
 
@@ -415,7 +459,7 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
 
 
 def command_move(args: argparse.Namespace, root: Path) -> None:
-    entry = locate(scan(root), args.task)
+    entry = locate(load_board(root), args.task)
     print(move_entry(entry, root, args.state).path)
 
 
@@ -449,7 +493,7 @@ def tmux_session_id(tmux: str) -> str:
 
 
 def command_start(args: argparse.Namespace, root: Path) -> None:
-    entry = select_todo(scan(root), args.task)
+    entry = select_todo(load_board(root), args.task)
     agent = shutil.which(args.agent)
     tmux = shutil.which("tmux")
     if not agent:
@@ -504,9 +548,12 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     print(f"started: {entry.task_id}\tagent={args.agent}\twindow={window}")
 
 
-def command_check(root: Path) -> None:
-    entries = scan(root)
-    print(f"ok: {len(entries)} tasks")
+def command_check(root: Path) -> int:
+    board = scan(root)
+    for problem in board.problems:
+        print(f"invalid: {problem.message}", file=sys.stderr)
+    print(f"ok: {len(board.entries)} tasks")
+    return 1 if board.problems else 0
 
 
 def parser() -> argparse.ArgumentParser:
@@ -563,7 +610,7 @@ def main() -> int:
         elif args.command == "start":
             command_start(args, root)
         elif args.command == "check":
-            command_check(root)
+            return command_check(root)
         return 0
     except (KanbanError, OSError, UnicodeError) as error:
         print(f"kanban: {error}", file=sys.stderr)

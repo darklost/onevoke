@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Optional
 
 
-COMMAND = Path(
-    os.environ.get("KANBAN_COMMAND", Path.home() / ".local" / "bin" / "kanban")
-).resolve()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 默认测当前工作树; 回落到已安装命令会让改动后的代码看起来仍然通过.
+COMMAND = Path(
+    os.environ.get("KANBAN_COMMAND", PROJECT_ROOT / "bin" / "kanban")
+).resolve()
 INSTALLER = PROJECT_ROOT / "install.sh"
-RULES = PROJECT_ROOT / "KANBAN-RULES.md"
+RULES = PROJECT_ROOT / "rules" / "KANBAN-RULES.md"
+AGENT_RULES = PROJECT_ROOT / "rules" / "SOLO-AGENTS.md"
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
 
 
@@ -300,6 +302,67 @@ printf '%s\\n' '@9'
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertTrue(result.stdout.startswith("# 全局文件看板规则\n"))
 
+    def test_stray_file_does_not_break_the_whole_board(self) -> None:
+        task_id, _ = self.make_todo("healthy")
+        (self.root / "backlog" / "notes.md").write_text("随手记", encoding="utf-8")
+
+        listing = self.run_command("list")
+
+        self.assertIn(task_id, listing.stdout)
+        self.assertIn("无效入口", listing.stderr)
+        self.assertIn("# 任务 healthy", self.run_command("show", task_id).stdout)
+        self.run_command("move", task_id, "working")
+
+    def test_check_reports_invalid_entries_and_fails(self) -> None:
+        (self.root / "backlog" / "notes.md").write_text("随手记", encoding="utf-8")
+
+        result = self.run_command("check", succeeds=False)
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("notes.md", result.stderr)
+        self.assertIn("ok: 0 tasks", result.stdout)
+
+    def test_check_passes_on_a_clean_board(self) -> None:
+        self.make_todo("clean")
+
+        result = self.run_command("check")
+
+        self.assertEqual("ok: 1 tasks\n", result.stdout)
+
+    def test_duplicate_task_id_blocks_only_that_task(self) -> None:
+        duplicated, todo_path = self.make_todo("dup")
+        healthy, _ = self.make_todo("fine")
+        (self.root / "working" / todo_path.name).write_bytes(todo_path.read_bytes())
+
+        listing = self.run_command("list")
+        blocked = self.run_command("show", duplicated, succeeds=False)
+
+        self.assertNotIn(duplicated, listing.stdout)
+        self.assertIn(healthy, listing.stdout)
+        self.assertIn("重复任务 ID", blocked.stderr)
+        self.run_command("move", healthy, "working")
+
+    def test_large_task_without_spec_blocks_only_that_task(self) -> None:
+        healthy, _ = self.make_todo("fine")
+        broken = f"{datetime.now().strftime('%Y%m%d')}-broken-task"
+        (self.root / "backlog" / broken).mkdir()
+
+        listing = self.run_command("list")
+        blocked = self.run_command("show", broken, succeeds=False)
+
+        self.assertIn(healthy, listing.stdout)
+        self.assertIn("大任务缺少 spec.md", blocked.stderr)
+
+    def test_symlink_entry_is_rejected_without_blocking_others(self) -> None:
+        healthy, todo_path = self.make_todo("fine")
+        link = self.root / "backlog" / f"{datetime.now().strftime('%Y%m%d')}-link-task.md"
+        link.symlink_to(todo_path)
+
+        result = self.run_command("check", succeeds=False)
+
+        self.assertIn("符号链接", result.stderr)
+        self.assertIn(healthy, self.run_command("list").stdout)
+
     def test_installer_copies_command_and_rules(self) -> None:
         install_home = self.root / "install-home"
         env = os.environ.copy()
@@ -317,6 +380,12 @@ printf '%s\\n' '@9'
         rules = install_home / ".agents" / "KANBAN-RULES.md"
         self.assertTrue(os.access(command, os.X_OK))
         self.assertEqual(RULES.read_bytes(), rules.read_bytes())
+        for name in ("codex-review.sh", "merge-worktree-memory.py"):
+            self.assertTrue(os.access(install_home / ".local" / "bin" / name, os.X_OK))
+        self.assertEqual(
+            AGENT_RULES.read_bytes(),
+            (install_home / ".agents" / "SOLO-AGENTS.md").read_bytes(),
+        )
 
         output = subprocess.run(
             [str(command), "rules"],
@@ -327,6 +396,42 @@ printf '%s\\n' '@9'
         )
         self.assertEqual(0, output.returncode, output.stderr)
         self.assertEqual(RULES.read_text(encoding="utf-8"), output.stdout)
+
+    def test_installer_never_touches_the_users_own_agent_rules(self) -> None:
+        install_home = self.root / "user-home"
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+        own_rules = install_home / ".agents" / "AGENTS.md"
+        own_rules.parent.mkdir(parents=True)
+        own_rules.write_text("本机自定规则\n", encoding="utf-8")
+
+        for _ in range(2):
+            result = subprocess.run(
+                ["sh", str(INSTALLER)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("本机自定规则\n", own_rules.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            AGENT_RULES.read_bytes(),
+            (install_home / ".agents" / "SOLO-AGENTS.md").read_bytes(),
+        )
+
+    def test_installer_rejects_arguments(self) -> None:
+        result = subprocess.run(
+            ["sh", str(INSTALLER), "--force"],
+            env={**os.environ, "HOME": str(self.root / "arg-home")},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Usage: install.sh", result.stderr)
 
 
 if __name__ == "__main__":
