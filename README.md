@@ -113,7 +113,7 @@ codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> QA "<任�
 - 第二阶段 `QA` 核对功能正确性、回归、测试与代码质量
 - 第三阶段按改动风险决定是否运行 `CSA` 和 `Hacker`, 未触发标记 N/A
 
-任一阶段有需修复的 finding, 修复提交后从第一阶段重启. wrapper 以只读 sandbox 运行, 结束时校验 worktree 未被改动; 参数、commit 关系和工作树清洁度都在调用前校验.
+三个阶段的 finding 都按 blocking / high / medium / low 分级, 只有前三级才必须修. `PM` 阶段的修复从第一阶段重启; `QA` 和第三阶段的修复只从第二阶段重启, 同一 base 下不重跑 `PM`. wrapper 以只读 sandbox 运行, 结束时校验 worktree 未被改动; 参数、commit 关系和工作树清洁度都在调用前校验.
 
 可调环境变量: `CODEX_REVIEW_MODEL` (默认 `gpt-5.6-sol`), `CODEX_REVIEW_REASONING_EFFORT` (默认 `high`), `CODEX_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800).
 
