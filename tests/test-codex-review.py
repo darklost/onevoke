@@ -191,6 +191,13 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("uncommitted or untracked changes", result.stderr)
 
+    def test_git_status_failure_is_rejected(self) -> None:
+        result = self.default_review(GIT_INDEX_FILE=str(self.fake_codex))
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("failed to inspect worktree status", result.stderr)
+        self.assertFalse(self.argv_log.exists())
+
     def test_worktree_inside_codex_home_is_rejected(self) -> None:
         result = self.default_review(CODEX_HOME=str(self.root))
 

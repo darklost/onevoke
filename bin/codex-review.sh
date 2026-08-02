@@ -107,7 +107,8 @@ validate_commit commit "$COMMIT"
 git merge-base --is-ancestor "$BASE" "$COMMIT" ||
   fail "base-commit is not an ancestor of commit"
 [[ "$(git rev-parse HEAD)" == "$COMMIT" ]] || fail "worktree HEAD does not match commit"
-[[ -z "$(git_status)" ]] || fail "worktree has uncommitted or untracked changes: $ROOT"
+WORKTREE_STATUS=$(git_status) || fail "failed to inspect worktree status: $ROOT"
+[[ -z "$WORKTREE_STATUS" ]] || fail "worktree has uncommitted or untracked changes: $ROOT"
 
 command -v "$CODEX_BIN" >/dev/null 2>&1 || fail "Codex CLI is unavailable: $CODEX_BIN" 127
 
@@ -121,7 +122,11 @@ REVIEW_PID=""
 REVIEW_STARTED=0
 
 target_is_unchanged() {
-  [[ "$(git rev-parse HEAD 2>/dev/null)" == "$COMMIT" && -z "$(git_status)" ]]
+  local status
+
+  [[ "$(git rev-parse HEAD 2>/dev/null)" == "$COMMIT" ]] || return 1
+  status=$(git_status) || return 1
+  [[ -z "$status" ]]
 }
 
 stop_review() {
