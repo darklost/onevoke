@@ -141,6 +141,20 @@ printf '%s\\n' '@9'
         self.assertIn(large_id, listing)
         self.assertEqual("ok: 2 tasks\n", self.run_command("check").stdout)
 
+    def test_pick_moves_only_ready_backlog_task_to_todo(self) -> None:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-pick-task"
+        self.run_command("new", "chore", "pick", "挑选任务")
+        task = self.root / "backlog" / f"{task_id}.md"
+
+        result = self.run_command("pick", task_id, succeeds=False)
+        self.assertIn("任务未满足 todo 条件", result.stderr)
+        self.make_ready(task)
+        self.run_command("pick", task_id)
+
+        self.assertTrue((self.root / "todo" / task.name).exists())
+        result = self.run_command("pick", task_id, succeeds=False)
+        self.assertIn("不允许迁移: todo -> todo", result.stderr)
+
     def test_start_moves_task_and_launches_agent_window(self) -> None:
         task_id, task = self.make_todo("start-direct")
         fake_bin = self.install_fake_launchers()

@@ -581,6 +581,10 @@ def parser() -> argparse.ArgumentParser:
     move_parser.add_argument("task")
     move_parser.add_argument("state", choices=STATES)
 
+    pick_parser = commands.add_parser("pick", help="将 backlog 任务移入 todo")
+    pick_parser.add_argument("task")
+    pick_parser.set_defaults(state="todo")
+
     start_parser = commands.add_parser("start", help="领取任务并在当前 tmux session 启动 Agent")
     start_parser.add_argument("task", nargs="?")
     start_parser.add_argument("--agent", choices=AGENT_NAMES, default="codex")
@@ -605,7 +609,7 @@ def main() -> int:
             command_show(args, root)
         elif args.command == "new":
             command_new(args, root)
-        elif args.command == "move":
+        elif args.command in ("move", "pick"):
             command_move(args, root)
         elif args.command == "start":
             command_start(args, root)

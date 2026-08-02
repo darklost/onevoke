@@ -89,7 +89,7 @@ Claude Code 的 `@` 导入不受这个限制.
 kanban init
 kanban new feature login-retry 登录重试              # 在 backlog/ 生成卡片
 $EDITOR kanban/backlog/20260802-login-retry-task.md  # 填掉 <填写> 占位
-kanban move 20260802-login-retry-task todo
+kanban pick 20260802-login-retry-task
 kanban start                                         # 选一张 todo 卡片启动 Agent
 kanban list working
 ```

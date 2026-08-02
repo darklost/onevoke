@@ -37,6 +37,7 @@ kanban list [backlog|todo|working|done|archived|trash]
 kanban show <task-id>
 kanban new [--large] <feature|bug|chore|research> <slug> <title...>
 kanban move <task-id> <todo|working|done|archived|trash>
+kanban pick <task-id>
 kanban start [--agent codex|claude] [task-id]
 kanban check
 ```
@@ -45,6 +46,7 @@ kanban check
 - `rules` 直接输出全局规则. 当前目录没看板也行.
 - `new` 默认在 `backlog/` 建小任务; `--large` 建带 `spec.md` 的大任务目录.
 - `move` 只走本文件定义的正向迁移, 校验目标不存在及迁移后状态.
+- `pick` 将指定的 `backlog` 卡片移入 `todo`, 沿用 `todo` 完整性校验.
 - `start` 默认起 `codex`; `--agent claude` 换 Claude. 指定任务只收 `todo` 卡片; 不指定就列 `todo` 让用户按编号选.
 - `start` 只在当前 tmux session 新建并切 window, 不建 session. 新 window cwd 是项目根, 名 `kb-<slug>`.
 - 进 `todo/` 前校验: 任务目标, 预期成果, 验收条件, 不在本轮范围都填了.
@@ -234,5 +236,5 @@ kanban start [--agent codex|claude] [task-id]
 - `working/` 里负责人空着, 中断, 长期没进展 → 别的 Agent 不许自动接管, 挪回或归档; 先报用户定.
 - Agent 领了之后异常退出, 卡片仍留 `working/`. 后续 Agent 按用户决定继续, 重派或归档.
 - 遇到同 ID 跨多目录, 文件和目录形式并存, 大任务缺 `spec.md`, 目标入口冲突, 状态目录缺失或写不进 → 停掉受影响操作, 保留现场.
-- 影响范围按任务算: 违规任务的 `show`, `move`, `start` 一律失败并说原因, 没受影响的照常. 状态目录缺失或写不进则全部命令失败. Agent 不许为绕报错自己删, 改名或移动无效入口, 先报用户.
+- 影响范围按任务算: 违规任务的 `show`, `move`, `pick`, `start` 一律失败并说原因, 没受影响的照常. 状态目录缺失或写不进则全部命令失败. Agent 不许为绕报错自己删, 改名或移动无效入口, 先报用户.
 - 看板不进 Git, 没有 Git 历史可恢复. 误删先查 `trash/` 和本机备份, 不许伪造恢复内容.
