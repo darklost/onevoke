@@ -32,14 +32,52 @@ memsearch 是**可选**的, 需要自己安装. 装了才适用 `SOLO-AGENTS.md`
 
 安装器**不碰** `~/.agents/AGENTS.md` — 那是你自己的全局规则, 与本仓库无关. 两份规则文件都由本仓库拥有, 每次安装直接覆盖.
 
-装完后要让 Agent 真正读到规则, 这一步安装器不做. 没有自己的全局规则时直接软链:
+装完规则只是躺在 `~/.agents/`, **还不生效**. 接入是单独一步, 安装器不做 — 见下一节.
 
-```sh
-ln -s ~/.agents/SOLO-AGENTS.md ~/.codex/AGENTS.md   # Codex
-ln -s ~/.agents/SOLO-AGENTS.md ~/.claude/CLAUDE.md  # Claude Code
+## 接入
+
+安装器不写任何 Agent 的配置目录. 两边机制不同, 分开说.
+
+### Claude Code
+
+`CLAUDE.md` 支持 `@path` 导入, 和你自己的内容共存. 在 `~/.claude/CLAUDE.md` 里加一行:
+
+```markdown
+@~/.agents/SOLO-AGENTS.md
+
+## 我自己的规则
+
+<你原有的内容照旧写在下面>
 ```
 
-已经有自己的全局规则时, 由你决定怎么合并 — 直接把 `SOLO-AGENTS.md` 的内容并进去, 或在自己的规则里指向它.
+导入在会话启动时展开, 绝对路径和相对路径都支持, 最多递归 4 层. 升级 solo-mode 后自动生效, 不用重新接.
+
+### Codex
+
+Codex **没有导入指令**. 它把全局 `~/.codex/AGENTS.md`、项目根 `AGENTS.md`、子目录 `AGENTS.md` 按顺序拼接, 越靠近当前目录的优先级越高, 而全局只有一个位置. 所以分两种情况.
+
+**没有自己的全局规则** — 软链就行, 升级自动生效:
+
+```sh
+ln -s ~/.agents/SOLO-AGENTS.md ~/.codex/AGENTS.md
+```
+
+**已经有自己的全局规则** — 没有干净解, 两条路各有代价, 自己挑:
+
+| 做法 | 得到 | 代价 |
+|---|---|---|
+| 软链 `SOLO-AGENTS.md`, 个人规则下沉到各项目的 `AGENTS.md` | 升级自动传播 | 个人偏好要在每个项目重复一遍 |
+| 保留自己的 `~/.codex/AGENTS.md`, 把 `SOLO-AGENTS.md` 内容合并进去 | 一个文件管全部 | 升级不会传播, 每次都要重新合并 |
+
+### 容量上限
+
+Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. `SOLO-AGENTS.md` 约 19.2 KiB, 已占六成, 留给项目级的只剩约 12.8 KiB. 不够时在 `~/.codex/config.toml` 调高:
+
+```toml
+project_doc_max_bytes = 65536
+```
+
+Claude Code 的 `@` 导入不受这个限制.
 
 ## 看板
 
