@@ -522,9 +522,16 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     slug = entry.task_id[9:].removesuffix("-task")
     effort = "high" if entry.kind == "large" else "medium"
     agent_args = (
-        [agent, "--model", "gpt-5.6-sol", "--config", f'model_reasoning_effort="{effort}"']
+        [
+            agent,
+            "--model",
+            "gpt-5.6-sol",
+            "--config",
+            f'model_reasoning_effort="{effort}"',
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
         if args.agent == "codex"
-        else [agent, "--model", "opus", "--effort", effort]
+        else [agent, "--model", "opus", "--effort", effort, "--dangerously-skip-permissions"]
     )
     command = shlex.join([*agent_args, prompt])
     try:

@@ -184,6 +184,7 @@ printf '%s\\n' '@9'
         self.assertIn(str(fake_bin / "codex"), tmux_args[-1])
         self.assertIn("--model gpt-5.6-sol", tmux_args[-1])
         self.assertIn('model_reasoning_effort="medium"', tmux_args[-1])
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", tmux_args[-1])
         self.assertIn(task_id, tmux_args[-1])
 
     def test_start_without_task_prompts_for_todo_selection(self) -> None:
@@ -200,6 +201,7 @@ printf '%s\\n' '@9'
         self.assertIn("agent=claude", result.stdout)
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn("--model opus --effort medium", command)
+        self.assertIn("--dangerously-skip-permissions", command)
 
     def test_start_uses_high_effort_for_large_tasks(self) -> None:
         self.install_fake_launchers()
