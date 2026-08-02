@@ -430,9 +430,19 @@ def select_todo(board: Board, task: Optional[str]) -> Entry:
 
 def command_list(args: argparse.Namespace, root: Path) -> None:
     board = load_board(root)
-    for entry in selected_entries(board.entries, args.state):
-        title = title_from(read_document(entry))
-        print(f"{entry.state}\t{entry.kind}\t{entry.task_id}\t{title}")
+    rows = [
+        (entry.state, entry.kind, entry.task_id, title_from(read_document(entry)))
+        for entry in selected_entries(board.entries, args.state)
+    ]
+    headers = ("STATE", "SIZE", "TASK ID")
+    widths = [
+        max(len(header), *(len(row[index]) for row in rows))
+        for index, header in enumerate(headers)
+    ]
+    print("  ".join(f"{header:<{width}}" for header, width in zip(headers, widths)) + "  TITLE")
+    print("  ".join("-" * width for width in widths) + "  -----")
+    for row in rows:
+        print("  ".join(f"{value:<{width}}" for value, width in zip(row, widths)) + f"  {row[3]}")
 
 
 def command_show(args: argparse.Namespace, root: Path) -> None:

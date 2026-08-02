@@ -155,6 +155,16 @@ printf '%s\\n' '@9'
         result = self.run_command("pick", task_id, succeeds=False)
         self.assertIn("不允许迁移: todo -> todo", result.stderr)
 
+    def test_list_formats_aligned_table(self) -> None:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-list-table-task"
+        self.run_command("new", "chore", "list-table", "表格输出")
+
+        output = self.run_command("list", "backlog").stdout
+
+        self.assertEqual("STATE    SIZE   TASK ID                   TITLE", output.splitlines()[0])
+        self.assertIn(f"backlog  small  {task_id}  表格输出", output)
+        self.assertNotIn("\t", output)
+
     def test_start_moves_task_and_launches_agent_window(self) -> None:
         task_id, task = self.make_todo("start-direct")
         fake_bin = self.install_fake_launchers()

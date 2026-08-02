@@ -44,6 +44,7 @@ kanban check
 
 - `init` 幂等建 `kanban/` 和 6 个状态目录. Git 项目顺手写本地 `.git/info/exclude`, 不动项目 `.gitignore`; 输出全局规则路径.
 - `rules` 直接输出全局规则. 当前目录没看板也行.
+- `list` 按状态, 规模, 任务 ID 和标题输出对齐表格; 可指定状态过滤.
 - `new` 默认在 `backlog/` 建小任务; `--large` 建带 `spec.md` 的大任务目录.
 - `move` 只走本文件定义的正向迁移, 校验目标不存在及迁移后状态.
 - `pick` 将指定的 `backlog` 卡片移入 `todo`, 沿用 `todo` 完整性校验.
