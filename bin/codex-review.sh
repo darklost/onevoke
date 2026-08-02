@@ -253,7 +253,7 @@ blocking  - the task goal is not met, or the change causes data loss, security f
 high      - certain failure or regression on a common path, with a clear trigger
 medium    - real defect under a specific condition, contract, boundary, or error path
 low       - real defect whose trigger is rare and whose consequence is negligible
-recommend - not a defect, but the project's own rules or established conventions call for the change
+recommend - not a defect, but project rules or established conventions call for the change
 suggest   - optional improvement; the owner decides whether it is worth it
 
 Blocking, high, and medium are gate findings and belong in the main findings section. After the gate

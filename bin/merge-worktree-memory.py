@@ -14,6 +14,8 @@
 兼容, 改动切分或归一化逻辑会让已合并条目重新判定为新条目.
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import os
