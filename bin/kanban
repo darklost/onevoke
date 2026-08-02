@@ -434,15 +434,35 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
         (entry.state, entry.kind, entry.task_id, title_from(read_document(entry)))
         for entry in selected_entries(board.entries, args.state)
     ]
-    headers = ("STATE", "SIZE", "TASK ID")
+    headers = ("STATE", "SIZE")
     widths = [
         max(len(header), *(len(row[index]) for row in rows))
         for index, header in enumerate(headers)
     ]
-    print("  ".join(f"{header:<{width}}" for header, width in zip(headers, widths)) + "  TITLE")
-    print("  ".join("-" * width for width in widths) + "  -----")
+    use_color = "NO_COLOR" not in os.environ and (
+        sys.stdout.isatty() or os.environ.get("CLICOLOR_FORCE") == "1"
+    )
+
+    def color(text: str, code: str) -> str:
+        return f"\033[{code}m{text}\033[0m" if use_color else text
+
+    state_colors = {
+        "backlog": "90",
+        "todo": "33",
+        "working": "36",
+        "done": "32",
+        "archived": "34",
+        "trash": "31",
+    }
+    indent = " " * (sum(widths) + 4)
+    heading = "  ".join(f"{header:<{width}}" for header, width in zip(headers, widths))
+    print(color(heading + "  TASK ID / TITLE", "1"))
+    print("  ".join("-" * width for width in widths) + "  ---------------")
     for row in rows:
-        print("  ".join(f"{value:<{width}}" for value, width in zip(row, widths)) + f"  {row[3]}")
+        state = color(f"{row[0]:<{widths[0]}}", state_colors[row[0]])
+        size = color(f"{row[1]:<{widths[1]}}", "1;35" if row[1] == "large" else "90")
+        print(f"{state}  {size}  {color(row[2], '36')}")
+        print(indent + color(row[3], "35"))
 
 
 def command_show(args: argparse.Namespace, root: Path) -> None:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -158,11 +159,22 @@ printf '%s\\n' '@9'
     def test_list_formats_aligned_table(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-list-table-task"
         self.run_command("new", "chore", "list-table", "表格输出")
+        large_id = f"{datetime.now().strftime('%Y%m%d')}-list-large-task"
+        self.run_command("new", "--large", "chore", "list-large", "大型表格输出")
+        self.env.pop("NO_COLOR", None)
+        self.env["CLICOLOR_FORCE"] = "1"
 
         output = self.run_command("list", "backlog").stdout
+        plain = re.sub(r"\033\[[0-9;]*m", "", output)
 
-        self.assertEqual("STATE    SIZE   TASK ID                   TITLE", output.splitlines()[0])
-        self.assertIn(f"backlog  small  {task_id}  表格输出", output)
+        self.assertEqual("STATE    SIZE   TASK ID / TITLE", plain.splitlines()[0])
+        self.assertIn(f"backlog  small  {task_id}\n                表格输出", plain)
+        self.assertIn(f"backlog  large  {large_id}\n                大型表格输出", plain)
+        self.assertIn("\033[90mbacklog", output)
+        self.assertIn("\033[90msmall", output)
+        self.assertIn("\033[1;35mlarge", output)
+        self.assertIn(f"\033[36m{task_id}", output)
+        self.assertIn("\033[35m表格输出", output)
         self.assertNotIn("\t", output)
 
     def test_start_moves_task_and_launches_agent_window(self) -> None:
