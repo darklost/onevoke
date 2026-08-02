@@ -81,7 +81,169 @@ project_doc_max_bytes = 65536
 
 Claude Code 的 `@` 导入不受这个限制.
 
-## 看板
+## 完整工作流
+
+Onevoke 不让多个 Agent 同时改同一份代码, 而是把工作分成两层:
+
+- 主 worktree 是控制面: 放唯一的本机看板, 由人确认优先级和验收结果.
+- 任务 worktree 是执行面: 每张已领取的代码任务独占一个分支和 worktree.
+- Codex 或 Claude 是执行 Agent: 读取规则与任务卡, 实现、验证、提交和集成.
+- Codex 审核角色是独立门禁: `PM` 检查需求完整性, `QA` 检查正确性与回归, 安全角色按风险触发.
+
+```text
+讨论需求
+   |
+   v
+backlog --确认开工--> todo --kanban start--> working
+                                            |
+                                            v
+                            任务 worktree: 实现 -> 验证 -> 提交
+                                            |
+                                            v
+                                  PM -> 安全角色 -> QA
+                                            |
+                                            v
+                              用户验收 -> 集成 -> 清理
+                                            |
+                                            v
+                                           done -> archived
+```
+
+### 1. 在对话中形成任务契约
+
+通常先直接和当前 Agent 讨论需求, 不先写一份脱离上下文的长规格. 讨论至少要落到四件事:
+
+- 任务目标: 改什么, 为什么改.
+- 预期成果: 完成后能观察到什么.
+- 验收条件: 用什么命令、行为或人工检查判定完成.
+- 不在本轮范围: 哪些相关工作明确不做, 以及原因.
+
+方向和取舍由人拍板. Agent 可以提出方案, 但不能把自己的建议写成 "用户决策". 稳定的架构、API 或长期规则最终仍写回仓库文档或项目 `AGENTS.md`, 卡片不充当永久知识库.
+
+### 2. 建卡并确认开工
+
+讨论结果明确后, Agent 运行 `kanban new`, 并立即把当前会话已确认的内容填进卡片. 新需求默认进入 `backlog`; 这表示 "已记录", 不表示 "承诺开发".
+
+```sh
+kanban new feature login-retry 登录重试
+$EDITOR kanban/backlog/20260802-login-retry-task.md
+kanban pick 20260802-login-retry-task
+```
+
+`pick` 等价于经过完整性校验的 `backlog -> todo`. 只有人明确确认开发, 或已授权的协调 Agent, 才能执行这一步. 四个契约段缺失或仍含 `<填写>` 时, 命令会拒绝迁移.
+
+任务默认建成一个 Markdown 文件. 只有需要独立 `spec.md`、分阶段计划和最终报告时才用 `--large`; 行数多本身不是大任务. 能独立领取、验收或取消的工作应拆成多张卡, 同目标、同负责人、同生命周期的内容留在一张卡内.
+
+### 3. 从 tmux 启动执行 Agent
+
+在项目的 tmux session 中启动指定任务:
+
+```sh
+kanban start 20260802-login-retry-task
+# 或
+kanban start --agent claude 20260802-login-retry-task
+```
+
+不传任务 ID 时, `kanban start` 只列 `todo` 任务供人选择, 不猜优先级. 启动时会依次完成:
+
+1. 校验 tmux、Agent 命令和任务状态.
+2. 用原子重命名领取卡片, 执行 `todo -> working`.
+3. 写入负责人和开始时间.
+4. 在当前 tmux session 新建 `kb-<slug>` window, cwd 为项目根.
+5. 要求新 Agent 先读 `kanban rules`、任务卡和项目规则, 再准备代码工作区.
+
+小任务默认使用中等推理强度, 大任务使用高推理强度. Codex 固定用 `gpt-5.6-sol`, Claude 固定用 `opus`. `kanban start` 默认以 YOLO 模式启动, 会绕过 Agent 自身的 approval 或 permission 提示; 因此只应在可信本机和已确认范围内使用.
+
+只有 `todo` 卡能启动. tmux window 创建前失败会回滚卡片; window 已创建后 Agent 认证失败、退出或中断, 卡片继续留在 `working`, 不自动重派.
+
+### 4. 隔离实现
+
+执行 Agent 先检查主工作树, 再按项目规则准备工作区:
+
+- 纯 Markdown 小改, 且默认分支干净并已同步 upstream 时, 可直接修改默认分支.
+- 其他改文件任务使用独立任务分支和 `<仓库根>/worktrees/<task-name>/`.
+- 有 `origin` 时先 fetch, 从最新远端默认分支建任务分支; 无 `origin` 时明确走本地集成路径.
+- 主 worktree 的 `kanban/` 是唯一看板. 任务 worktree 不复制、不链接、不提交它.
+
+Agent 在任务 worktree 里先找既有实现和调用链, 再做最小正确改动. 改代码前读取 `CODE-RULES.md`; 不扩写无关重构, 不覆盖用户已有修改. 验证以能直接证明本次行为的最小命令开始, 风险或影响面较大时再扩大测试范围.
+
+实施期只把关键决策、实际命令、结果、环境缺口和 commit 写回任务卡. 不复制整段会话流水. 大任务把计划写进 `plan.md`, 完成后把实际结果写进 `report.md`.
+
+### 5. 提交与同步任务分支
+
+一个独立关注点一个 commit, subject 使用简短中文动宾短语. 有可写 `origin` 时推任务分支; 无远端时保留本地提交并明确报告, 不把 "未 push" 说成 "已完成远端交付".
+
+push 被 non-fast-forward 拒绝时先 fetch、rebase、重新验证. 只允许对任务分支使用 `--force-with-lease`; 默认集成分支永不 force-push.
+
+### 6. 走审核闭环
+
+代码和验证完成后, 基于同一个集成分支 commit 作为审核 base, 按顺序运行:
+
+```text
+PM -> CSA/Hacker (按风险触发) -> QA
+```
+
+- `PM` 检查任务目标、用户决策、预期成果和范围是否完整落实.
+- `CSA` 只在不可信输入、认证授权、凭据、加密、网络、远程执行、文件写入或发布完整性等改动中触发.
+- `Hacker` 只在新增或实质改变外部攻击面、安全专项审核或用户明确要求时触发.
+- `QA` 固定最后, 检查功能、边界、回归、测试和代码质量.
+
+reviewer 的报告不是自动真理. 主代理必须回到代码、规则和可运行证据逐项核实. 只有核实成立的 `blocking`、`high`、`medium` 必修; `low`、`推荐`、`建议` 不阻塞, 但必须在闭环结束时完整展示处理结论和来源.
+
+修复只重跑当前阶段. `QA` 修复若实质改动安全相关代码, 先重跑已触发的安全角色, 再回 `QA`. 同一 base 下已通过的前序阶段沿用; rebase 改变 base 后从 `PM` 重启.
+
+全是 Markdown 的改动, 或只改一个文件且增删合计不超过 10 行时, 可按规则豁免审核. 豁免必须明确告诉人 "本次未走审核闭环" 及触发条件. 人也可明确要求跳过审核, 但接受的风险要进入交付说明.
+
+本仓库自身有特例: `CSA` 和 `Hacker` 一律 N/A, 只运行 `PM` 和 `QA`. 安装到其他项目后仍按那些项目的风险和规则判断.
+
+### 7. 验收、集成与清理
+
+审核通过不等于任务完成. 特别是 Bug 修复, 必须等人确认实际问题已解决; 未验收时卡片继续留在 `working`.
+
+验收后, Agent 将任务分支 rebase 到最新集成分支并重新验证. 若无实质冲突, 沿用已完成的审核门; 有本人手工解决的代码冲突时重新审核. 集成只允许 fast-forward 或项目规定的 PR 流程, 不产生 merge commit.
+
+直接远端集成的顺序是:
+
+1. 非 force push 最终任务 commit 到远端默认分支.
+2. fetch 远端状态.
+3. 主 worktree 用 `git merge --ff-only` 同步.
+4. 确认任务 commit 已进入集成分支.
+5. 运行 `merge-worktree-memory.py --source <worktree-path>`.
+6. 删除任务 worktree、本地任务分支和远端任务分支.
+
+主 worktree 因用户改动、本地领先或分叉而不能 fast-forward 时, 不擅自 stash、reset 或提交这些改动. 只要已确认远端集成成功, 仍可合并任务记忆并清理任务 worktree, 同时报告主树未同步的原因和恢复办法.
+
+未安装 memsearch 时, 记忆合并命令是成功的空操作. 安装后, 它会合并并去重任务 worktree 的会话记录, 清除非法 UTF-8 字节, 再允许清理 worktree.
+
+### 8. 完成卡片
+
+只有以下条件全部满足, 卡片才能从 `working` 进入 `done`:
+
+- 实现完成.
+- 验证完成, 环境缺口已记录.
+- 必要审核完成或跳过风险已明确接受.
+- 用户验收完成.
+- 代码已按项目规则集成.
+- 小任务写完完成总结; 大任务写完 `report.md`.
+
+然后填 `结果: completed`, 再迁移:
+
+```sh
+kanban move 20260802-login-retry-task done
+kanban list done
+```
+
+`done` 保留近期已验收任务. 人确认无需继续展示后再移入 `archived`. 取消、重复或明确不修的任务也可归档, 但必须记录 `cancelled`、`duplicate` 或 `wontfix` 及原因. `trash` 只用于人明确要求删除的卡片, Agent 不自动清空.
+
+### 中断与阻塞
+
+- 实现难、测试失败或暂时缺环境: 留在 `working`, 写清阻塞与解除条件, 不自动归档.
+- Agent 启动后退出: 留在 `working`, 由人决定继续、重派或归档.
+- 看板发现重复 ID、跨状态副本、损坏入口: 停止受影响任务, 保留现场, 不自行删改绕过校验.
+- 审核的 `PM` 或 `QA` 持续后端故障: 保留分支和 worktree, 停止集成, 由人决定重试、改期或承担风险跳过.
+- 工作树含用户修改: 保留修改. 若无法隔离, 报告冲突点, 不替用户整理现场.
+
+## 看板命令参考
 
 在项目主 worktree 初始化, 数据在 `kanban/`, 不进 Git:
 
@@ -100,7 +262,7 @@ kanban list working
 
 并发领取靠同一文件系统上的原子重命名, 只有 `move` 成功的那个 Agent 拿到任务. 完整规则见 `kanban rules`.
 
-## 审核
+## 审核命令参考
 
 代码任务在独立 worktree 完成、提交、验证后, 按阶段串行审核:
 
