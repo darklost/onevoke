@@ -83,35 +83,46 @@ Claude Code 的 `@` 导入不受这个限制.
 
 ## 完整工作流
 
-Onevoke 不让多个 Agent 同时改同一份代码, 而是把工作分成两层:
+Onevoke 把需求讨论和任务执行分开. 人始终保留一个需求会话, 用高推理强度模型逐项定方案; 已定案的任务交给独立 tmux window 执行, 原会话立即进入下一轮讨论.
 
-- 主 worktree 是控制面: 放唯一的本机看板, 由人确认优先级和验收结果.
+- 需求会话是决策面: 使用 Plan mode 明确需求、方案、验收条件和范围.
+- 主 worktree 是协调面: 放唯一的本机看板, 由人确认任务进入 `todo`.
 - 任务 worktree 是执行面: 每张已领取的代码任务独占一个分支和 worktree.
 - Codex 或 Claude 是执行 Agent: 读取规则与任务卡, 实现、验证、提交和集成.
 - Codex 审核角色是独立门禁: `PM` 检查需求完整性, `QA` 检查正确性与回归, 安全角色按风险触发.
 
 ```text
-讨论需求
-   |
-   v
-backlog --确认开工--> todo --kanban start--> working
-                                            |
-                                            v
-                            任务 worktree: 实现 -> 验证 -> 提交
-                                            |
-                                            v
-                                  PM -> 安全角色 -> QA
-                                            |
-                                            v
-                              用户验收 -> 集成 -> 清理
-                                            |
-                                            v
-                                           done -> archived
+需求会话                                  tmux 协调与任务窗口
+   |                                               |
+ /new                                             |
+   |                                               |
+ Plan mode: 讨论需求与方案                         |
+   |                                               |
+ 退出 Plan mode                                   |
+   |                                               |
+ Agent: kanban new -> backlog                     |
+   |                                               |
+   +-------------------------------------> "开始任务卡 <task-id>"
+   |                                      pick -> todo -> start -> working
+   |                                               |
+ /new -> Plan mode -> 讨论下一项                   +-> 实现 -> 审核 -> 验收
+                                                   +-> 集成 -> done
 ```
 
-### 1. 在对话中形成任务契约
+### 1. 新建计划会话
 
-通常先直接和当前 Agent 讨论需求, 不先写一份脱离上下文的长规格. 讨论至少要落到四件事:
+每轮从一个干净会话开始. 创建新会话后立即进入 Plan mode, 让 Agent 先分析和提问, 不直接改文件.
+
+需求讨论使用高推理强度模型:
+
+- Codex: `gpt-5.6-xhigh`.
+- Claude: `opus-xhigh`.
+
+高推理强度只用于需求澄清和方案决策. 后续 `kanban start` 会按任务规模选择执行模型和推理强度, 不必让计划会话继续承担实现.
+
+### 2. 在 Plan mode 中确定方案
+
+在 Plan mode 中和 Agent 反复讨论, 直到实现方向、边界和验收方式都明确. 不先写一份脱离上下文的长规格, 但讨论至少要落到四件事:
 
 - 任务目标: 改什么, 为什么改.
 - 预期成果: 完成后能观察到什么.
@@ -120,29 +131,38 @@ backlog --确认开工--> todo --kanban start--> working
 
 方向和取舍由人拍板. Agent 可以提出方案, 但不能把自己的建议写成 "用户决策". 稳定的架构、API 或长期规则最终仍写回仓库文档或项目 `AGENTS.md`, 卡片不充当永久知识库.
 
-### 2. 建卡并确认开工
+方案未确定时继续留在 Plan mode, 不建任务卡. 只有方案细节已定、四项契约可直接写清时才退出 Plan mode.
 
-讨论结果明确后, Agent 运行 `kanban new`, 并立即把当前会话已确认的内容填进卡片. 新需求默认进入 `backlog`; 这表示 "已记录", 不表示 "承诺开发".
+### 3. 退出 Plan mode 并创建任务卡
+
+退出 Plan mode 后, 明确让当前 Agent 使用 `kanban new` 创建任务卡. Agent 必须基于刚完成的讨论填完整卡片, 不能只生成带 `<填写>` 的空模板.
 
 ```sh
 kanban new feature login-retry 登录重试
-$EDITOR kanban/backlog/20260802-login-retry-task.md
-kanban pick 20260802-login-retry-task
 ```
 
-`pick` 等价于经过完整性校验的 `backlog -> todo`. 只有人明确确认开发, 或已授权的协调 Agent, 才能执行这一步. 四个契约段缺失或仍含 `<填写>` 时, 命令会拒绝迁移.
+新卡片先进入 `backlog`; 这表示 "方案已记录", 还未进入执行队列. Agent 创建后应返回任务 ID, 并确认任务目标、用户决策、预期成果、验收条件、威胁模型和不在本轮范围均已填写.
 
 任务默认建成一个 Markdown 文件. 只有需要独立 `spec.md`、分阶段计划和最终报告时才用 `--large`; 行数多本身不是大任务. 能独立领取、验收或取消的工作应拆成多张卡, 同目标、同负责人、同生命周期的内容留在一张卡内.
 
-### 3. 从 tmux 启动执行 Agent
+### 4. 在单独的 tmux window 启动任务
 
-在项目的 tmux session 中启动指定任务:
+切换到专门用于协调任务的 tmux window. 推荐直接告诉协调 Agent:
+
+```text
+开始任务卡 20260802-login-retry-task
+```
+
+协调 Agent 应先读 `kanban rules` 和卡片, 再依次执行 `pick` 和 `start`. 也可手动运行等价命令:
 
 ```sh
+kanban pick 20260802-login-retry-task
 kanban start 20260802-login-retry-task
 # 或
 kanban start --agent claude 20260802-login-retry-task
 ```
+
+`pick` 会执行带完整性校验的 `backlog -> todo`. 卡片仍有缺失或 `<填写>` 时会拒绝, 此时回需求会话补清楚, 不绕过门禁.
 
 不传任务 ID 时, `kanban start` 只列 `todo` 任务供人选择, 不猜优先级. 启动时会依次完成:
 
@@ -156,7 +176,20 @@ kanban start --agent claude 20260802-login-retry-task
 
 只有 `todo` 卡能启动. tmux window 创建前失败会回滚卡片; window 已创建后 Agent 认证失败、退出或中断, 卡片继续留在 `working`, 不自动重派.
 
-### 4. 隔离实现
+### 5. 回到需求会话讨论下一项
+
+任务启动成功后, 不在协调 window 等它完成. 回到刚才讨论需求的会话, 执行 `/new` 创建干净上下文, 再次进入 Plan mode, 用 `gpt-5.6-xhigh` 或 `opus-xhigh` 讨论下一个需求.
+
+此时形成稳定流水线:
+
+- 需求会话串行做决策, 每次只讨论一个需求.
+- 每个已定案任务在独立 tmux window 和 worktree 中执行.
+- 看板显示所有任务处于 `backlog`、`todo`、`working`、`done` 中的哪个阶段.
+- 人只在方案确认、任务优先级、审核风险和最终验收处介入.
+
+不要在新会话继续携带上一项实现细节. 上一项的契约已在任务卡, 执行状态已在看板, 实现 Agent 会独立完成后续链路.
+
+### 6. 隔离实现
 
 执行 Agent 先检查主工作树, 再按项目规则准备工作区:
 
@@ -169,13 +202,13 @@ Agent 在任务 worktree 里先找既有实现和调用链, 再做最小正确�
 
 实施期只把关键决策、实际命令、结果、环境缺口和 commit 写回任务卡. 不复制整段会话流水. 大任务把计划写进 `plan.md`, 完成后把实际结果写进 `report.md`.
 
-### 5. 提交与同步任务分支
+### 7. 提交与同步任务分支
 
 一个独立关注点一个 commit, subject 使用简短中文动宾短语. 有可写 `origin` 时推任务分支; 无远端时保留本地提交并明确报告, 不把 "未 push" 说成 "已完成远端交付".
 
 push 被 non-fast-forward 拒绝时先 fetch、rebase、重新验证. 只允许对任务分支使用 `--force-with-lease`; 默认集成分支永不 force-push.
 
-### 6. 走审核闭环
+### 8. 走审核闭环
 
 代码和验证完成后, 基于同一个集成分支 commit 作为审核 base, 按顺序运行:
 
@@ -196,7 +229,7 @@ reviewer 的报告不是自动真理. 主代理必须回到代码、规则和可
 
 本仓库自身有特例: `CSA` 和 `Hacker` 一律 N/A, 只运行 `PM` 和 `QA`. 安装到其他项目后仍按那些项目的风险和规则判断.
 
-### 7. 验收、集成与清理
+### 9. 验收、集成与清理
 
 审核通过不等于任务完成. 特别是 Bug 修复, 必须等人确认实际问题已解决; 未验收时卡片继续留在 `working`.
 
@@ -215,7 +248,7 @@ reviewer 的报告不是自动真理. 主代理必须回到代码、规则和可
 
 未安装 memsearch 时, 记忆合并命令是成功的空操作. 安装后, 它会合并并去重任务 worktree 的会话记录, 清除非法 UTF-8 字节, 再允许清理 worktree.
 
-### 8. 完成卡片
+### 10. 完成卡片
 
 只有以下条件全部满足, 卡片才能从 `working` 进入 `done`:
 
@@ -249,14 +282,23 @@ kanban list done
 
 ```sh
 kanban init
-kanban new feature login-retry 登录重试              # 在 backlog/ 生成卡片
-$EDITOR kanban/backlog/20260802-login-retry-task.md  # 填掉 <填写> 占位
+```
+
+推荐由计划会话中的 Agent 建卡. 对 Agent 说 "用 kanban new 创建任务卡", Agent 会运行 `new` 并基于当前讨论填完整内容:
+
+```sh
+kanban new feature login-retry 登录重试
+```
+
+然后在 tmux 协调 window 对 Agent 说 "开始任务卡 20260802-login-retry-task". Agent 会执行:
+
+```sh
 kanban pick 20260802-login-retry-task
-kanban start                                         # 选一张 todo 卡片启动 Agent
+kanban start 20260802-login-retry-task
 kanban list working
 ```
 
-编辑那一步不能跳过: 新卡片的任务目标、预期成果、验收条件和不在本轮范围都是 `<填写>` 占位, `move ... todo` 会拒绝并列出缺哪几项.
+如果人手动运行 `kanban new`, 则还要用编辑器填掉模板内全部 `<填写>` 占位. Agent 驱动的推荐流程会在建卡时完成这一步. 无论哪种方式, `pick` 都会拒绝契约不完整的卡片并列出缺失项.
 
 状态流转单向: `backlog -> todo -> working -> done -> archived`. 每次迁移由命令校验文档完整性 — 进 `todo` 要有上述四项, 进 `done` 要有完成总结或 `report.md`.
 
