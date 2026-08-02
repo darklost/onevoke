@@ -481,7 +481,7 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
     rows.sort(key=lambda row: STATES.index(row[0]))
     headers = ("STATE", "SIZE", "TIME")
     widths = [
-        max(len(header), *(len(row[index]) for row in rows))
+        max([len(header), *(len(row[index]) for row in rows)])
         for index, header in enumerate(headers)
     ]
     use_color = "NO_COLOR" not in os.environ and (
@@ -505,6 +505,18 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
             "task": "96", "title": "95",
         }
     )
+    if args.mobile:
+        for index, row in enumerate(rows):
+            if index:
+                print()
+            print(
+                f"{color(row[0], palette[row[0]])}  "
+                f"{color(row[1], palette[row[1]])}  {row[2]}"
+            )
+            print(color(row[3], palette["task"]))
+            print(color(row[4], palette["title"]))
+        return
+
     heading = "  ".join(f"{header:<{width}}" for header, width in zip(headers, widths))
     print(color(heading + "  TASK ID / TITLE", "1"))
     print("  ".join("-" * width for width in widths) + "  ---------------")
@@ -675,6 +687,7 @@ def parser() -> argparse.ArgumentParser:
 
     list_parser = commands.add_parser("list", aliases=["ls"], help="列出任务")
     list_parser.add_argument("state", nargs="?", choices=STATES)
+    list_parser.add_argument("--mobile", action="store_true", help="使用竖屏手机布局")
 
     show_parser = commands.add_parser("show", help="输出入口任务文档")
     show_parser.add_argument("task")

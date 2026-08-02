@@ -226,6 +226,21 @@ printf '%s\\n' '@9'
         self.assertIn("\033[95m表格输出", output)
         self.assertNotIn("\t", output)
 
+    def test_list_mobile_formats_each_task_as_vertical_block(self) -> None:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-list-mobile-task"
+        self.run_command("new", "chore", "list-mobile", "手机竖屏输出")
+
+        output = self.run_command("list", "--mobile", "backlog").stdout
+
+        self.assertEqual(
+            ["backlog  small  -", task_id, "手机竖屏输出"],
+            output.splitlines(),
+        )
+
+    def test_list_accepts_empty_state(self) -> None:
+        self.assertEqual("", self.run_command("list", "--mobile", "done").stdout)
+        self.assertIn("STATE", self.run_command("list", "done").stdout)
+
     def test_list_uses_document_mtime_for_legacy_done_task(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-legacy-done-task"
         task = self.root / "done" / f"{task_id}.md"
