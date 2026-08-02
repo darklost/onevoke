@@ -447,23 +447,26 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
         return f"\033[{code}m{text}\033[0m" if use_color else text
 
     light_background = os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1] in {"7", "15"}
-    state_colors = {
-        "backlog": "30" if light_background else "90",
-        "todo": "33",
-        "working": "34" if light_background else "36",
-        "done": "32",
-        "archived": "35" if light_background else "34",
-        "trash": "31",
-    }
+    palette = (
+        {
+            "backlog": "30", "todo": "33", "working": "34", "done": "32",
+            "archived": "35", "trash": "31", "small": "30", "large": "1;35",
+            "task": "34", "title": "35",
+        }
+        if light_background
+        else {
+            "backlog": "90", "todo": "93", "working": "96", "done": "92",
+            "archived": "94", "trash": "91", "small": "90", "large": "1;95",
+            "task": "96", "title": "95",
+        }
+    )
     heading = "  ".join(f"{header:<{width}}" for header, width in zip(headers, widths))
     print(color(heading + "  TASK ID / TITLE", "1"))
     print("  ".join("-" * width for width in widths) + "  ---------------")
     for row in rows:
-        state = color(f"{row[0]:<{widths[0]}}", state_colors[row[0]])
-        size_color = "1;35" if row[1] == "large" else ("30" if light_background else "90")
-        size = color(f"{row[1]:<{widths[1]}}", size_color)
-        task_color = "34" if light_background else "36"
-        print(f"{state}  {size}  {color(row[2], task_color)}  {color(row[3], '35')}")
+        state = color(f"{row[0]:<{widths[0]}}", palette[row[0]])
+        size = color(f"{row[1]:<{widths[1]}}", palette[row[1]])
+        print(f"{state}  {size}  {color(row[2], palette['task'])}  {color(row[3], palette['title'])}")
 
 
 def command_show(args: argparse.Namespace, root: Path) -> None:

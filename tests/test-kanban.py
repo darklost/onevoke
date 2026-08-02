@@ -173,23 +173,35 @@ printf '%s\\n' '@9'
         self.assertIn(f"backlog  large  {large_id}  大型表格输出", plain)
         self.assertIn("\033[90mbacklog", output)
         self.assertIn("\033[90msmall", output)
-        self.assertIn("\033[1;35mlarge", output)
-        self.assertIn(f"\033[36m{task_id}", output)
-        self.assertIn("\033[35m表格输出", output)
+        self.assertIn("\033[1;95mlarge", output)
+        self.assertIn(f"\033[96m{task_id}", output)
+        self.assertIn("\033[95m表格输出", output)
         self.assertNotIn("\t", output)
 
-    def test_list_uses_light_background_colors(self) -> None:
-        task_id = f"{datetime.now().strftime('%Y%m%d')}-list-light-task"
-        self.run_command("new", "chore", "list-light", "浅色背景")
+    def test_list_adapts_all_colors_to_background(self) -> None:
+        today = datetime.now().strftime("%Y%m%d")
+        for state in STATES:
+            (self.root / state / f"{today}-list-{state}-task.md").write_text(
+                f"# 状态 {state}\n", encoding="utf-8"
+            )
         self.env.pop("NO_COLOR", None)
         self.env["CLICOLOR_FORCE"] = "1"
+
+        self.env["COLORFGBG"] = "15;0"
+        dark = self.run_command("list").stdout
         self.env["COLORFGBG"] = "0;15"
+        light = self.run_command("list").stdout
 
-        output = self.run_command("list", "backlog").stdout
-
-        self.assertIn("\033[30mbacklog", output)
-        self.assertIn("\033[30msmall", output)
-        self.assertIn(f"\033[34m{task_id}", output)
+        for state, code in zip(STATES, ("90", "93", "96", "92", "94", "91")):
+            self.assertIn(f"\033[{code}m{state}", dark)
+        for state, code in zip(STATES, ("30", "33", "34", "32", "35", "31")):
+            self.assertIn(f"\033[{code}m{state}", light)
+        self.assertIn("\033[90msmall", dark)
+        self.assertIn(f"\033[96m{today}", dark)
+        self.assertIn("\033[95m状态", dark)
+        self.assertIn("\033[30msmall", light)
+        self.assertIn(f"\033[34m{today}", light)
+        self.assertIn("\033[35m状态", light)
 
     def test_start_moves_task_and_launches_agent_window(self) -> None:
         task_id, task = self.make_todo("start-direct")
