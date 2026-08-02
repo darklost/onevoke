@@ -18,6 +18,7 @@ COMMAND = Path(
 INSTALLER = PROJECT_ROOT / "install.sh"
 RULES = PROJECT_ROOT / "rules" / "KANBAN-RULES.md"
 AGENT_RULES = PROJECT_ROOT / "rules" / "SOLO-AGENTS.md"
+REVIEW_RULES = PROJECT_ROOT / "rules" / "CODEX-REVIEW-RULES.md"
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
 
 
@@ -385,6 +386,10 @@ printf '%s\\n' '@9'
         self.assertEqual(
             AGENT_RULES.read_bytes(),
             (install_home / ".agents" / "SOLO-AGENTS.md").read_bytes(),
+        )
+        self.assertEqual(
+            REVIEW_RULES.read_bytes(),
+            (install_home / ".agents" / "CODEX-REVIEW-RULES.md").read_bytes(),
         )
 
         output = subprocess.run(
