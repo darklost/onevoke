@@ -1,6 +1,6 @@
 # Codex 审核规则
 
-本文件是 `~/.agents/SOLO-AGENTS.md`「Git 工作流」的审核环节契约, 装在 `~/.agents/CODEX-REVIEW-RULES.md`. 优先级与 `SOLO-AGENTS.md` 同级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件.
+本文件是 `~/.agents/GIT-RULES.md`「Codex 审核」的完整契约, 装在 `~/.agents/CODEX-REVIEW-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `SOLO-AGENTS.md`.
 
 ## 目标与边界
 
@@ -13,10 +13,11 @@
 
 ## 前置条件与执行
 
-- 豁免条件: 任务恰改 1 个文件, 且相对审核 base 的新增与删除代码行合计不超 10 行. 唯一文件是 `*.md` 或 `*.markdown` 时代码行按 0 计; 其他文件全部新增与删除行均为代码行, 以 `git diff --numstat <base>..<commit>` 为准. 二进制文件或拿不到数字时不得豁免; 用户明确要求审核时不得豁免.
+- 豁免条件, 满足其一即可: (1) 相对审核 base 的全部改动文件都是 `*.md` 或 `*.markdown`, 不限文件数与行数; (2) 任务恰改 1 个文件, 且相对审核 base 的新增与删除行合计不超 10 行, 以 `git diff --numstat <base>..<commit>` 为准. 二进制文件, 拿不到数字或用户明确要求审核时一律不得豁免.
 - 走豁免路径必须在集成前明确告知用户"本次未走审核闭环", 并写出触发的豁免条件 (改了哪个文件, 新增与删除行数). 禁静默跳过. 用户随后要求审核时照常执行完整流程.
+- 本机没有可用的 Codex CLI 或 `~/.local/bin/codex-review.sh` 时无法审核: 明确告知用户"本机未装 Codex CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好 Codex CLI 后重试`、`2. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`、`3. 停止集成`. 禁自行跳过, 禁降级到其他 reviewer.
 - 审核前, 把审核 base 以来全部任务改动按关注点提交, 保持 worktree 无未提交或未跟踪文件.
-- 审核 base: 专用任务分支为该分支最近一次基于默认集成分支创建或 rebase 时所基于的那个集成分支 commit 的完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变; rebase 后 base 更新为新的所基于 commit, 是否重审按「集成与清理」一次性门规则执行.
+- 审核 base: 专用任务分支为该分支最近一次基于默认集成分支创建或 rebase 时所基于的那个集成分支 commit 的完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变; rebase 后 base 更新为新的所基于 commit, 是否重审按 `~/.agents/GIT-RULES.md`「集成与清理」的一次性门规则执行.
 标准审核三阶段串行, `QA` 固定在最后. 阶段流转以本图为准, 每次修复只重跑当前阶段:
 
 ```text
@@ -35,9 +36,20 @@
    审核完成 --> 进集成流程
 ```
 
-- 必修门槛: 全部角色的 finding 按 blocking、high、medium、low 分级, 只有经主代理核实认可的 blocking、high、medium 才必须修复. low 与建议类不阻塞, 按「审核结论采纳后」规则写明不修理由.
+- 分级: 全部角色的输出按下表六档标注, 缺级视为无效结论, 由主代理补判.
+
+| 档位 | 含义 | 是否必修 |
+|---|---|---|
+| `blocking` | 目标未达成, 或改动导致数据损坏, 安全失效, 主流程不可用 | 是 |
+| `high` | 常见路径上必然出错或回归, 触发条件明确 | 是 |
+| `medium` | 特定条件下出错, 或契约, 边界, 错误处理有真实缺陷 | 是 |
+| `low` | 确实是缺陷, 但触发罕见且后果可忽略 | 否 |
+| `推荐` | 不是缺陷, 但按项目规则或既有约定应当改的做法 | 否 |
+| `建议` | 可选改进, 取舍由负责人决定 | 否 |
+
+- 必修门槛: 只有经主代理核实认可的 `blocking`、`high`、`medium` 才必须修复. `low`、`推荐`、`建议` 一律不阻塞审核和集成, 按「审核结论采纳后」规则写明处理结论.
 - 安全角色触发条件: `CSA` 仅在改动涉及不可信输入、认证授权、凭据、加密、网络协议、远程执行、由不可信输入决定的文件写入、安装更新或发布完整性时跑. `Hacker` 仅在新增或实质改变外部攻击面、执行安全专项审核或用户明确要求时跑.
-- 第二阶段只在实际运行的 `CSA` 或 `Hacker` 返回符合角色提示门槛的实质 finding 时才交用户决策, 选项至少为 `1. 修复并重审`、`2. 确认结果并通过`、`3. 停止集成`. 禁把 speculative、low 或纯 defense-in-depth advisory 提交用户决策.
+- 第二阶段只在实际运行的 `CSA` 或 `Hacker` 返回符合角色提示门槛的实质 finding 时才交用户决策, 选项至少为 `1. 修复并重审`、`2. 确认结果并通过`、`3. 停止集成`. 禁把 `low`、`推荐`、`建议` 或纯 defense-in-depth advisory 提交用户决策.
 - 每个角色必须调 `~/.local/bin/codex-review.sh <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 禁直接调 Codex CLI 绕过 wrapper. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
 - 一次完整审核中实际运行的角色必须用相同 `CWD`、base 与 task context. 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (上条安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. base 改变则全部结论失效, 从第一阶段重启. task context 是权威需求契约: 短任务可直接传单个字符串, 长任务用可读的绝对 spec 路径. 各角色第 6 参数可传 review context.
 - 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录, 禁混入日志、spec 或其他文件. 本轮审核通过、用户完成第二阶段决策或本轮终止后清理该目录; 需保留诊断先向用户说明. wrapper 自身以 `--sandbox read-only` 和 `--ephemeral` 跑 Codex, 结束时校验 worktree 未被改动; 禁改其 sandbox、权限或工具参数绕过门禁.

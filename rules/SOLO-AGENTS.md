@@ -3,10 +3,18 @@
 ## 适用范围与优先级
 
 - 跨项目默认规则, 装在 `~/.agents/SOLO-AGENTS.md`. 非用户自己的 `~/.agents/AGENTS.md`, 不互相覆盖.
-- 优先级高到低: 当前任务明确用户指令 > 离目标文件最近项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件.
+- 本文件是规则集入口, 只放通用条款, 专项规则拆在下列分册, 用到哪份读哪份:
+
+| 分册 | 何时读 |
+|---|---|
+| `~/.agents/GIT-RULES.md` | 建分支, 提交, push, 审核, 集成前 |
+| `~/.agents/CODEX-REVIEW-RULES.md` | 触发审核前 |
+| `~/.agents/CODE-RULES.md` | 改代码前 |
+| `~/.agents/KANBAN-RULES.md` | 操作全局文件看板前, 用 `kanban rules` 读取 |
+
+- 优先级高到低: 当前任务明确用户指令 > 离目标文件最近项目级 `AGENTS.md` 或 `CLAUDE.md` > 上表各分册 > 本文件. 本文件是兜底默认值, 分册与本文件冲突时从分册.
 - 同目录 `AGENTS.md` 与 `CLAUDE.md` 冲突且用户指令未消解时, 停止受影响操作, 问用户.
-- 「Git 工作流」节只适用 Git 仓库. 非 Git 目录无分支, worktree, 审核, 集成, 直接改文件.
-- 操作全局文件看板遵循 `~/.agents/KANBAN-RULES.md`; 开始前 `kanban rules` 读取.
+- 「Git 工作流」及其分册只适用 Git 仓库. 非 Git 目录无分支, worktree, 审核, 集成, 直接改文件.
 
 ## 交流与格式
 
