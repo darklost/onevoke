@@ -9,7 +9,7 @@ readonly MAX_RUNTIME_SECONDS="${CODEX_REVIEW_MAX_RUNTIME_SECONDS:-1800}"
 readonly CODEX_BIN="${CODEX_REVIEW_BIN:-codex}"
 readonly MODEL="${CODEX_REVIEW_MODEL:-gpt-5.6-sol}"
 readonly REASONING_EFFORT="${CODEX_REVIEW_REASONING_EFFORT:-high}"
-readonly CODEX_REVIEW_HOME="${CODEX_REVIEW_HOME:-$HOME/.codex-review}"
+readonly CODEX_REVIEW_HOME="${CODEX_HOME:-$HOME/.codex}"
 
 usage() {
   echo "Usage: codex-review.sh <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]" >&2
@@ -79,7 +79,7 @@ TMP_ROOT=$(cd "${TMPDIR:-/tmp}" && pwd -P)
   fail "Codex review home is not readable and writable: $CODEX_REVIEW_HOME"
 CODEX_STATE_ROOT=$(cd "$CODEX_REVIEW_HOME" && pwd -P)
 readonly CODEX_STATE_ROOT
-CODEX_SESSION_HOME="$CODEX_STATE_ROOT/home"
+CODEX_SESSION_HOME="$HOME"
 [[ -d "$CODEX_SESSION_HOME" && -r "$CODEX_SESSION_HOME" && -w "$CODEX_SESSION_HOME" ]] ||
   fail "Codex session home is not readable and writable: $CODEX_SESSION_HOME"
 readonly CODEX_SESSION_HOME
