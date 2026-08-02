@@ -290,6 +290,26 @@ def result_from(text: str) -> str:
     return match.group(1) if match else ""
 
 
+def metadata_from(text: str, name: str) -> str:
+    match = re.search(rf"(?m)^- {re.escape(name)}:[ \t]*(.*?)[ \t]*$", text)
+    return match.group(1) if match else ""
+
+
+def completion_metadata(text: str) -> str:
+    value = datetime.now().strftime("%Y-%m-%d %H:%M")
+    matches = list(re.finditer(r"(?m)^- 完成时间:.*$", text))
+    if len(matches) == 1:
+        return re.sub(r"(?m)^- 完成时间:.*$", f"- 完成时间: {value}", text, count=1)
+    if matches:
+        raise KanbanError("任务文档缺少唯一元数据字段: 完成时间")
+    started = list(re.finditer(r"(?m)^- 开始时间:.*$", text))
+    if len(started) != 1:
+        raise KanbanError("任务文档缺少唯一元数据字段: 开始时间")
+    return re.sub(
+        r"(?m)^(- 开始时间:.*)$", rf"\1\n- 完成时间: {value}", text, count=1
+    )
+
+
 def validate_ready(entry: Entry, text: str) -> None:
     missing = []
     for heading in READY_SECTIONS:
@@ -331,6 +351,7 @@ def render_contract(title: str, task_type: str) -> str:
 - 创建时间: {created}
 - 负责人:
 - 开始时间:
+- 完成时间:
 - 任务分支:
 - 结果:
 
@@ -430,11 +451,19 @@ def select_todo(board: Board, task: Optional[str]) -> Entry:
 
 def command_list(args: argparse.Namespace, root: Path) -> None:
     board = load_board(root)
-    rows = [
-        (entry.state, entry.kind, entry.task_id, title_from(read_document(entry)))
-        for entry in selected_entries(board.entries, args.state)
-    ]
-    headers = ("STATE", "SIZE")
+    rows = []
+    for entry in selected_entries(board.entries, args.state):
+        text = read_document(entry)
+        name = "开始时间" if entry.state == "working" else "完成时间"
+        timestamp = metadata_from(text, name) if entry.state in {"working", "done"} else ""
+        if entry.state == "done" and not timestamp:
+            timestamp = datetime.fromtimestamp(entry.document.stat().st_mtime).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        rows.append(
+            (entry.state, entry.kind, timestamp or "-", entry.task_id, title_from(text))
+        )
+    headers = ("STATE", "SIZE", "TIME")
     widths = [
         max(len(header), *(len(row[index]) for row in rows))
         for index, header in enumerate(headers)
@@ -466,7 +495,11 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
     for row in rows:
         state = color(f"{row[0]:<{widths[0]}}", palette[row[0]])
         size = color(f"{row[1]:<{widths[1]}}", palette[row[1]])
-        print(f"{state}  {size}  {color(row[2], palette['task'])}  {color(row[3], palette['title'])}")
+        timestamp = f"{row[2]:<{widths[2]}}"
+        print(
+            f"{state}  {size}  {timestamp}  "
+            f"{color(row[3], palette['task'])}  {color(row[4], palette['title'])}"
+        )
 
 
 def command_show(args: argparse.Namespace, root: Path) -> None:
@@ -489,6 +522,19 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
     if entry.path.exists() or not target.exists():
         raise KanbanError("迁移后状态校验失败, 请保留现场")
     document = target if entry.kind == "small" else target / "spec.md"
+    if target_state == "done":
+        updated = completion_metadata(text)
+        try:
+            document.write_text(updated, encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            try:
+                document.write_text(text, encoding="utf-8")
+                target.rename(entry.path)
+            except (OSError, UnicodeError) as rollback_error:
+                raise KanbanError(
+                    f"记录完成时间失败且回滚失败; 卡片保留在 done: {error}; {rollback_error}"
+                ) from error
+            raise KanbanError(f"记录完成时间失败: {error}") from error
     return Entry(entry.task_id, target_state, target, document, entry.kind)
 
 

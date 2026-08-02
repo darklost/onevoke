@@ -133,6 +133,10 @@ printf '%s\\n' '@9'
         self.run_command("move", large_id, "working")
         spec = self.root / "working" / large_id / "spec.md"
         self.complete(spec)
+        spec.write_text(
+            spec.read_text(encoding="utf-8").replace("- 完成时间:\n", "", 1),
+            encoding="utf-8",
+        )
         self.run_command("move", large_id, "done", succeeds=False)
         (spec.parent / "report.md").write_text("# 完成报告\n\n验证通过.\n", encoding="utf-8")
         self.run_command("move", large_id, "done")
@@ -140,6 +144,16 @@ printf '%s\\n' '@9'
         listing = self.run_command("list", "done").stdout
         self.assertIn(small_id, listing)
         self.assertIn(large_id, listing)
+        self.assertRegex(listing, r"done\s+small\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
+        completed = self.root / "done" / small.name
+        self.assertRegex(
+            completed.read_text(encoding="utf-8"),
+            r"(?m)^- 完成时间: \d{4}-\d{2}-\d{2} \d{2}:\d{2}$",
+        )
+        self.assertIn(
+            "- 完成时间: ",
+            (self.root / "done" / large_id / "spec.md").read_text(encoding="utf-8"),
+        )
         self.assertEqual("ok: 2 tasks\n", self.run_command("check").stdout)
 
     def test_pick_moves_only_ready_backlog_task_to_todo(self) -> None:
@@ -168,15 +182,26 @@ printf '%s\\n' '@9'
         output = self.run_command("list", "backlog").stdout
         plain = re.sub(r"\033\[[0-9;]*m", "", output)
 
-        self.assertEqual("STATE    SIZE   TASK ID / TITLE", plain.splitlines()[0])
-        self.assertIn(f"backlog  small  {task_id}  表格输出", plain)
-        self.assertIn(f"backlog  large  {large_id}  大型表格输出", plain)
+        self.assertEqual("STATE    SIZE   TIME  TASK ID / TITLE", plain.splitlines()[0])
+        self.assertIn(f"backlog  small  -     {task_id}  表格输出", plain)
+        self.assertIn(f"backlog  large  -     {large_id}  大型表格输出", plain)
         self.assertIn("\033[90mbacklog", output)
         self.assertIn("\033[90msmall", output)
         self.assertIn("\033[1;95mlarge", output)
         self.assertIn(f"\033[96m{task_id}", output)
         self.assertIn("\033[95m表格输出", output)
         self.assertNotIn("\t", output)
+
+    def test_list_uses_document_mtime_for_legacy_done_task(self) -> None:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-legacy-done-task"
+        task = self.root / "done" / f"{task_id}.md"
+        task.write_text("# 历史任务\n", encoding="utf-8")
+        modified = datetime(2024, 1, 2, 3, 4).timestamp()
+        os.utime(task, (modified, modified))
+
+        output = self.run_command("list", "done").stdout
+
+        self.assertIn("2024-01-02 03:04", output)
 
     def test_list_adapts_all_colors_to_background(self) -> None:
         today = datetime.now().strftime("%Y%m%d")
@@ -213,7 +238,11 @@ printf '%s\\n' '@9'
         started = self.root / "working" / task.name
         text = started.read_text(encoding="utf-8")
         self.assertIn("- 负责人: codex\n", text)
-        self.assertRegex(text, r"(?m)^- 开始时间: \d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        started_at = re.search(
+            r"(?m)^- 开始时间: (\d{4}-\d{2}-\d{2} \d{2}:\d{2})$", text
+        )
+        self.assertIsNotNone(started_at)
+        self.assertIn(started_at.group(1), self.run_command("list", "working").stdout)
         tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
         self.assertEqual("new-window", tmux_args[0])
         self.assertEqual("$42:", tmux_args[tmux_args.index("-t") + 1])
