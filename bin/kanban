@@ -446,23 +446,24 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
     def color(text: str, code: str) -> str:
         return f"\033[{code}m{text}\033[0m" if use_color else text
 
+    light_background = os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1] in {"7", "15"}
     state_colors = {
-        "backlog": "90",
+        "backlog": "30" if light_background else "90",
         "todo": "33",
-        "working": "36",
+        "working": "34" if light_background else "36",
         "done": "32",
-        "archived": "34",
+        "archived": "35" if light_background else "34",
         "trash": "31",
     }
-    indent = " " * (sum(widths) + 4)
     heading = "  ".join(f"{header:<{width}}" for header, width in zip(headers, widths))
     print(color(heading + "  TASK ID / TITLE", "1"))
     print("  ".join("-" * width for width in widths) + "  ---------------")
     for row in rows:
         state = color(f"{row[0]:<{widths[0]}}", state_colors[row[0]])
-        size = color(f"{row[1]:<{widths[1]}}", "1;35" if row[1] == "large" else "90")
-        print(f"{state}  {size}  {color(row[2], '36')}")
-        print(indent + color(row[3], "35"))
+        size_color = "1;35" if row[1] == "large" else ("30" if light_background else "90")
+        size = color(f"{row[1]:<{widths[1]}}", size_color)
+        task_color = "34" if light_background else "36"
+        print(f"{state}  {size}  {color(row[2], task_color)}  {color(row[3], '35')}")
 
 
 def command_show(args: argparse.Namespace, root: Path) -> None:
