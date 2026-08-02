@@ -13,13 +13,14 @@ Onevoke - One person. Many agents.
 | `rules/CODE-RULES.md` | 架构与代码质量契约. 模块边界、依赖方向、抽象门槛、错误处理与测试要求 |
 | `rules/KANBAN-RULES.md` + `bin/kanban` | 文件看板. 任务卡片的状态流转、领取并发、文档完整性门禁 |
 | `rules/CODEX-REVIEW-RULES.md` + `bin/codex-review.sh` | 审核门禁. 三阶段规则, 与只读跑 `PM` / `QA` / `CSA` / `Hacker` 四个角色的 wrapper |
+| `rules/GROK-REVIEW-RULES.md` + `bin/grok-review.sh` | 明确指定 Grok 时使用的等价审核门禁 |
 
 `bin/merge-worktree-memory.py` 在任务集成后把 worktree 的 memsearch 记忆并回主树, 顺带清掉记忆里的非法 UTF-8 字节.
 
 ## 依赖
 
 - Python 3 (仅标准库), Git, POSIX shell
-- Codex CLI (`codex`) — 审核门禁必需
+- Codex CLI (`codex`) — 默认审核门禁必需; 使用 Grok 审核时改需 Grok CLI (`grok`)
 - tmux — `kanban start` 启动 Agent 需要
 
 memsearch 是**可选**的, 需要自己安装. 装了才适用 `SOLO-AGENTS.md` 的「记忆管理」一节; 没装时该节不适用, `merge-worktree-memory.py` 报告无事可做并以 0 退出, 集成流程可以无条件调用它.
@@ -30,7 +31,7 @@ memsearch 是**可选**的, 需要自己安装. 装了才适用 `SOLO-AGENTS.md`
 ./install.sh
 ```
 
-命令装到 `~/.local/bin/` (`kanban`, `codex-review.sh`, `merge-worktree-memory.py`), `rules/` 下全部规则装到 `~/.agents/`.
+命令装到 `~/.local/bin/` (`kanban`, `codex-review.sh`, `grok-review.sh`, `merge-worktree-memory.py`), `rules/` 下全部规则装到 `~/.agents/`.
 
 安装器**不碰** `~/.agents/AGENTS.md` — 那是你自己的全局规则, 与本仓库无关. 规则文件都由本仓库拥有, 每次安装直接覆盖.
 
@@ -297,6 +298,12 @@ codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> PM "<任�
 codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> QA "<任务目标>"
 ```
 
+明确指定 Grok 时, 先认证隔离 profile, 再把上述命令名换成 `grok-review.sh`:
+
+```sh
+GROK_HOME="$HOME/.grok-review" grok login --oauth
+```
+
 - 第一阶段 `PM` 核对实现是否完整达到任务目标
 - 第二阶段按改动风险决定是否运行 `CSA` 和 `Hacker`, 未触发标记 N/A
 - 第三阶段 `QA` 核对功能正确性、回归、测试与代码质量
@@ -304,6 +311,8 @@ codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> QA "<任�
 所有输出按 `blocking` / `high` / `medium` / `low` / `推荐` / `建议` 六档标注, 只有前三档必须修. 修复只重跑当前阶段: `PM` 的修复重跑 `PM`, 安全角色的修复重跑安全角色, `QA` 的修复只重跑 `QA` — 同一 base 下靠前阶段的结论沿用. 唯一例外是 `QA` 修复动了安全相关代码, 那要把已触发的安全角色重跑一遍. wrapper 以只读 sandbox 运行, 结束时校验 worktree 未被改动; 参数、commit 关系和工作树清洁度都在调用前校验.
 
 可调环境变量: `CODEX_REVIEW_MODEL` (默认 `gpt-5.6-sol`), `CODEX_REVIEW_REASONING_EFFORT` (默认 `high`), `CODEX_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800).
+
+Grok 对应变量为 `GROK_REVIEW_MODEL` (默认 `grok`), `GROK_REVIEW_REASONING_EFFORT` (默认 `high`), `GROK_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800), 隔离 profile 可用 `GROK_REVIEW_HOME` 覆盖.
 
 ## 开发
 

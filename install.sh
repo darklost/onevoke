@@ -13,6 +13,7 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$HOME/.local/bin" "$HOME/.agents"
 install -m 0755 "$project_dir/bin/kanban" "$HOME/.local/bin/kanban"
 install -m 0755 "$project_dir/bin/codex-review.sh" "$HOME/.local/bin/codex-review.sh"
+install -m 0755 "$project_dir/bin/grok-review.sh" "$HOME/.local/bin/grok-review.sh"
 install -m 0755 "$project_dir/bin/merge-worktree-memory.py" \
   "$HOME/.local/bin/merge-worktree-memory.py"
 

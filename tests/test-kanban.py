@@ -574,7 +574,7 @@ printf '%s\\n' '@9'
 
         command = install_home / ".local" / "bin" / "kanban"
         self.assertTrue(os.access(command, os.X_OK))
-        for name in ("codex-review.sh", "merge-worktree-memory.py"):
+        for name in ("codex-review.sh", "grok-review.sh", "merge-worktree-memory.py"):
             self.assertTrue(os.access(install_home / ".local" / "bin" / name, os.X_OK))
         # rules/ 下每份规则都必须被安装; 新增规则文件时无需改测试.
         for source in sorted(RULES_DIR.glob("*.md")):

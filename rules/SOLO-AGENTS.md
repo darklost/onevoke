@@ -9,6 +9,7 @@
 |---|---|
 | `~/.agents/GIT-RULES.md` | 建分支, 提交, push, 审核, 集成前 |
 | `~/.agents/CODEX-REVIEW-RULES.md` | 触发审核前 |
+| `~/.agents/GROK-REVIEW-RULES.md` | 用户明确指定 Grok 审核前, 替代 Codex 审核分册 |
 | `~/.agents/CODE-RULES.md` | 改代码前 |
 | `~/.agents/KANBAN-RULES.md` | 操作全局文件看板前, 用 `kanban rules` 读取 |
 

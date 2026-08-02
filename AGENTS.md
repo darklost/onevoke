@@ -8,12 +8,12 @@
 
 ## Project Structure & Module Organization
 
-- `rules/SOLO-AGENTS.md` 是发布规则的入口, 其余分册由它对应小节按需引用: `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `CODEX-REVIEW-RULES.md` 审核契约, `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
+- `rules/SOLO-AGENTS.md` 是发布规则的入口, 其余分册由它对应小节按需引用: `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `CODEX-REVIEW-RULES.md` 与 `GROK-REVIEW-RULES.md` 审核契约, `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
 - 新增分册时把引用加进 `SOLO-AGENTS.md` 对应小节即可; `install.sh` 和安装测试都遍历 `rules/*.md`, 不必改.
 - 本仓库根目录的 `AGENTS.md` 是本仓库自己的开发规则, 与 `rules/` 下的发布物是两回事, 不要混改.
 - `bin/kanban` 是 Python 3 CLI 的唯一实现, 包含看板定位、任务校验、状态迁移和命令解析.
-- `bin/codex-review.sh` 是审核 wrapper, 只读运行 Codex CLI 并输出角色报告. `bin/merge-worktree-memory.py` 在集成后合并 worktree 的 memsearch 记忆, 并清除合并结果中的非法 UTF-8 字节.
-- `tests/test-kanban.py` 使用临时目录覆盖小任务、大任务、非法迁移、无效入口隔离、归档、安装及初始化流程. `tests/test-merge-worktree-memory.py` 覆盖条目切分、哈希兼容性、去重、字节清理和原子替换. `tests/test-codex-review.py` 覆盖审核门禁的全部拒绝路径、隔离参数和篡改检测.
+- `bin/codex-review.sh` 与 `bin/grok-review.sh` 是审核 wrapper, 分别只读运行 Codex CLI 与 Grok CLI 并输出角色报告. `bin/merge-worktree-memory.py` 在集成后合并 worktree 的 memsearch 记忆, 并清除合并结果中的非法 UTF-8 字节.
+- `tests/test-kanban.py` 使用临时目录覆盖小任务、大任务、非法迁移、无效入口隔离、归档、安装及初始化流程. `tests/test-merge-worktree-memory.py` 覆盖条目切分、哈希兼容性、去重、字节清理和原子替换. `tests/test-codex-review.py` 与 `tests/test-grok-review.py` 覆盖审核门禁的全部拒绝路径、隔离参数和篡改检测.
 - 运行时创建的 `kanban/` 是本机共享数据, 不属于仓库源码, 不得提交.
 
 ## Build, Test, and Development Commands
@@ -26,13 +26,14 @@ python3 bin/kanban --help
 python3 tests/test-kanban.py
 python3 tests/test-merge-worktree-memory.py
 python3 tests/test-codex-review.py
+python3 tests/test-grok-review.py
 python3 -m py_compile bin/kanban bin/merge-worktree-memory.py tests/*.py
-sh -n install.sh && bash -n bin/codex-review.sh
+sh -n install.sh && bash -n bin/codex-review.sh bin/grok-review.sh
 ```
 
-测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; `tests/test-codex-review.py` 用假 Codex 二进制驱动, 不调用真的 CLI, 也不产生网络请求.
+测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; 两个审核测试分别用假 Codex/Grok 二进制驱动, 不调用真的 CLI, 也不产生网络请求.
 
-安装脚本把三个命令复制到 `~/.local/bin/`, 把 `rules/` 下全部规则复制到 `~/.agents/`, 不接受参数, 不读写用户的 `~/.agents/AGENTS.md`. 后续命令依次检查入口、测试当前工作树脚本和执行快速语法检查. 手工试验应设置临时 `KANBAN_DIR`, 不要污染真实看板.
+安装脚本把四个命令复制到 `~/.local/bin/`, 把 `rules/` 下全部规则复制到 `~/.agents/`, 不接受参数, 不读写用户的 `~/.agents/AGENTS.md`. 后续命令依次检查入口、测试当前工作树脚本和执行快速语法检查. 手工试验应设置临时 `KANBAN_DIR`, 不要污染真实看板.
 
 ## Coding Style & Naming Conventions
 
@@ -54,4 +55,4 @@ Shell 脚本使用 2 空格缩进, `set -eu`, 引用所有变量展开, 错误�
 
 `KANBAN_DIR` 仅用于测试、非 Git 项目或明确覆盖. 不提交 token、凭据、敏感服务地址、真实任务卡片或本机路径. 文件写入和状态迁移必须继续经过现有校验, 不得绕过 `scan()` 或 `validate_target()` 直接操作任务入口.
 
-`bin/codex-review.sh` 的只读 sandbox、commit 校验和 worktree 篡改检测是审核门禁的一部分, 不得为方便调试而放宽.
+两个审核 wrapper 的只读 sandbox、commit 校验和 worktree 篡改检测是审核门禁的一部分, 不得为方便调试而放宽.
