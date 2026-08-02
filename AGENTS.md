@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-本文件是 solo-mode 仓库自身的开发规则. 仓库对外发布的工作流规则在 `rules/`, 那四份文件是交付物, 不是本仓库的开发指引.
+本文件是 solo-mode 仓库自身的开发规则. 仓库对外发布的工作流规则在 `rules/`, 那些文件是交付物, 不是本仓库的开发指引.
 
 ## 本仓库特例
 
@@ -8,7 +8,8 @@
 
 ## Project Structure & Module Organization
 
-- `rules/SOLO-AGENTS.md` 是发布的全局工作流规则, `rules/KANBAN-RULES.md` 是发布的看板行为契约, `rules/CODEX-REVIEW-RULES.md` 是发布的审核契约, `rules/CODE-RULES.md` 是发布的架构与代码质量契约 (后两份由 `SOLO-AGENTS.md` 对应小节引用). 四者是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 它们装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
+- `rules/SOLO-AGENTS.md` 是发布规则的入口, 其余分册由它对应小节按需引用: `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `CODEX-REVIEW-RULES.md` 审核契约, `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
+- 新增分册时把引用加进 `SOLO-AGENTS.md` 对应小节即可; `install.sh` 和安装测试都遍历 `rules/*.md`, 不必改.
 - 本仓库根目录的 `AGENTS.md` 是本仓库自己的开发规则, 与 `rules/` 下的发布物是两回事, 不要混改.
 - `bin/kanban` 是 Python 3 CLI 的唯一实现, 包含看板定位、任务校验、状态迁移和命令解析.
 - `bin/codex-review.sh` 是审核 wrapper, 只读运行 Codex CLI 并输出角色报告. `bin/merge-worktree-memory.py` 在集成后合并 worktree 的 memsearch 记忆, 并清除合并结果中的非法 UTF-8 字节.

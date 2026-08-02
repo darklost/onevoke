@@ -8,7 +8,8 @@
 
 | 位置 | 作用 |
 |---|---|
-| `rules/SOLO-AGENTS.md` | 全局工作流规则. Git worktree 隔离、提交与 push 策略、集成与清理 |
+| `rules/SOLO-AGENTS.md` | 全局规则入口. 优先级、交流格式、工作原则、记忆与验证, 其余按需引用下面几份 |
+| `rules/GIT-RULES.md` | Git 工作流. worktree 隔离、提交与 push 策略、集成与清理 |
 | `rules/CODE-RULES.md` | 架构与代码质量契约. 模块边界、依赖方向、抽象门槛、错误处理与测试要求 |
 | `rules/KANBAN-RULES.md` + `bin/kanban` | 文件看板. 任务卡片的状态流转、领取并发、文档完整性门禁 |
 | `rules/CODEX-REVIEW-RULES.md` + `bin/codex-review.sh` | 审核门禁. 三阶段规则, 与只读跑 `PM` / `QA` / `CSA` / `Hacker` 四个角色的 wrapper |
@@ -29,9 +30,9 @@ memsearch 是**可选**的, 需要自己安装. 装了才适用 `SOLO-AGENTS.md`
 ./install.sh
 ```
 
-命令装到 `~/.local/bin/` (`kanban`, `codex-review.sh`, `merge-worktree-memory.py`), 规则装到 `~/.agents/` (`SOLO-AGENTS.md`, `KANBAN-RULES.md`, `CODEX-REVIEW-RULES.md`, `CODE-RULES.md`).
+命令装到 `~/.local/bin/` (`kanban`, `codex-review.sh`, `merge-worktree-memory.py`), `rules/` 下全部规则装到 `~/.agents/`.
 
-安装器**不碰** `~/.agents/AGENTS.md` — 那是你自己的全局规则, 与本仓库无关. 四份规则文件都由本仓库拥有, 每次安装直接覆盖.
+安装器**不碰** `~/.agents/AGENTS.md` — 那是你自己的全局规则, 与本仓库无关. 规则文件都由本仓库拥有, 每次安装直接覆盖.
 
 装完规则只是躺在 `~/.agents/`, **还不生效**. 接入是单独一步, 安装器不做 — 见下一节.
 
@@ -72,7 +73,7 @@ ln -s ~/.agents/SOLO-AGENTS.md ~/.codex/AGENTS.md
 
 ### 容量上限
 
-Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. `SOLO-AGENTS.md` 约 8.7 KiB, 留给项目级的还有约 23.3 KiB — 其余三份规则是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
+Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. `SOLO-AGENTS.md` 约 3.7 KiB, 留给项目级的还有约 28.3 KiB — 其余规则是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
 
 ```toml
 project_doc_max_bytes = 65536
