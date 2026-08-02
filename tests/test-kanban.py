@@ -237,6 +237,36 @@ printf '%s\\n' '@9'
 
         self.assertIn("2024-01-02 03:04", output)
 
+    def test_list_groups_states_and_sorts_each_group_by_time_descending(self) -> None:
+        today = datetime.now().strftime("%Y%m%d")
+        tasks = (
+            ("backlog", "backlog-old", "", ""),
+            ("backlog", "backlog-new", "", ""),
+            ("working", "working-old", "2024-01-01 10:00", ""),
+            ("working", "working-new", "2024-01-02 10:00", ""),
+            ("done", "done-old", "", "2024-01-03 10:00"),
+            ("done", "done-new", "", "2024-01-04 10:00"),
+        )
+        for state, slug, started, completed in tasks:
+            (self.root / state / f"{today}-{slug}-task.md").write_text(
+                f"# {slug}\n- 开始时间: {started}\n- 完成时间: {completed}\n",
+                encoding="utf-8",
+            )
+
+        output = self.run_command("list").stdout
+
+        self.assertEqual(
+            [
+                f"{today}-backlog-old-task",
+                f"{today}-backlog-new-task",
+                f"{today}-working-new-task",
+                f"{today}-working-old-task",
+                f"{today}-done-new-task",
+                f"{today}-done-old-task",
+            ],
+            re.findall(rf"{today}-[a-z-]+-task", output),
+        )
+
     def test_list_adapts_all_colors_to_background(self) -> None:
         today = datetime.now().strftime("%Y%m%d")
         for state in STATES:

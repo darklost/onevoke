@@ -477,6 +477,8 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
         rows.append(
             (entry.state, entry.kind, timestamp or "-", entry.task_id, title_from(text))
         )
+    rows.sort(key=lambda row: (row[2], row[3]), reverse=True)
+    rows.sort(key=lambda row: STATES.index(row[0]))
     headers = ("STATE", "SIZE", "TIME")
     widths = [
         max(len(header), *(len(row[index]) for row in rows))
