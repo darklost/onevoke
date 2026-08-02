@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -310,6 +311,19 @@ def completion_metadata(text: str) -> str:
     )
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as file:
+            file.write(text)
+        os.chmod(temp_path, path.stat().st_mode)
+        os.replace(temp_path, path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
 def validate_ready(entry: Entry, text: str) -> None:
     missing = []
     for heading in READY_SECTIONS:
@@ -525,10 +539,9 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
     document = target if entry.kind == "small" else target / "spec.md"
     if updated != text:
         try:
-            document.write_text(updated, encoding="utf-8")
+            write_text_atomic(document, updated)
         except (OSError, UnicodeError) as error:
             try:
-                document.write_text(text, encoding="utf-8")
                 target.rename(entry.path)
             except (OSError, UnicodeError) as rollback_error:
                 raise KanbanError(

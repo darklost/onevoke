@@ -2,6 +2,7 @@
 
 import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -184,6 +186,22 @@ printf '%s\\n' '@9'
 
         self.assertIn("缺少唯一元数据字段: 完成时间", result.stderr)
         self.assertTrue(task.exists())
+        self.assertFalse((self.root / "done" / task.name).exists())
+
+    def test_done_write_error_restores_working_task_unchanged(self) -> None:
+        task_id, task = self.make_todo("done-write-error")
+        self.run_command("move", task_id, "working")
+        task = self.root / "working" / task.name
+        self.complete(task)
+        original = task.read_text(encoding="utf-8")
+        kanban = runpy.run_path(str(COMMAND), run_name="kanban_test")
+        entry = kanban["Entry"](task_id, "working", task, task, "small")
+
+        with mock.patch.object(kanban["os"], "replace", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(kanban["KanbanError"], "记录完成时间失败"):
+                kanban["move_entry"](entry, self.root, "done")
+
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "done" / task.name).exists())
 
     def test_list_formats_aligned_table(self) -> None:
