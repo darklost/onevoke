@@ -16,9 +16,9 @@ COMMAND = Path(
     os.environ.get("KANBAN_COMMAND", PROJECT_ROOT / "bin" / "kanban")
 ).resolve()
 INSTALLER = PROJECT_ROOT / "install.sh"
-RULES = PROJECT_ROOT / "rules" / "KANBAN-RULES.md"
-AGENT_RULES = PROJECT_ROOT / "rules" / "SOLO-AGENTS.md"
-REVIEW_RULES = PROJECT_ROOT / "rules" / "CODEX-REVIEW-RULES.md"
+RULES_DIR = PROJECT_ROOT / "rules"
+RULES = RULES_DIR / "KANBAN-RULES.md"
+AGENT_RULES = RULES_DIR / "SOLO-AGENTS.md"
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
 
 
@@ -378,19 +378,16 @@ printf '%s\\n' '@9'
         self.assertEqual(0, result.returncode, result.stderr)
 
         command = install_home / ".local" / "bin" / "kanban"
-        rules = install_home / ".agents" / "KANBAN-RULES.md"
         self.assertTrue(os.access(command, os.X_OK))
-        self.assertEqual(RULES.read_bytes(), rules.read_bytes())
         for name in ("codex-review.sh", "merge-worktree-memory.py"):
             self.assertTrue(os.access(install_home / ".local" / "bin" / name, os.X_OK))
-        self.assertEqual(
-            AGENT_RULES.read_bytes(),
-            (install_home / ".agents" / "SOLO-AGENTS.md").read_bytes(),
-        )
-        self.assertEqual(
-            REVIEW_RULES.read_bytes(),
-            (install_home / ".agents" / "CODEX-REVIEW-RULES.md").read_bytes(),
-        )
+        # rules/ 下每份规则都必须被安装; 新增规则文件时无需改测试.
+        for source in sorted(RULES_DIR.glob("*.md")):
+            self.assertEqual(
+                source.read_bytes(),
+                (install_home / ".agents" / source.name).read_bytes(),
+                source.name,
+            )
 
         output = subprocess.run(
             [str(command), "rules"],
