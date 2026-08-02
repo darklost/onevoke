@@ -510,7 +510,13 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
     )
     slug = entry.task_id[9:].removesuffix("-task")
-    command = shlex.join([agent, prompt])
+    effort = "high" if entry.kind == "large" else "medium"
+    agent_args = (
+        [agent, "--model", "gpt-5.6-sol", "--config", f'model_reasoning_effort="{effort}"']
+        if args.agent == "codex"
+        else [agent, "--model", "opus", "--effort", effort]
+    )
+    command = shlex.join([*agent_args, prompt])
     try:
         moved.document.write_text(updated, encoding="utf-8")
         result = subprocess.run(

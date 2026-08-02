@@ -172,6 +172,8 @@ printf '%s\\n' '@9'
         self.assertEqual(str(self.root.resolve().parent), tmux_args[tmux_args.index("-c") + 1])
         self.assertEqual("kb-start-direct", tmux_args[tmux_args.index("-n") + 1])
         self.assertIn(str(fake_bin / "codex"), tmux_args[-1])
+        self.assertIn("--model gpt-5.6-sol", tmux_args[-1])
+        self.assertIn('model_reasoning_effort="medium"', tmux_args[-1])
         self.assertIn(task_id, tmux_args[-1])
 
     def test_start_without_task_prompts_for_todo_selection(self) -> None:
@@ -186,6 +188,26 @@ printf '%s\\n' '@9'
         self.assertTrue(first.exists())
         self.assertTrue((self.root / "working" / second.name).exists())
         self.assertIn("agent=claude", result.stdout)
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn("--model opus --effort medium", command)
+
+    def test_start_uses_high_effort_for_large_tasks(self) -> None:
+        self.install_fake_launchers()
+        for agent, expected in (
+            ("codex", '--model gpt-5.6-sol --config \'model_reasoning_effort="high"\''),
+            ("claude", "--model opus --effort high"),
+        ):
+            slug = f"large-{agent}"
+            task_id = f"{datetime.now().strftime('%Y%m%d')}-{slug}-task"
+            self.run_command("new", "--large", "chore", slug, f"大型任务 {agent}")
+            spec = self.root / "backlog" / task_id / "spec.md"
+            self.make_ready(spec)
+            self.run_command("pick", task_id)
+
+            self.run_command("start", "--agent", agent, task_id)
+
+            command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+            self.assertIn(expected, command)
 
     def test_start_failure_restores_todo_and_metadata(self) -> None:
         task_id, task = self.make_todo("rollback")

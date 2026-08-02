@@ -48,6 +48,7 @@ kanban check
 - `move` 只走本文件定义的正向迁移, 校验目标不存在及迁移后状态.
 - `pick` 将指定的 `backlog` 卡片移入 `todo`, 沿用 `todo` 完整性校验.
 - `start` 默认起 `codex`; `--agent claude` 换 Claude. 指定任务只收 `todo` 卡片; 不指定就列 `todo` 让用户按编号选.
+- `start` 按任务规模设置 Agent: 大任务用 `codex gpt-5.6-sol/high` 或 `claude opus/high`; 小任务对应使用 `medium`.
 - `start` 只在当前 tmux session 新建并切 window, 不建 session. 新 window cwd 是项目根, 名 `kb-<slug>`.
 - 进 `todo/` 前校验: 任务目标, 预期成果, 验收条件, 不在本轮范围都填了.
 - 进 `done/` 前校验 `结果: completed`; 小任务还要 `完成总结`, 大任务还要 `report.md`.
