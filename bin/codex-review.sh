@@ -79,10 +79,6 @@ TMP_ROOT=$(cd "${TMPDIR:-/tmp}" && pwd -P)
   fail "Codex review home is not readable and writable: $CODEX_REVIEW_HOME"
 CODEX_STATE_ROOT=$(cd "$CODEX_REVIEW_HOME" && pwd -P)
 readonly CODEX_STATE_ROOT
-CODEX_SESSION_HOME="$HOME"
-[[ -d "$CODEX_SESSION_HOME" && -r "$CODEX_SESSION_HOME" && -w "$CODEX_SESSION_HOME" ]] ||
-  fail "Codex session home is not readable and writable: $CODEX_SESSION_HOME"
-readonly CODEX_SESSION_HOME
 if paths_overlap "$ROOT" "$TMP_ROOT" || paths_overlap "$ROOT" "$CODEX_STATE_ROOT"; then
   fail "worktree overlaps a Codex-writable directory: $ROOT"
 fi
@@ -296,7 +292,7 @@ printf '%s\n' "$RULES" >"$PROMPT_FILE"
 : >"$ERROR_FILE"
 
 set -m
-env HOME="$CODEX_SESSION_HOME" CODEX_HOME="$CODEX_STATE_ROOT" "$CODEX_BIN" exec \
+env CODEX_HOME="$CODEX_STATE_ROOT" "$CODEX_BIN" exec \
   --cd "$ROOT" \
   --model "$MODEL" \
   --sandbox read-only \
