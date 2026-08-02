@@ -1,0 +1,11 @@
+# 本机生成的目录, 不属于仓库内容
+.memsearch/
+.code-review-graph/
+
+# 构建与系统产物
+__pycache__/
+.DS_Store
+Thumbs.db
+
+# kanban/ 不写在这里: `kanban init` 把它加进 .git/info/exclude,
+# 按 rules/KANBAN-RULES.md 不得用项目 .gitignore 传播本机看板.
