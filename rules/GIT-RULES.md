@@ -33,8 +33,10 @@
 - 远端集成路径: 在任务 worktree fetch, rebase 到最新 `origin/<默认集成分支>`, 该远端 commit 记为审核 base, 再验证和审核, 通过后进集成流程. 已 push 的任务分支审核通过后仅用 `git push --force-with-lease` 更新; lease 失败则停止, 不覆盖远端改动.
 - 本地集成路径: 无 `origin` 或用户明确要求仅本地集成时, rebase 到本地默认集成分支, 其当前 commit 记为审核 base, 再验证和审核, 通过后进集成流程.
 - 集成流程内再查默认集成分支; 若已前进, 按一次性门规则重复 rebase 和验证, 未前进才允许集成.
-- 远端直接集成用非 force 的 `git push origin <最终任务 commit>:refs/heads/<默认集成分支>`. non-fast-forward 时保持主树不变, 回同步和验证流程; 其他拒绝按项目 PR 流程处理, 无适用流程则停止并报告. push 成功后 fetch, 再在主树默认集成分支跑 `git merge --ff-only origin/<默认集成分支>`.
+- 远端直接集成用非 force 的 `git push origin <最终任务 commit>:refs/heads/<默认集成分支>`. non-fast-forward 时保持主树不变, 回同步和验证流程; 其他拒绝按项目 PR 流程处理, 无适用流程则停止并报告. push 成功后 fetch, 再在主树默认集成分支跑 `git merge --ff-only origin/<默认集成分支>`; 此处 ff 失败只报告, 按「清理」规则继续.
 - 本地直接集成在主树默认集成分支跑 `git merge --ff-only <任务分支>`, 并报告未 push; fast-forward 失败回同步和验证流程. 任何路径都不得产生 merge commit.
 - 用 PR 时先 push 当前任务分支. PR 必须说明改了什么, 为何改, 如何验证; 可见 UI 变更附截图; 测试或快照变更列实际命令. 等 CI 全通过后, 按仓库策略 squash 或 rebase 合并, 仓库未指定默认 squash. 仓库未配 CI 先问用户, 不自动合并.
-- 仅在远端直接集成成功且主树已同步, PR 已合并且主树已同步, 或本地集成完成后, 才跑 `~/.local/bin/merge-worktree-memory.py --source <worktree-path>`. 未装 `memsearch` 时该命令是空操作并正常返回, 照常执行, 不跳过也不据此报错.
+- 清理的唯一前置是任务改动已进入集成分支. 远端直接集成先 fetch 再用 `git merge-base --is-ancestor <最终任务 commit> origin/<默认集成分支>` 判定; 本地直接集成同法核对本地默认集成分支. PR 路径不用这个判定, 因为 squash 或 rebase 合并会重写 commit, 以 PR 已标记为 merged 且目标分支就是默认集成分支为准. 判不出来或判定为否时不清理, 保留 worktree 和分支并报告.
+- 主树 `git merge --ff-only` 失败不阻塞清理. 上条判定通过即照常清理, 同时向用户报告主树未同步的具体原因 (未提交改动, 本地领先, 已分叉) 和恢复办法; 禁为了同步主树擅自 stash, reset, 丢弃或提交主树里的用户改动.
+- 满足清理前置后, 先跑 `~/.local/bin/merge-worktree-memory.py --source <worktree-path>`. 未装 `memsearch` 时该命令是空操作并正常返回, 照常执行, 不跳过也不据此报错.
 - `merge-worktree-memory.py` 成功后, 删对应 worktree, 本地任务分支及仅为该 worktree 建的临时或预览 tag; 非本地集成还须删远端任务分支. 脚本失败则保留 worktree 和分支. 禁删正式发布 tag.
