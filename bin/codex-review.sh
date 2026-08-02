@@ -176,8 +176,8 @@ platform, state, error path, permission, and integration; tests and comments are
 evidence, not proof that production behavior exists. Only create requirements explicitly stated by
 the task context or logically required by an existing contract. An unspecified platform, state, or
 error path is not automatically a requirement. Do not invent requirements or expand scope.
-Summarize completion with status counts. Report each material gap with Blocking/High/Medium
-severity, confidence, exact evidence, user impact, and the smallest product change that closes it.
+Summarize completion with status counts. Report each material gap as a gate finding with its
+tier, confidence, exact evidence, user impact, and the smallest product change that closes it.
 EOF
     )
     ;;
@@ -191,9 +191,9 @@ mismatches. For every required behavior, assess controllable inputs, observable 
 deterministic assertions, isolated state, and diagnosable failures. Assess maintainability only where
 it affects this spec: clear ownership, stable contracts, change localization, coupling, duplication,
 generated-source drift, fixtures, and failure diagnostics. Recommend the cheapest effective test
-layer; missing tests alone are not a finding. Output a behavior/quality table, then only material
-Blocking/High/Medium findings with confidence, exact evidence, a concrete failure scenario, impact,
-and the smallest durable fix. State explicitly when none are found.
+layer; missing tests alone are not a finding. Output a behavior/quality table, then the gate
+findings with confidence, exact evidence, a concrete failure scenario, impact, and the smallest
+durable fix. State explicitly when none are found.
 EOF
     )
     ;;
@@ -215,10 +215,10 @@ An availability finding requires a low-cost unauthenticated or low-privilege act
 sustained outage or material resource exhaustion.
 
 Each finding must include realistic prerequisites, a complete reachable attack path, exact code
-evidence, Blocking/High/Medium severity, confidence, concrete impact, and the smallest proportionate
-remediation. Report only Observed or well-supported Inferred findings. Omit speculative,
-defense-in-depth, and merely theoretical concerns. State explicitly when no qualifying material
-code-backed vulnerability is found.
+evidence, a tier, confidence, concrete impact, and the smallest proportionate remediation. Report
+only Observed or well-supported Inferred findings. Omit speculative, defense-in-depth, and merely
+theoretical concerns. State explicitly when no qualifying material code-backed vulnerability is
+found.
 EOF
     )
     ;;
@@ -231,15 +231,35 @@ boundaries, and realistic attacker capabilities from code facts at the target co
 
 Report only distinct end-to-end exploit chains classified as Confirmed or Plausible. Each must have
 an attacker-controlled entry, realistic prerequisites, a complete exploit chain, a protected asset,
-material impact, likelihood, detectability, Critical/High/Medium threat level, confidence, and exact
-evidence. Do not assume a compromised host, OS, kernel, CSPRNG, administrator credential, or trusted
-peer or device unless the task context explicitly includes that threat. Do not duplicate the same
-root cause across scenarios. Omit Speculative, Low, defense-in-depth, generic, and infeasible
-scenarios entirely. State explicitly when no qualifying exploit chain exists.
+material impact, likelihood, detectability, a tier, confidence, and exact evidence. Do not assume a
+compromised host, OS, kernel, CSPRNG, administrator credential, or trusted peer or device unless the
+task context explicitly includes that threat. Do not duplicate the same root cause across scenarios.
+Omit Speculative, defense-in-depth, generic, and infeasible scenarios entirely. State explicitly when
+no qualifying exploit chain exists.
 EOF
     )
     ;;
 esac
+
+TIER_RULES=$(cat <<'EOF'
+Classify every reported item into exactly one tier:
+blocking  - the task goal is not met, or the change causes data loss, security failure, or an
+            unusable main flow
+high      - certain failure or regression on a common path, with a clear trigger
+medium    - real defect under a specific condition, contract, boundary, or error path
+low       - real defect whose trigger is rare and whose consequence is negligible
+recommend - not a defect, but the project's own rules or established conventions call for the change
+suggest   - optional improvement; the owner decides whether it is worth it
+
+Blocking, high, and medium are gate findings and belong in the main findings section. After the gate
+findings, always emit a section headed NON-BLOCKING that lists every low, recommend, and suggest
+item, or the single line "NON-BLOCKING: none". Non-blocking items never gate the change and must
+never be worded as required work, but they carry the same evidence bar as gate findings: exact file
+and line evidence, concrete impact or rationale, and the smallest change that would address them.
+At every tier, omit speculative, infeasible, generic, and pure defense-in-depth noise.
+EOF
+)
+readonly TIER_RULES
 
 SCOPE_RULES=$(cat <<EOF
 Review the complete code state against the task context, not merely the $BASE..$COMMIT diff, but
@@ -275,8 +295,9 @@ $ROLE_RULES
 Report a gate finding only when it identifies a violated requirement, correctness invariant, or
 safety property; a reachable behavior path; exact code evidence; concrete impact; and the smallest
 sound fix. Label each claim Observed, Inferred, or Unverifiable. Only Observed or well-supported
-Inferred claims can be Blocking/High/Medium findings. Hacker must omit Speculative and Low scenarios
-rather than retaining advisory noise.
+Inferred claims can be Blocking/High/Medium findings.
+
+$TIER_RULES
 
 Prefer exact file and line evidence. Inspect schemas, generators, and handwritten consumers before
 generated output when relevant. Use only read-only filesystem and shell operations needed to inspect
