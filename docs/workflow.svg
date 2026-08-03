@@ -1,101 +1,119 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1000" viewBox="0 0 1800 1000" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960" role="img" aria-labelledby="title description">
   <title id="title">Onevoke 工作流</title>
   <desc id="description">需求会话讨论并创建任务卡, tmux 窗口领取、执行、审核、验收和集成任务, 需求会话同时继续讨论下一项.</desc>
   <defs>
     <style>
-      .sans { font-family: "Noto Sans SC", "Hiragino Sans GB", sans-serif; }
-      .mono { font-family: "Sarasa Mono SC", "SFMono-Regular", monospace; }
-      .title { font-size: 52px; font-weight: 700; fill: #17212b; }
-      .subtitle { font-size: 24px; fill: #52606d; }
-      .lane-title { font-size: 30px; font-weight: 700; fill: #17212b; }
-      .step { font-size: 27px; font-weight: 700; fill: #17212b; }
-      .detail { font-size: 21px; fill: #52606d; }
-      .command { font-size: 21px; font-weight: 600; fill: #23313f; }
-      .arrow { fill: none; stroke: #52606d; stroke-width: 4; marker-end: url(#arrow); }
-      .handoff { fill: none; stroke: #c75b12; stroke-width: 5; marker-end: url(#arrow-orange); }
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .mono { font-family: "SFMono-Regular", "Cascadia Mono", "Noto Sans Mono", monospace; }
+      .title { font-size: 44px; font-weight: 700; fill: #18212b; }
+      .subtitle { font-size: 20px; font-weight: 400; fill: #66717d; }
+      .lane-title { font-size: 25px; font-weight: 700; fill: #18212b; }
+      .lane-note { font-size: 16px; font-weight: 500; fill: #66717d; }
+      .step { font-size: 24px; font-weight: 700; fill: #18212b; }
+      .detail { font-size: 18px; font-weight: 400; fill: #66717d; }
+      .command { font-size: 17px; font-weight: 600; fill: #344150; }
+      .arrow { fill: none; stroke: #87929e; stroke-width: 3; stroke-linecap: round; marker-end: url(#arrow); }
+      .handoff { fill: none; stroke: #d0641a; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrow-orange); }
     </style>
-    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-      <path d="M0,0 L12,6 L0,12 Z" fill="#52606d"/>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#87929e"/>
     </marker>
-    <marker id="arrow-orange" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-      <path d="M0,0 L12,6 L0,12 Z" fill="#c75b12"/>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#d0641a"/>
     </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#18212b" flood-opacity="0.07"/>
+    </filter>
   </defs>
 
-  <rect width="1800" height="1000" fill="#f7f8fa"/>
-  <text x="90" y="82" class="sans title">Onevoke 工作流</text>
-  <text x="90" y="124" class="sans subtitle">计划会话持续决策, 独立任务窗口持续交付</text>
+  <rect width="1600" height="960" fill="#f7f8fa"/>
+  <text x="72" y="69" class="sans title">Onevoke 工作流</text>
+  <text x="72" y="108" class="sans subtitle">计划会话持续决策, 独立任务窗口持续交付</text>
+  <line x1="72" y1="134" x2="1528" y2="134" stroke="#dfe3e8" stroke-width="2"/>
 
-  <rect x="70" y="170" width="760" height="750" rx="8" fill="#edf7f0" stroke="#9bc5a6" stroke-width="2"/>
-  <rect x="970" y="170" width="760" height="750" rx="8" fill="#eef4fb" stroke="#9bb8d6" stroke-width="2"/>
+  <rect x="64" y="164" width="680" height="732" rx="8" fill="#f1f8f3" stroke="#a9cfb4" stroke-width="2"/>
+  <rect x="856" y="164" width="680" height="732" rx="8" fill="#f1f6fb" stroke="#abc6df" stroke-width="2"/>
 
-  <circle cx="118" cy="220" r="19" fill="#2d7a48"/>
-  <text x="118" y="228" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#ffffff">A</text>
-  <text x="155" y="230" class="sans lane-title">需求会话</text>
+  <rect x="64" y="164" width="680" height="86" rx="8" fill="#e5f3e9"/>
+  <path d="M64 242 H744 V250 H64 Z" fill="#e5f3e9"/>
+  <circle cx="106" cy="207" r="19" fill="#2f7d4d"/>
+  <text x="106" y="214" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">A</text>
+  <text x="141" y="205" class="sans lane-title">需求会话</text>
+  <text x="141" y="229" class="sans lane-note">持续规划下一项</text>
 
-  <circle cx="1018" cy="220" r="19" fill="#356f9f"/>
-  <text x="1018" y="228" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#ffffff">B</text>
-  <text x="1055" y="230" class="sans lane-title">tmux 协调与任务窗口</text>
+  <rect x="856" y="164" width="680" height="86" rx="8" fill="#e5eff9"/>
+  <path d="M856 242 H1536 V250 H856 Z" fill="#e5eff9"/>
+  <circle cx="898" cy="207" r="19" fill="#3476aa"/>
+  <text x="898" y="214" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">B</text>
+  <text x="933" y="205" class="sans lane-title">tmux 协调与任务窗口</text>
+  <text x="933" y="229" class="sans lane-note">独立执行当前任务</text>
 
-  <rect x="130" y="275" width="640" height="126" rx="8" fill="#ffffff" stroke="#88b797" stroke-width="2"/>
-  <circle cx="175" cy="316" r="22" fill="#2d7a48"/>
-  <text x="175" y="325" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#ffffff">1</text>
-  <text x="218" y="322" class="sans step">新建计划会话</text>
-  <text x="218" y="363" class="mono command">/new -> Plan mode</text>
-  <text x="218" y="390" class="sans detail">gpt-5.6-xhigh / opus-xhigh</text>
+  <rect x="96" y="278" width="616" height="126" rx="8" fill="#ffffff" stroke="#9bc8a8" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="96" y="278" width="6" height="126" rx="3" fill="#2f7d4d"/>
+  <circle cx="139" cy="319" r="20" fill="#2f7d4d"/>
+  <text x="139" y="326" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">1</text>
+  <text x="176" y="321" class="sans step">新建计划会话</text>
+  <text x="176" y="359" class="mono command">/new  ->  Plan mode</text>
+  <text x="176" y="388" class="sans detail">gpt-5.6-xhigh / opus-xhigh</text>
 
-  <path d="M450 401 L450 439" class="arrow"/>
+  <path d="M404 405 V424" class="arrow"/>
 
-  <rect x="130" y="450" width="640" height="126" rx="8" fill="#ffffff" stroke="#88b797" stroke-width="2"/>
-  <circle cx="175" cy="491" r="22" fill="#2d7a48"/>
-  <text x="175" y="500" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#ffffff">2</text>
-  <text x="218" y="497" class="sans step">讨论需求并确定方案</text>
-  <text x="218" y="538" class="sans detail">目标 / 方案 / 验收条件 / 不在本轮范围</text>
+  <rect x="96" y="438" width="616" height="126" rx="8" fill="#ffffff" stroke="#9bc8a8" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="96" y="438" width="6" height="126" rx="3" fill="#2f7d4d"/>
+  <circle cx="139" cy="479" r="20" fill="#2f7d4d"/>
+  <text x="139" y="486" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">2</text>
+  <text x="176" y="481" class="sans step">讨论需求并确定方案</text>
+  <text x="176" y="524" class="sans detail">目标 / 方案 / 验收条件 / 不在本轮范围</text>
 
-  <path d="M450 576 L450 614" class="arrow"/>
+  <path d="M404 565 V584" class="arrow"/>
 
-  <rect x="130" y="625" width="640" height="126" rx="8" fill="#ffffff" stroke="#88b797" stroke-width="2"/>
-  <circle cx="175" cy="666" r="22" fill="#2d7a48"/>
-  <text x="175" y="675" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#ffffff">3</text>
-  <text x="218" y="672" class="sans step">退出 Plan mode, 让 Agent 建卡</text>
-  <text x="218" y="713" class="mono command">kanban new -> backlog</text>
-  <text x="218" y="741" class="sans detail">Agent 根据本轮讨论填完整任务契约</text>
+  <rect x="96" y="598" width="616" height="126" rx="8" fill="#ffffff" stroke="#9bc8a8" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="96" y="598" width="6" height="126" rx="3" fill="#2f7d4d"/>
+  <circle cx="139" cy="639" r="20" fill="#2f7d4d"/>
+  <text x="139" y="646" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">3</text>
+  <text x="176" y="641" class="sans step">退出 Plan mode, 让 Agent 建卡</text>
+  <text x="176" y="679" class="mono command">kanban new  ->  backlog</text>
+  <text x="176" y="708" class="sans detail">Agent 根据本轮讨论填完整任务契约</text>
 
-  <path d="M770 688 C860 688 900 335 1020 335" class="handoff"/>
-  <rect x="805" y="474" width="160" height="74" rx="8" fill="#fff4e8" stroke="#df8b4d" stroke-width="2"/>
-  <text x="885" y="505" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#9a4108">任务交接</text>
-  <text x="885" y="533" text-anchor="middle" class="sans" font-size="18" fill="#9a4108">按 task ID</text>
+  <path d="M712 661 H800 V350 H888" class="handoff"/>
+  <rect x="750" y="476" width="100" height="70" rx="8" fill="#fff7ed" stroke="#e48a4d" stroke-width="2"/>
+  <text x="800" y="505" text-anchor="middle" class="sans" font-size="17" font-weight="700" fill="#a4440a">任务交接</text>
+  <text x="800" y="531" text-anchor="middle" class="mono" font-size="14" font-weight="600" fill="#a4440a">task ID</text>
 
-  <rect x="1020" y="275" width="660" height="142" rx="8" fill="#ffffff" stroke="#86aaca" stroke-width="2"/>
-  <circle cx="1065" cy="316" r="22" fill="#356f9f"/>
-  <text x="1065" y="325" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#ffffff">4</text>
-  <text x="1108" y="322" class="sans step">让 Agent 开始任务卡</text>
-  <text x="1108" y="362" class="mono command">kanban pick -> todo</text>
-  <text x="1108" y="394" class="mono command">kanban start -> working</text>
+  <path d="M404 725 V754" class="arrow"/>
+  <rect x="96" y="768" width="616" height="92" rx="8" fill="#fff9ea" stroke="#d8ae47" stroke-width="2"/>
+  <text x="404" y="806" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#443818">任务启动后立即回到需求会话</text>
+  <text x="404" y="839" text-anchor="middle" class="mono command">/new  ->  Plan mode  ->  讨论下一项</text>
 
-  <path d="M1350 417 L1350 455" class="arrow"/>
+  <rect x="888" y="278" width="616" height="144" rx="8" fill="#ffffff" stroke="#9dbfdd" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="888" y="278" width="6" height="144" rx="3" fill="#3476aa"/>
+  <circle cx="931" cy="319" r="20" fill="#3476aa"/>
+  <text x="931" y="326" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">4</text>
+  <text x="968" y="321" class="sans step">让 Agent 开始任务卡</text>
+  <text x="968" y="359" class="mono command">kanban pick   ->  todo</text>
+  <text x="968" y="390" class="mono command">kanban start  ->  working</text>
 
-  <rect x="1020" y="466" width="660" height="126" rx="8" fill="#ffffff" stroke="#86aaca" stroke-width="2"/>
-  <circle cx="1065" cy="507" r="22" fill="#356f9f"/>
-  <text x="1065" y="516" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#ffffff">5</text>
-  <text x="1108" y="513" class="sans step">独立 worktree 实现</text>
-  <text x="1108" y="554" class="sans detail">实现 -> 验证 -> 提交 -> push</text>
+  <path d="M1196 423 V442" class="arrow"/>
 
-  <path d="M1350 592 L1350 630" class="arrow"/>
+  <rect x="888" y="456" width="616" height="126" rx="8" fill="#ffffff" stroke="#9dbfdd" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="888" y="456" width="6" height="126" rx="3" fill="#3476aa"/>
+  <circle cx="931" cy="497" r="20" fill="#3476aa"/>
+  <text x="931" y="504" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">5</text>
+  <text x="968" y="499" class="sans step">独立 worktree 实现</text>
+  <text x="968" y="542" class="sans detail">实现  ->  验证  ->  提交  ->  push</text>
 
-  <rect x="1020" y="641" width="660" height="126" rx="8" fill="#ffffff" stroke="#86aaca" stroke-width="2"/>
-  <circle cx="1065" cy="682" r="22" fill="#356f9f"/>
-  <text x="1065" y="691" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#ffffff">6</text>
-  <text x="1108" y="688" class="sans step">审核、验收与集成</text>
-  <text x="1108" y="729" class="sans detail">PM -> 安全角色 -> QA -> 用户验收</text>
+  <path d="M1196 583 V602" class="arrow"/>
 
-  <path d="M1350 767 L1350 805" class="arrow"/>
+  <rect x="888" y="616" width="616" height="126" rx="8" fill="#ffffff" stroke="#9dbfdd" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="888" y="616" width="6" height="126" rx="3" fill="#3476aa"/>
+  <circle cx="931" cy="657" r="20" fill="#3476aa"/>
+  <text x="931" y="664" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">6</text>
+  <text x="968" y="659" class="sans step">审核、验收与集成</text>
+  <text x="968" y="702" class="sans detail">PM  ->  安全角色  ->  QA  ->  用户验收</text>
 
-  <rect x="1020" y="816" width="660" height="70" rx="8" fill="#e8f1fb" stroke="#5f8fb8" stroke-width="2"/>
-  <text x="1350" y="860" text-anchor="middle" class="sans step">集成 -> 清理 -> done</text>
-
-  <path d="M450 751 L450 789" class="arrow"/>
-  <rect x="130" y="800" width="640" height="86" rx="8" fill="#fff8e8" stroke="#d1ad55" stroke-width="2"/>
-  <text x="450" y="835" text-anchor="middle" class="sans step">任务启动后立即回到需求会话</text>
-  <text x="450" y="868" text-anchor="middle" class="mono command">/new -> Plan mode -> 讨论下一项</text>
+  <path d="M1196 743 V772" class="arrow"/>
+  <rect x="888" y="786" width="616" height="74" rx="8" fill="#e7f1fb" stroke="#6e9bc3" stroke-width="2"/>
+  <circle cx="931" cy="823" r="17" fill="#3476aa"/>
+  <path d="M923 823 L929 829 L940 816" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="1196" y="831" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#203c55">集成  ->  清理  ->  done</text>
 </svg>
