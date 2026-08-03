@@ -37,7 +37,7 @@ kanban list [--mobile] [backlog|todo|working|done|archived|trash]
 kanban show <task-id>
 kanban new [--large] <feature|bug|chore|research> <slug> <title...>
 kanban move <task-id> <todo|working|done|archived|trash>
-kanban pick <task-id>
+kanban pick [task-id]
 kanban start [--agent codex|claude] [task-id]
 kanban check
 ```
@@ -47,7 +47,7 @@ kanban check
 - `list` 按状态分组, 组内按显示时间倒序, 时间相同或缺失时按任务 ID 倒序; 默认输出适配终端深浅背景的彩色对齐表格并包含规模, 任务 ID 与标题同行显示, 并突出大任务; `--mobile` 改用适合竖屏手机的逐任务多行布局; `working` 显示开始时间, `done` 显示完成时间, 旧卡片未记录完成时间时用任务文档最后修改时间; 可指定状态过滤.
 - `new` 默认在 `backlog/` 建小任务; `--large` 建带 `spec.md` 的大任务目录.
 - `move` 只走本文件定义的正向迁移, 校验目标不存在及迁移后状态.
-- `pick` 将指定的 `backlog` 卡片移入 `todo`, 沿用 `todo` 完整性校验.
+- `pick` 将 `backlog` 卡片移入 `todo`, 沿用 `todo` 完整性校验; 不指定任务就列 `backlog` 让用户按编号选.
 - `start` 默认起 `codex`; `--agent claude` 换 Claude. 指定任务只收 `todo` 卡片; 不指定就列 `todo` 让用户按编号选.
 - `start` 按任务规模设置 Agent: 大任务用 `codex gpt-5.6-sol/high` 或 `claude opus/high`; 小任务对应使用 `medium`.
 - `start` 默认用 YOLO 模式启动 Agent: Codex 绕过 approval 和 sandbox, Claude 跳过权限确认.

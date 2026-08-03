@@ -153,7 +153,7 @@ kanban start 20260802-login-retry-task
 kanban start --agent claude 20260802-login-retry-task
 ```
 
-`pick` 会执行带完整性校验的 `backlog -> todo`. 卡片仍有缺失或 `<填写>` 时会拒绝, 此时回需求会话补清楚, 不绕过门禁.
+`pick` 会执行带完整性校验的 `backlog -> todo`. 不传任务 ID 时, 它只列 `backlog` 任务供人选择. 卡片仍有缺失或 `<填写>` 时会拒绝, 此时回需求会话补清楚, 不绕过门禁.
 
 不传任务 ID 时, `kanban start` 只列 `todo` 任务供人选择, 不猜优先级. 启动时会依次完成:
 

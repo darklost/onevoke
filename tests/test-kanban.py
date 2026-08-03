@@ -172,6 +172,28 @@ printf '%s\\n' '@9'
         result = self.run_command("pick", task_id, succeeds=False)
         self.assertIn("不允许迁移: todo -> todo", result.stderr)
 
+    def test_pick_without_task_prompts_for_backlog_selection(self) -> None:
+        first_id = f"{datetime.now().strftime('%Y%m%d')}-alpha-pick-task"
+        second_id = f"{datetime.now().strftime('%Y%m%d')}-beta-pick-task"
+        self.run_command("new", "chore", "alpha-pick", "第一个任务")
+        self.run_command("new", "chore", "beta-pick", "第二个任务")
+        first = self.root / "backlog" / f"{first_id}.md"
+        second = self.root / "backlog" / f"{second_id}.md"
+        self.make_ready(first)
+        self.make_ready(second)
+
+        result = self.run_command("pick", input_text="2\n")
+
+        self.assertIn(f"1. {first_id}", result.stdout)
+        self.assertIn(f"2. {second_id}", result.stdout)
+        self.assertTrue(first.exists())
+        self.assertTrue((self.root / "todo" / second.name).exists())
+
+    def test_pick_without_task_rejects_empty_backlog(self) -> None:
+        result = self.run_command("pick", succeeds=False)
+
+        self.assertIn("backlog 中没有任务", result.stderr)
+
     def test_done_metadata_error_keeps_task_in_working(self) -> None:
         task_id, task = self.make_todo("bad-done-metadata")
         self.run_command("move", task_id, "working")

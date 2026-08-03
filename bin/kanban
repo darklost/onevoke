@@ -441,26 +441,29 @@ def selected_entries(entries: Dict[str, Entry], state: Optional[str]) -> Iterabl
     )
 
 
-def select_todo(board: Board, task: Optional[str]) -> Entry:
-    if task:
-        entry = locate(board, task)
-        if entry.state != "todo":
-            raise KanbanError(f"只能启动 todo 任务: {entry.task_id} 当前位于 {entry.state}")
-        return entry
-
-    todo = list(selected_entries(board.entries, "todo"))
-    if not todo:
-        raise KanbanError("todo 中没有任务")
-    for index, entry in enumerate(todo, 1):
+def select_from_state(board: Board, state: str) -> Entry:
+    candidates = list(selected_entries(board.entries, state))
+    if not candidates:
+        raise KanbanError(f"{state} 中没有任务")
+    for index, entry in enumerate(candidates, 1):
         print(f"{index}. {entry.task_id}\t{title_from(read_document(entry))}")
     while True:
         try:
             choice = input("选择任务编号: ").strip()
         except EOFError as error:
             raise KanbanError("未选择任务; 请指定 task-id") from error
-        if choice.isdecimal() and 1 <= int(choice) <= len(todo):
-            return todo[int(choice) - 1]
-        print(f"请输入 1-{len(todo)}")
+        if choice.isdecimal() and 1 <= int(choice) <= len(candidates):
+            return candidates[int(choice) - 1]
+        print(f"请输入 1-{len(candidates)}")
+
+
+def select_todo(board: Board, task: Optional[str]) -> Entry:
+    if task:
+        entry = locate(board, task)
+        if entry.state != "todo":
+            raise KanbanError(f"只能启动 todo 任务: {entry.task_id} 当前位于 {entry.state}")
+        return entry
+    return select_from_state(board, "todo")
 
 
 def command_list(args: argparse.Namespace, root: Path) -> None:
@@ -568,6 +571,12 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
 def command_move(args: argparse.Namespace, root: Path) -> None:
     entry = locate(load_board(root), args.task)
     print(move_entry(entry, root, args.state).path)
+
+
+def command_pick(args: argparse.Namespace, root: Path) -> None:
+    board = load_board(root)
+    entry = locate(board, args.task) if args.task else select_from_state(board, "backlog")
+    print(move_entry(entry, root, "todo").path)
 
 
 def start_metadata(text: str, agent: str) -> str:
@@ -703,8 +712,7 @@ def parser() -> argparse.ArgumentParser:
     move_parser.add_argument("state", choices=STATES)
 
     pick_parser = commands.add_parser("pick", help="将 backlog 任务移入 todo")
-    pick_parser.add_argument("task")
-    pick_parser.set_defaults(state="todo")
+    pick_parser.add_argument("task", nargs="?")
 
     start_parser = commands.add_parser("start", help="领取任务并在当前 tmux session 启动 Agent")
     start_parser.add_argument("task", nargs="?")
@@ -730,8 +738,10 @@ def main() -> int:
             command_show(args, root)
         elif args.command == "new":
             command_new(args, root)
-        elif args.command in ("move", "pick"):
+        elif args.command == "move":
             command_move(args, root)
+        elif args.command == "pick":
+            command_pick(args, root)
         elif args.command == "start":
             command_start(args, root)
         elif args.command == "check":
