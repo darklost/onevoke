@@ -34,6 +34,7 @@ TYPE_NAMES = {
 READY_SECTIONS = ("任务目标", "预期成果", "验收条件", "不在本轮范围")
 ARCHIVE_RESULTS = {"completed", "cancelled", "duplicate", "wontfix"}
 AGENT_NAMES = ("codex", "claude")
+NO_TITLE = "(无标题)"
 
 
 class KanbanError(Exception):
@@ -274,7 +275,7 @@ def title_from(text: str) -> str:
     for line in text.splitlines():
         if line.startswith("# "):
             return line[2:].strip()
-    return "(无标题)"
+    return NO_TITLE
 
 
 def section_body(text: str, heading: str) -> Optional[str]:
@@ -608,6 +609,14 @@ def tmux_session_id(tmux: str) -> str:
     return session
 
 
+def window_name(entry: Entry, text: str) -> str:
+    title = title_from(text)
+    label = re.sub(r"\s+", "-", "".join(c for c in title if c.isprintable()).strip()).strip("-")
+    if not label or title == NO_TITLE:
+        label = entry.task_id[9:].removesuffix("-task")
+    return f"kb-{label}"[:50]
+
+
 def command_start(args: argparse.Namespace, root: Path) -> None:
     entry = select_todo(load_board(root), args.task)
     agent = shutil.which(args.agent)
@@ -625,7 +634,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         f"kanban show {entry.task_id}. 卡片已进入 working. 遵守目标项目 AGENTS.md, "
         "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
     )
-    slug = entry.task_id[9:].removesuffix("-task")
+    name = window_name(entry, original)
     effort = "high" if entry.kind == "large" else "medium"
     agent_args = (
         [
@@ -654,7 +663,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 "-c",
                 str(root.parent),
                 "-n",
-                f"kb-{slug}"[:50],
+                name,
                 command,
             ],
             text=True,

@@ -160,7 +160,7 @@ kanban start --agent claude 20260802-login-retry-task
 1. 校验 tmux、Agent 命令和任务状态.
 2. 用原子重命名领取卡片, 执行 `todo -> working`.
 3. 写入负责人和开始时间.
-4. 在当前 tmux session 新建 `kb-<slug>` window, cwd 为项目根.
+4. 在当前 tmux session 新建 `kb-<任务标题>` window, cwd 为项目根.
 5. 要求新 Agent 先读 `kanban rules`、任务卡和项目规则, 再准备代码工作区.
 
 小任务默认使用中等推理强度, 大任务使用高推理强度. Codex 固定用 `gpt-5.6-sol`, Claude 固定用 `opus`. `kanban start` 默认以 YOLO 模式启动, 会绕过 Agent 自身的 approval 或 permission 提示; 因此只应在可信本机和已确认范围内使用.

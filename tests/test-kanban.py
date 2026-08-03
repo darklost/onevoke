@@ -348,12 +348,39 @@ printf '%s\\n' '@9'
         self.assertEqual("new-window", tmux_args[0])
         self.assertEqual("$42:", tmux_args[tmux_args.index("-t") + 1])
         self.assertEqual(str(self.root.resolve().parent), tmux_args[tmux_args.index("-c") + 1])
-        self.assertEqual("kb-start-direct", tmux_args[tmux_args.index("-n") + 1])
+        self.assertEqual("kb-任务-start-direct", tmux_args[tmux_args.index("-n") + 1])
         self.assertIn(str(fake_bin / "codex"), tmux_args[-1])
         self.assertIn("--model gpt-5.6-sol", tmux_args[-1])
         self.assertIn('model_reasoning_effort="medium"', tmux_args[-1])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", tmux_args[-1])
         self.assertIn(task_id, tmux_args[-1])
+
+    def test_start_window_name_folds_title_and_truncates(self) -> None:
+        task_id, task = self.make_todo("window-name")
+        text = task.read_text(encoding="utf-8")
+        task.write_text(
+            text.replace("# 任务 window-name", f"# 修复 登录  重试 {'长' * 60}", 1),
+            encoding="utf-8",
+        )
+        self.install_fake_launchers()
+
+        self.run_command("start", task_id)
+
+        tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
+        name = tmux_args[tmux_args.index("-n") + 1]
+        self.assertEqual(f"kb-修复-登录-重试-{'长' * 60}"[:50], name)
+        self.assertEqual(50, len(name))
+
+    def test_start_window_name_falls_back_to_slug_without_title(self) -> None:
+        task_id, task = self.make_todo("no-title")
+        text = task.read_text(encoding="utf-8")
+        task.write_text(text.replace("# 任务 no-title\n", "", 1), encoding="utf-8")
+        self.install_fake_launchers()
+
+        self.run_command("start", task_id)
+
+        tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual("kb-no-title", tmux_args[tmux_args.index("-n") + 1])
 
     def test_start_without_task_prompts_for_todo_selection(self) -> None:
         first_id, first = self.make_todo("alpha")
