@@ -8,22 +8,22 @@ Onevoke - One person. Many agents.
 
 | 位置 | 作用 |
 |---|---|
-| `rules/SOLO-AGENTS.md` | 全局规则入口. 优先级、交流格式、工作原则、记忆与验证, 其余按需引用下面几份 |
+| `rules/ONEVOKE-AGENTS.md` | 全局规则入口. 优先级、交流格式、工作原则、记忆与验证, 其余按需引用下面几份 |
 | `rules/GIT-RULES.md` | Git 工作流. worktree 隔离、提交与 push 策略、集成与清理 |
 | `rules/CODE-RULES.md` | 架构与代码质量契约. 模块边界、依赖方向、抽象门槛、错误处理与测试要求 |
 | `rules/KANBAN-RULES.md` + `bin/kanban` | 文件看板. 任务卡片的状态流转、领取并发、文档完整性门禁 |
-| `rules/CODEX-REVIEW-RULES.md` + `bin/codex-review.sh` | 审核门禁. 三阶段规则, 与只读跑 `PM` / `QA` / `CSA` / `Hacker` 四个角色的 wrapper |
-| `rules/GROK-REVIEW-RULES.md` + `bin/grok-review.sh` | 明确指定 Grok 时使用的等价审核门禁 |
+| `rules/REVIEW-RULES.md` | 审核门禁. 三阶段规则, 四个角色 `PM` / `QA` / `CSA` / `Hacker`, Codex 与 Grok 共用 |
+| `bin/codex-review.sh` + `bin/grok-review.sh` | 两个 reviewer 的 wrapper, 只读跑上述角色, 参数一致 |
 
 `bin/merge-worktree-memory.py` 在任务集成后把 worktree 的 memsearch 记忆并回主树, 顺带清掉记忆里的非法 UTF-8 字节.
 
 ## 依赖
 
 - Python 3 (仅标准库), Git, POSIX shell
-- Codex CLI (`codex`) — 默认审核门禁必需; 使用 Grok 审核时改需 Grok CLI (`grok`)
+- Codex CLI (`codex`) 或 Grok CLI (`grok`) — 审核门禁必需, 装选定的那个即可, 默认用 Codex
 - tmux — `kanban start` 启动 Agent 需要
 
-memsearch 是**可选**的, 需要自己安装. 装了才适用 `SOLO-AGENTS.md` 的「记忆管理」一节; 没装时该节不适用, `merge-worktree-memory.py` 报告无事可做并以 0 退出, 集成流程可以无条件调用它.
+memsearch 是**可选**的, 需要自己安装. 装了才适用 `ONEVOKE-AGENTS.md` 的「记忆管理」一节; 没装时该节不适用, `merge-worktree-memory.py` 报告无事可做并以 0 退出, 集成流程可以无条件调用它.
 
 ## 安装
 
@@ -34,6 +34,12 @@ memsearch 是**可选**的, 需要自己安装. 装了才适用 `SOLO-AGENTS.md`
 命令装到 `~/.local/bin/` (`kanban`, `codex-review.sh`, `grok-review.sh`, `merge-worktree-memory.py`), `rules/` 下全部规则装到 `~/.agents/`.
 
 安装器**不碰** `~/.agents/AGENTS.md` — 那是你自己的全局规则, 与本仓库无关. 规则文件都由本仓库拥有, 每次安装直接覆盖.
+
+安装器也**从不删除任何文件**. 早期版本的规则文件改名或合并后, 旧文件会以过期内容留在 `~/.agents/`; 安装器检测到就逐个点名警告 (走 stderr, 不影响退出码), 删不删由你决定.
+
+### 从旧版升级
+
+规则入口已由 `SOLO-AGENTS.md` 改名为 `ONEVOKE-AGENTS.md`, 两份审核规则已合并为 `REVIEW-RULES.md`. 装过旧版的话, **先按「接入」一节把 `@` 导入行或软链改指 `ONEVOKE-AGENTS.md`, 再删 `~/.agents/` 下的旧文件** — 顺序反了会留下悬空软链或失效导入, 而这两种失效都是静默的, 不报错.
 
 装完规则只是躺在 `~/.agents/`, **还不生效**. 接入是单独一步, 安装器不做 — 见下一节.
 
@@ -46,7 +52,7 @@ memsearch 是**可选**的, 需要自己安装. 装了才适用 `SOLO-AGENTS.md`
 `CLAUDE.md` 支持 `@path` 导入, 和你自己的内容共存. 在 `~/.claude/CLAUDE.md` 里加一行:
 
 ```markdown
-@~/.agents/SOLO-AGENTS.md
+@~/.agents/ONEVOKE-AGENTS.md
 
 ## 我自己的规则
 
@@ -62,19 +68,19 @@ Codex **没有导入指令**. 它把全局 `~/.codex/AGENTS.md`、项目根 `AGE
 **没有自己的全局规则** — 软链就行, 升级自动生效:
 
 ```sh
-ln -s ~/.agents/SOLO-AGENTS.md ~/.codex/AGENTS.md
+ln -s ~/.agents/ONEVOKE-AGENTS.md ~/.codex/AGENTS.md
 ```
 
 **已经有自己的全局规则** — 没有干净解, 两条路各有代价, 自己挑:
 
 | 做法 | 得到 | 代价 |
 |---|---|---|
-| 软链 `SOLO-AGENTS.md`, 个人规则下沉到各项目的 `AGENTS.md` | 升级自动传播 | 个人偏好要在每个项目重复一遍 |
-| 保留自己的 `~/.codex/AGENTS.md`, 把 `SOLO-AGENTS.md` 内容合并进去 | 一个文件管全部 | 升级不会传播, 每次都要重新合并 |
+| 软链 `ONEVOKE-AGENTS.md`, 个人规则下沉到各项目的 `AGENTS.md` | 升级自动传播 | 个人偏好要在每个项目重复一遍 |
+| 保留自己的 `~/.codex/AGENTS.md`, 把 `ONEVOKE-AGENTS.md` 内容合并进去 | 一个文件管全部 | 升级不会传播, 每次都要重新合并 |
 
 ### 容量上限
 
-Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. `SOLO-AGENTS.md` 约 3.7 KiB, 留给项目级的还有约 28.3 KiB — 其余规则是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
+Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. `ONEVOKE-AGENTS.md` 约 4.0 KiB, 留给项目级的还有约 28.0 KiB — 其余规则是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
 
 ```toml
 project_doc_max_bytes = 65536
@@ -90,7 +96,7 @@ Onevoke 把需求讨论和任务执行分开. 人始终保留一个需求会话,
 - 主 worktree 是协调面: 放唯一的本机看板, 由人确认任务进入 `todo`.
 - 任务 worktree 是执行面: 每张已领取的代码任务独占一个分支和 worktree.
 - Codex 或 Claude 是执行 Agent: 读取规则与任务卡, 实现、验证、提交和集成.
-- Codex 审核角色是独立门禁: `PM` 检查需求完整性, `QA` 检查正确性与回归, 安全角色按风险触发.
+- 审核角色是独立门禁: `PM` 检查需求完整性, `QA` 检查正确性与回归, 安全角色按风险触发.
 
 ![Onevoke 工作流](docs/workflow.svg)
 
@@ -214,6 +220,34 @@ reviewer 的报告不是自动真理. 主代理必须回到代码、规则和可
 
 本仓库自身有特例: `CSA` 和 `Hacker` 一律 N/A, 只运行 `PM` 和 `QA`. 安装到其他项目后仍按那些项目的风险和规则判断.
 
+#### 指定 reviewer
+
+四个角色由 Codex 或 Grok 执行, 两者规则完全一样, 只是 wrapper 和 CLI 不同. **不指定就用 Codex.** 按下面三档指定, 优先级从高到低, 取第一个命中的:
+
+**只改这一个任务** — 在任务提示里说一句就行:
+
+```text
+这个任务用 Grok 审核
+```
+
+**改整个项目** — 在项目根的 `AGENTS.md` 或 `CLAUDE.md` 里加一节, 该项目的所有任务都生效:
+
+```markdown
+## 审核
+
+本项目审核用 Grok, 按 `~/.agents/REVIEW-RULES.md` 执行.
+```
+
+**改整台机器** — 写进你自己的全局规则文件, 对所有项目生效. 写哪个文件取决于你用的 Agent: Claude Code 是 `~/.claude/CLAUDE.md`, Codex 是 `~/.codex/AGENTS.md`, 都不用则写 `~/.agents/AGENTS.md`. 要点是这份文件必须真的会被载入你的会话, 否则 Agent 看不到:
+
+```markdown
+## 审核
+
+审核默认用 Grok, 按 `~/.agents/REVIEW-RULES.md` 执行.
+```
+
+同一个任务不能混用两个 reviewer 的阶段结论. 中途改 reviewer 视为重新审核, 已通过的阶段全部作废, 从 `PM` 重启. 选定的 CLI 在本机没装时 Agent 不会自己换成另一个, 而是停下来给编号选项让人决定.
+
 ### 9. 验收、集成与清理
 
 审核通过不等于任务完成. 特别是 Bug 修复, 必须等人确认实际问题已解决; 未验收时卡片继续留在 `working`.
@@ -298,7 +332,7 @@ codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> PM "<任�
 codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> QA "<任务目标>"
 ```
 
-明确指定 Grok 时, 把上述命令名换成 `grok-review.sh`.
+选 Grok 时把上述命令名换成 `grok-review.sh`, 参数完全一样. 怎么选见「指定 reviewer」.
 
 - 第一阶段 `PM` 核对实现是否完整达到任务目标
 - 第二阶段按改动风险决定是否运行 `CSA` 和 `Hacker`, 未触发标记 N/A

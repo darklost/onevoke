@@ -1,6 +1,6 @@
 # 架构与代码质量规则
 
-本文件是 `~/.agents/SOLO-AGENTS.md`「工作原则」的架构与代码质量契约, 装在 `~/.agents/CODE-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `SOLO-AGENTS.md`.
+本文件是 `~/.agents/ONEVOKE-AGENTS.md`「工作原则」的架构与代码质量契约, 装在 `~/.agents/CODE-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `ONEVOKE-AGENTS.md`.
 
 ## 架构与边界
 

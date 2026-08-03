@@ -2,14 +2,13 @@
 
 ## 适用范围与优先级
 
-- 跨项目默认规则, 装在 `~/.agents/SOLO-AGENTS.md`. 非用户自己的 `~/.agents/AGENTS.md`, 不互相覆盖.
+- 跨项目默认规则, 装在 `~/.agents/ONEVOKE-AGENTS.md`. 非用户自己的 `~/.agents/AGENTS.md`, 不互相覆盖.
 - 本文件是规则集入口, 只放通用条款, 专项规则拆在下列分册, 用到哪份读哪份:
 
 | 分册 | 何时读 |
 |---|---|
 | `~/.agents/GIT-RULES.md` | 建分支, 提交, push, 审核, 集成前 |
-| `~/.agents/CODEX-REVIEW-RULES.md` | 触发审核前 |
-| `~/.agents/GROK-REVIEW-RULES.md` | 用户明确指定 Grok 审核前, 替代 Codex 审核分册 |
+| `~/.agents/REVIEW-RULES.md` | 触发审核前 |
 | `~/.agents/CODE-RULES.md` | 改代码前 |
 | `~/.agents/KANBAN-RULES.md` | 操作全局文件看板前, 用 `kanban rules` 读取 |
 

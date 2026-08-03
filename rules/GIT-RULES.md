@@ -1,6 +1,6 @@
 # Git 工作流规则
 
-本文件是 `~/.agents/SOLO-AGENTS.md`「Git 工作流」的完整契约, 装在 `~/.agents/GIT-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `SOLO-AGENTS.md`.
+本文件是 `~/.agents/ONEVOKE-AGENTS.md`「Git 工作流」的完整契约, 装在 `~/.agents/GIT-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `ONEVOKE-AGENTS.md`.
 
 本文件只适用 Git 仓库. 非 Git 目录无分支, worktree, 审核, 集成, 直接改文件.
 
@@ -24,7 +24,7 @@
 
 ## 审核
 
-- 默认审核完整规则见 `~/.agents/CODEX-REVIEW-RULES.md`. 用户明确指定 Grok 审核时, 改读 `~/.agents/GROK-REVIEW-RULES.md`, 用 `grok-review.sh` 替代 `codex-review.sh`; 同一任务不得混用两个 reviewer 的阶段结论.
+- 完整规则见 `~/.agents/REVIEW-RULES.md`; 触发审核前先读取该文件并遵循. reviewer 有 Codex 与 Grok 两个, 按该文件「Reviewer 选择」确定用哪个, 未指定时用 Codex; 同一任务不得混用两个 reviewer 的阶段结论.
 
 ## 集成与清理
 

@@ -21,7 +21,7 @@ COMMAND = Path(
 INSTALLER = PROJECT_ROOT / "install.sh"
 RULES_DIR = PROJECT_ROOT / "rules"
 RULES = RULES_DIR / "KANBAN-RULES.md"
-AGENT_RULES = RULES_DIR / "SOLO-AGENTS.md"
+AGENT_RULES = RULES_DIR / "ONEVOKE-AGENTS.md"
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
 
 
@@ -571,6 +571,8 @@ printf '%s\\n' '@9'
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("Onevoke installed\n", result.stdout)
+        # 干净的 ~/.agents/ 没有旧规则文件, 不该出现任何警告.
+        self.assertEqual("", result.stderr)
 
         command = install_home / ".local" / "bin" / "kanban"
         self.assertTrue(os.access(command, os.X_OK))
@@ -612,11 +614,77 @@ printf '%s\\n' '@9'
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("本机自定规则\n", own_rules.read_text(encoding="utf-8"))
+            # 旧规则提示按名字扫 ~/.agents/, 绝不能把用户自己的 AGENTS.md 点进去.
+            self.assertNotIn(str(own_rules), result.stderr)
 
         self.assertEqual(
             AGENT_RULES.read_bytes(),
-            (install_home / ".agents" / "SOLO-AGENTS.md").read_bytes(),
+            (install_home / ".agents" / "ONEVOKE-AGENTS.md").read_bytes(),
         )
+
+    def test_installer_reports_but_keeps_stale_rule_files(self) -> None:
+        install_home = self.root / "stale-home"
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+        agents_dir = install_home / ".agents"
+        agents_dir.mkdir(parents=True)
+        stale_names = (
+            "SOLO-AGENTS.md",
+            "CODEX-REVIEW-RULES.md",
+            "GROK-REVIEW-RULES.md",
+        )
+        for name in stale_names:
+            (agents_dir / name).write_text(f"旧版 {name}\n", encoding="utf-8")
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        # 检测到旧文件不是失败: 安装照常完成, 警告只走 stderr.
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertIn("outdated rule files", result.stderr)
+        # 提示必须逐个点名, 且明确说明安装器不会代为删除.
+        for name in stale_names:
+            self.assertIn(str(agents_dir / name), result.stderr)
+            self.assertEqual(
+                f"旧版 {name}\n",
+                (agents_dir / name).read_text(encoding="utf-8"),
+                name,
+            )
+        self.assertIn("never deletes", result.stderr)
+
+    def test_installer_reports_only_the_stale_files_that_exist(self) -> None:
+        install_home = self.root / "partial-stale-home"
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+        agents_dir = install_home / ".agents"
+        agents_dir.mkdir(parents=True)
+        present = agents_dir / "CODEX-REVIEW-RULES.md"
+        present.write_text("旧版审核规则\n", encoding="utf-8")
+        # 旧文件被 dotfiles 仓库软链管理, 源文件已删时只剩悬空链接, 同样要点名.
+        dangling = agents_dir / "SOLO-AGENTS.md"
+        dangling.symlink_to(self.root / "gone" / "SOLO-AGENTS.md")
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(str(present), result.stderr)
+        self.assertIn(str(dangling), result.stderr)
+        # 不存在的旧文件不得出现在提示里, 否则用户会去查根本没有的路径.
+        self.assertNotIn("GROK-REVIEW-RULES.md", result.stderr)
+        self.assertTrue(dangling.is_symlink())
+        self.assertEqual("旧版审核规则\n", present.read_text(encoding="utf-8"))
 
     def test_installer_rejects_arguments(self) -> None:
         result = subprocess.run(

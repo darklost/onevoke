@@ -1,6 +1,20 @@
-# Codex 审核规则
+# 审核规则
 
-本文件是 `~/.agents/GIT-RULES.md`「Codex 审核」的完整契约, 装在 `~/.agents/CODEX-REVIEW-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `SOLO-AGENTS.md`.
+本文件是 `~/.agents/GIT-RULES.md`「审核」的完整契约, 装在 `~/.agents/REVIEW-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `ONEVOKE-AGENTS.md`.
+
+## Reviewer 选择
+
+- 支持 Codex 与 Grok 两个 reviewer. 除下表列出的 wrapper 与隔离参数外, 本文件全部规则对两者一致. wrapper 都装在 `~/.local/bin/`.
+
+| reviewer | wrapper | CLI | wrapper 的隔离参数 |
+|---|---|---|---|
+| Codex (默认) | `codex-review.sh` | `codex` | `--sandbox read-only`, `--ephemeral` |
+| Grok | `grok-review.sh` | `grok` | `--sandbox read-only`, `--no-memory`, `--no-subagents` |
+
+- 按优先级取第一个明确指定 reviewer 的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则 (Claude Code 为 `~/.claude/CLAUDE.md`, Codex 为 `~/.codex/AGENTS.md`, 或 `~/.agents/AGENTS.md`). 都未指定时用 Codex.
+- 第 (3) 档只对本节的 reviewer 取值有效, 是本分册为自身设定声明的额外来源, 不改变 `~/.agents/ONEVOKE-AGENTS.md` 的通用优先级链. 该档文件已在会话上下文里就直接判读; 未自动载入且当前任务需要判定时读取它, 读不到按未指定处理.
+- 同一任务不得混用两个 reviewer 的阶段结论. 任务中途换 reviewer 视为重新审核: 已通过的阶段结论全部作废, 从第一阶段重启.
+- 下文的「reviewer」「reviewer CLI」「wrapper」均指本节选定的那一个.
 
 ## 目标与边界
 
@@ -15,7 +29,7 @@
 
 - 豁免条件, 满足其一即可: (1) 相对审核 base 的全部改动文件都是 `*.md` 或 `*.markdown`, 不限文件数与行数; (2) 任务恰改 1 个文件, 且相对审核 base 的新增与删除行合计不超 10 行, 以 `git diff --numstat <base>..<commit>` 为准. 二进制文件, 拿不到数字或用户明确要求审核时一律不得豁免.
 - 走豁免路径必须在集成前明确告知用户"本次未走审核闭环", 并写出触发的豁免条件 (改了哪个文件, 新增与删除行数). 禁静默跳过. 用户随后要求审核时照常执行完整流程.
-- 本机没有可用的 Codex CLI 或 `~/.local/bin/codex-review.sh` 时无法审核: 明确告知用户"本机未装 Codex CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好 Codex CLI 后重试`、`2. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`、`3. 停止集成`. 禁自行跳过, 禁降级到其他 reviewer.
+- 选定 reviewer 的 CLI 或其 wrapper 在本机不可用时无法审核: 明确告知用户"本机未装 <reviewer> CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好该 CLI 后重试`、`2. 改用另一个 reviewer 重启审核`、`3. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`、`4. 停止集成`. 禁自行跳过, 禁未经用户明确指定就换 reviewer.
 - 审核前, 把审核 base 以来全部任务改动按关注点提交, 保持 worktree 无未提交或未跟踪文件.
 - 审核 base: 专用任务分支为该分支最近一次基于默认集成分支创建或 rebase 时所基于的那个集成分支 commit 的完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变; rebase 后 base 更新为新的所基于 commit, 是否重审按 `~/.agents/GIT-RULES.md`「集成与清理」的一次性门规则执行.
 
@@ -52,9 +66,9 @@
 - 必修门槛: 只有经主代理核实认可的 `blocking`、`high`、`medium` 才必须修复. `low`、`推荐`、`建议` 一律不阻塞审核和集成, 按「结论与故障处置」的未处理项清单规则记录处理结论.
 - 安全角色触发条件: `CSA` 仅在改动涉及不可信输入、认证授权、凭据、加密、网络协议、远程执行、由不可信输入决定的文件写入、安装更新或发布完整性时跑. `Hacker` 仅在新增或实质改变外部攻击面、执行安全专项审核或用户明确要求时跑.
 - 第二阶段只在实际运行的 `CSA` 或 `Hacker` 返回符合角色提示门槛的实质 finding 时才交用户决策, 选项至少为 `1. 修复并重审`、`2. 确认结果并通过`、`3. 停止集成`. 禁把 `low`、`推荐`、`建议` 或纯 defense-in-depth advisory 提交用户决策.
-- 每个角色必须调 `~/.local/bin/codex-review.sh <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 禁直接调 Codex CLI 绕过 wrapper. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
-- 一次完整审核中实际运行的角色必须用相同 `CWD`、base 与 task context. 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (上条安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. base 改变则全部结论失效, 从第一阶段重启. task context 是权威需求契约: 短任务可直接传单个字符串, 长任务用可读的绝对 spec 路径. 各角色第 6 参数可传 review context.
-- 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录, 禁混入日志、spec 或其他文件. 本轮审核通过、用户完成第二阶段决策或本轮终止后清理该目录; 需保留诊断先向用户说明. wrapper 自身以 `--sandbox read-only` 和 `--ephemeral` 跑 Codex, 结束时校验 worktree 未被改动; 禁改其 sandbox、权限或工具参数绕过门禁.
+- 每个角色必须调选定 reviewer 的 wrapper: `~/.local/bin/<reviewer>-review.sh <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 禁直接调 reviewer CLI 绕过 wrapper. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
+- 一次完整审核中实际运行的角色必须用相同 reviewer、`CWD`、base 与 task context. 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (上条安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. base 改变则全部结论失效, 从第一阶段重启. task context 是权威需求契约: 短任务可直接传单个字符串, 长任务用可读的绝对 spec 路径. 各角色第 6 参数可传 review context.
+- 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录, 禁混入日志、spec 或其他文件. 本轮审核通过、用户完成第二阶段决策或本轮终止后清理该目录; 需保留诊断先向用户说明. wrapper 自身按「Reviewer 选择」表的隔离参数跑 reviewer, 结束时校验 worktree 未被改动; 禁改其 sandbox、权限或工具参数绕过门禁.
 
 ## 主代理的核实义务
 
@@ -109,7 +123,7 @@ task context 按以下五段组织, 缺哪段写哪段, 不必凑齐; 「不在�
 - 被判「无法核实」的 blocking、high、medium 视同未通过: 该阶段不得放行, 按「主代理的核实义务」交用户决策, 用户判定为不必处理后才继续.
 - 审核闭环结束时 (通过或中途终止), 必须向用户展示本轮全部未处理项, 一项都不省: 未修的 `low`、`推荐`、`建议`, 被主代理判定不成立或无法核实的 finding, 用户已确认接受的风险, 因后端故障未完成的角色, 未提供 `NON-BLOCKING` 段的角色. 每项写明来源角色、档位、问题内容、实际影响、未处理的理由. 禁只报"审核通过"或"无阻塞问题"就结束. 同一批内容写进 commit message 或交付说明, 禁静默丢弃. 走豁免路径时本条不适用, 按豁免规则告知用户即可.
 - 重启轮次不设次数上限. 但同一 finding 连续多轮修复仍未通过时, 停止自转, 向用户说明卡在哪、已试过什么、下一步选项, 由用户决策.
-- wrapper 参数、认证、前置条件或本地环境错误必须先修正. 仅当参数与前置条件均正确的同一角色调用连续 3 次返回 HTTP 5xx 或明确 service unavailable 错误时, 视为持续 Codex 后端故障.
-- `PM` 或 `QA` 持续后端故障时不降级到其他 reviewer: 保留分支和 worktree, 报告失败角色、实际错误和已完成阶段, 停止集成, 等用户决定重试或改期.
+- wrapper 参数、认证、前置条件或本地环境错误必须先修正. 仅当参数与前置条件均正确的同一角色调用连续 3 次返回 HTTP 5xx 或明确 service unavailable 错误时, 视为该 reviewer 持续后端故障.
+- `PM` 或 `QA` 持续后端故障时不自行换 reviewer: 保留分支和 worktree, 报告失败角色、实际错误和已完成阶段, 停止集成, 等用户决定重试、改期或明确指定另一个 reviewer. 提供换 reviewer 这个选项时必须同时写明代价: 按「Reviewer 选择」已通过阶段全部作废, 从第一阶段重启.
 - `CSA` 或 `Hacker` 持续后端故障不阻塞审核: 该角色记为"因后端故障未完成", 在交付说明和给用户的汇报里写明, 审核结论由 `PM` 与 `QA` 决定. 两个安全角色都触发时其中一个故障, 另一个照常出结论并按第二阶段规则处理.
-- 第二阶段未获用户决策时, 保留分支和 worktree, 报告未解决项并停止集成. 禁绕过 wrapper 直调 Codex CLI.
+- 第二阶段未获用户决策时, 保留分支和 worktree, 报告未解决项并停止集成. 禁绕过 wrapper 直调 reviewer CLI.
