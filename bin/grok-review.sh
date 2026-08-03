@@ -9,7 +9,7 @@ readonly MAX_RUNTIME_SECONDS="${GROK_REVIEW_MAX_RUNTIME_SECONDS:-1800}"
 readonly GROK_BIN="${GROK_REVIEW_BIN:-grok}"
 readonly MODEL="${GROK_REVIEW_MODEL:-}"
 readonly REASONING_EFFORT="${GROK_REVIEW_REASONING_EFFORT:-high}"
-readonly GROK_REVIEW_HOME="${GROK_REVIEW_HOME:-$HOME/.grok-review}"
+readonly GROK_REVIEW_HOME="${GROK_HOME:-$HOME/.grok}"
 
 usage() {
   echo "Usage: grok-review.sh <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]" >&2
@@ -316,7 +316,7 @@ printf '%s\n' "$RULES" >"$PROMPT_FILE"
 : >"$ERROR_FILE"
 
 GROK_COMMAND=(
-  env "HOME=$GROK_STATE_ROOT" "GROK_HOME=$GROK_STATE_ROOT" "$GROK_BIN"
+  env "GROK_HOME=$GROK_STATE_ROOT" "$GROK_BIN"
   --cwd "$RUNTIME_DIR"
 )
 [[ -z "$MODEL" ]] || GROK_COMMAND+=(--model "$MODEL")

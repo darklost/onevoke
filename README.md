@@ -298,11 +298,7 @@ codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> PM "<任�
 codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> QA "<任务目标>"
 ```
 
-明确指定 Grok 时, 先认证隔离 profile, 再把上述命令名换成 `grok-review.sh`:
-
-```sh
-GROK_HOME="${GROK_REVIEW_HOME:-$HOME/.grok-review}" grok login --oauth
-```
+明确指定 Grok 时, 把上述命令名换成 `grok-review.sh`.
 
 - 第一阶段 `PM` 核对实现是否完整达到任务目标
 - 第二阶段按改动风险决定是否运行 `CSA` 和 `Hacker`, 未触发标记 N/A
@@ -312,7 +308,7 @@ GROK_HOME="${GROK_REVIEW_HOME:-$HOME/.grok-review}" grok login --oauth
 
 可调环境变量: `CODEX_REVIEW_MODEL` (默认 `gpt-5.6-sol`), `CODEX_REVIEW_REASONING_EFFORT` (默认 `high`), `CODEX_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800).
 
-Grok 默认使用隔离 profile 配置的模型; 可用 `GROK_REVIEW_MODEL` 覆盖. 其余变量为 `GROK_REVIEW_REASONING_EFFORT` (默认 `high`), `GROK_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800), `GROK_REVIEW_HOME` (默认 `~/.grok-review`).
+Grok 默认使用 Grok CLI profile 配置的模型; 可用 `GROK_REVIEW_MODEL` 覆盖. 其余变量为 `GROK_REVIEW_REASONING_EFFORT` (默认 `high`), `GROK_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800), profile 目录跟随 `GROK_HOME` (默认 `~/.grok`).
 
 ## 开发
 

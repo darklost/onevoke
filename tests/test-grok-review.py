@@ -77,7 +77,7 @@ class GrokReviewGateTest(unittest.TestCase):
             # 用例走进别的分支. 限制向上搜索范围.
             GIT_CEILING_DIRECTORIES=str(self.root),
             TMPDIR=str(self.tmp),
-            GROK_REVIEW_HOME=str(self.grok_home),
+            GROK_HOME=str(self.grok_home),
             GROK_REVIEW_BIN=str(self.fake_grok),
             GROK_REVIEW_CHECK_INTERVAL_SECONDS="1",
             GROK_REVIEW_MAX_RUNTIME_SECONDS="30",
@@ -202,7 +202,7 @@ class GrokReviewGateTest(unittest.TestCase):
         self.assertFalse(self.argv_log.exists())
 
     def test_worktree_inside_grok_home_is_rejected(self) -> None:
-        result = self.default_review(GROK_REVIEW_HOME=str(self.root))
+        result = self.default_review(GROK_HOME=str(self.root))
 
         self.assertEqual(2, result.returncode)
         self.assertIn("overlaps a Grok-writable directory", result.stderr)
