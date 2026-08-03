@@ -301,7 +301,7 @@ codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> QA "<任�
 明确指定 Grok 时, 先认证隔离 profile, 再把上述命令名换成 `grok-review.sh`:
 
 ```sh
-GROK_HOME="$HOME/.grok-review" grok login --oauth
+GROK_HOME="${GROK_REVIEW_HOME:-$HOME/.grok-review}" grok login --oauth
 ```
 
 - 第一阶段 `PM` 核对实现是否完整达到任务目标
@@ -312,7 +312,7 @@ GROK_HOME="$HOME/.grok-review" grok login --oauth
 
 可调环境变量: `CODEX_REVIEW_MODEL` (默认 `gpt-5.6-sol`), `CODEX_REVIEW_REASONING_EFFORT` (默认 `high`), `CODEX_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800).
 
-Grok 对应变量为 `GROK_REVIEW_MODEL` (默认 `grok`), `GROK_REVIEW_REASONING_EFFORT` (默认 `high`), `GROK_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800), 隔离 profile 可用 `GROK_REVIEW_HOME` 覆盖.
+Grok 默认使用隔离 profile 配置的模型; 可用 `GROK_REVIEW_MODEL` 覆盖. 其余变量为 `GROK_REVIEW_REASONING_EFFORT` (默认 `high`), `GROK_REVIEW_MAX_RUNTIME_SECONDS` (默认 1800), `GROK_REVIEW_HOME` (默认 `~/.grok-review`).
 
 ## 开发
 

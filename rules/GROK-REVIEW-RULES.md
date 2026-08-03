@@ -16,7 +16,7 @@
 - 豁免条件, 满足其一即可: (1) 相对审核 base 的全部改动文件都是 `*.md` 或 `*.markdown`, 不限文件数与行数; (2) 任务恰改 1 个文件, 且相对审核 base 的新增与删除行合计不超 10 行, 以 `git diff --numstat <base>..<commit>` 为准. 二进制文件, 拿不到数字或用户明确要求审核时一律不得豁免.
 - 走豁免路径必须在集成前明确告知用户"本次未走审核闭环", 并写出触发的豁免条件 (改了哪个文件, 新增与删除行数). 禁静默跳过. 用户随后要求审核时照常执行完整流程.
 - 本机没有可用的 Grok CLI 或 `~/.local/bin/grok-review.sh` 时无法审核: 明确告知用户"本机未装 Grok CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好 Grok CLI 后重试`、`2. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`、`3. 停止集成`. 禁自行跳过, 禁降级到其他 reviewer.
-- 隔离 profile 首次使用前运行 `GROK_HOME="$HOME/.grok-review" grok login --oauth` 完成认证. wrapper 不得读取默认 Grok profile.
+- 隔离 profile 首次使用前运行 `GROK_HOME="${GROK_REVIEW_HOME:-$HOME/.grok-review}" grok login --oauth` 完成认证. wrapper 不得读取默认 Grok profile.
 - 审核前, 把审核 base 以来全部任务改动按关注点提交, 保持 worktree 无未提交或未跟踪文件.
 - 审核 base: 专用任务分支为该分支最近一次基于默认集成分支创建或 rebase 时所基于的那个集成分支 commit 的完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变; rebase 后 base 更新为新的所基于 commit, 是否重审按 `~/.agents/GIT-RULES.md`「集成与清理」的一次性门规则执行.
 

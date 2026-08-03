@@ -7,7 +7,7 @@ export GIT_OPTIONAL_LOCKS=0
 readonly CHECK_INTERVAL_SECONDS="${GROK_REVIEW_CHECK_INTERVAL_SECONDS:-600}"
 readonly MAX_RUNTIME_SECONDS="${GROK_REVIEW_MAX_RUNTIME_SECONDS:-1800}"
 readonly GROK_BIN="${GROK_REVIEW_BIN:-grok}"
-readonly MODEL="${GROK_REVIEW_MODEL:-grok}"
+readonly MODEL="${GROK_REVIEW_MODEL:-}"
 readonly REASONING_EFFORT="${GROK_REVIEW_REASONING_EFFORT:-high}"
 readonly GROK_REVIEW_HOME="${GROK_REVIEW_HOME:-$HOME/.grok-review}"
 
@@ -315,27 +315,34 @@ printf '%s\n' "$RULES" >"$PROMPT_FILE"
 : >"$OUTPUT_FILE"
 : >"$ERROR_FILE"
 
+GROK_COMMAND=(
+  env "HOME=$GROK_STATE_ROOT" "GROK_HOME=$GROK_STATE_ROOT" "$GROK_BIN"
+  --cwd "$RUNTIME_DIR"
+)
+[[ -z "$MODEL" ]] || GROK_COMMAND+=(--model "$MODEL")
+GROK_COMMAND+=(
+  --reasoning-effort "$REASONING_EFFORT"
+  --output-format json
+  --permission-mode dontAsk
+  --allow Read
+  --allow Grep
+  --tools "read_file,grep,list_dir"
+  --disallowed-tools "Agent,run_terminal_command,search_tool,use_tool,web_search,web_fetch,search_replace,todo_write,scheduler_create,scheduler_delete,scheduler_list,monitor,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,image_gen,image_edit,image_to_video,reference_to_video,write"
+  --deny Edit
+  --deny Write
+  --deny 'MCPTool(*)'
+  --sandbox read-only
+  --disable-web-search
+  --no-memory
+  --no-subagents
+  --no-plan
+  --verbatim
+  --prompt-file "$PROMPT_FILE"
+)
+readonly -a GROK_COMMAND
+
 set -m
-env HOME="$GROK_STATE_ROOT" GROK_HOME="$GROK_STATE_ROOT" "$GROK_BIN" \
-  --cwd "$RUNTIME_DIR" \
-  --model "$MODEL" \
-  --reasoning-effort "$REASONING_EFFORT" \
-  --output-format json \
-  --permission-mode dontAsk \
-  --allow Read \
-  --allow Grep \
-  --tools read_file,grep,list_dir \
-  --disallowed-tools Agent,run_terminal_command,search_tool,use_tool,web_search,web_fetch,search_replace,todo_write,scheduler_create,scheduler_delete,scheduler_list,monitor,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,image_gen,image_edit,image_to_video,reference_to_video,write \
-  --deny Edit \
-  --deny Write \
-  --deny 'MCPTool(*)' \
-  --sandbox read-only \
-  --disable-web-search \
-  --no-memory \
-  --no-subagents \
-  --no-plan \
-  --verbatim \
-  --prompt-file "$PROMPT_FILE" >"$OUTPUT_FILE" 2>"$ERROR_FILE" &
+"${GROK_COMMAND[@]}" >"$OUTPUT_FILE" 2>"$ERROR_FILE" &
 REVIEW_PID=$!
 REVIEW_STARTED=1
 set +m
