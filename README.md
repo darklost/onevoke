@@ -165,7 +165,7 @@ kanban start --agent grok 20260802-login-retry-task
 4. 在当前 tmux session 新建 `kb-<任务标题>` window, cwd 为项目根.
 5. 要求新 Agent 先读 `kanban rules`、任务卡和项目规则, 再准备代码工作区.
 
-小任务默认使用中等推理强度, 大任务使用高推理强度. Codex 固定用 `gpt-5.6-sol`, Claude 固定用 `opus`, Grok 不锁模型并跟随其 CLI 默认. `kanban start` 默认以 YOLO 模式启动, 会绕过 Agent 自身的 approval 或 permission 提示; 因此只应在可信本机和已确认范围内使用.
+小任务默认使用中等推理强度, 大任务使用高推理强度. Codex 固定用 `gpt-5.6-sol`, Claude 固定用 `opus`; Grok 不锁模型也不接受推理强度, 一律跟随其 CLI 默认. `kanban start` 默认以 YOLO 模式启动, 会绕过 Agent 自身的 approval 或 permission 提示; 因此只应在可信本机和已确认范围内使用.
 
 只有 `todo` 卡能启动. tmux window 创建前失败会回滚卡片; window 已创建后 Agent 认证失败、退出或中断, 卡片继续留在 `working`, 不自动重派.
 

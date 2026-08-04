@@ -618,7 +618,7 @@ def window_name(entry: Entry, text: str) -> str:
 
 
 def agent_command(agent: str, binary: str, effort: str) -> list[str]:
-    """拼 Agent 的 YOLO 启动参数. Grok 不锁模型, 跟随其 CLI 默认."""
+    """拼 Agent 的 YOLO 启动参数. Grok 不锁模型也不吃推理强度, 跟随其 CLI 默认."""
     if agent == "codex":
         return [
             binary,
@@ -631,7 +631,7 @@ def agent_command(agent: str, binary: str, effort: str) -> list[str]:
     if agent == "claude":
         return [binary, "--model", "opus", "--effort", effort, "--dangerously-skip-permissions"]
     if agent == "grok":
-        return [binary, "--reasoning-effort", effort, "--permission-mode", "bypassPermissions"]
+        return [binary, "--permission-mode", "bypassPermissions"]
     raise KanbanError(f"不支持的 Agent: {agent}")
 
 
