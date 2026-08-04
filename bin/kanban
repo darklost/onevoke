@@ -33,7 +33,7 @@ TYPE_NAMES = {
 }
 READY_SECTIONS = ("任务目标", "预期成果", "验收条件", "不在本轮范围")
 ARCHIVE_RESULTS = {"completed", "cancelled", "duplicate", "wontfix"}
-AGENT_NAMES = ("codex", "claude")
+AGENT_NAMES = ("codex", "claude", "grok")
 NO_TITLE = "(无标题)"
 
 
@@ -617,6 +617,24 @@ def window_name(entry: Entry, text: str) -> str:
     return f"kb-{label}"[:50]
 
 
+def agent_command(agent: str, binary: str, effort: str) -> list[str]:
+    """拼 Agent 的 YOLO 启动参数. Grok 不锁模型, 跟随其 CLI 默认."""
+    if agent == "codex":
+        return [
+            binary,
+            "--model",
+            "gpt-5.6-sol",
+            "--config",
+            f'model_reasoning_effort="{effort}"',
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+    if agent == "claude":
+        return [binary, "--model", "opus", "--effort", effort, "--dangerously-skip-permissions"]
+    if agent == "grok":
+        return [binary, "--reasoning-effort", effort, "--permission-mode", "bypassPermissions"]
+    raise KanbanError(f"不支持的 Agent: {agent}")
+
+
 def command_start(args: argparse.Namespace, root: Path) -> None:
     entry = select_todo(load_board(root), args.task)
     agent = shutil.which(args.agent)
@@ -636,19 +654,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     )
     name = window_name(entry, original)
     effort = "high" if entry.kind == "large" else "medium"
-    agent_args = (
-        [
-            agent,
-            "--model",
-            "gpt-5.6-sol",
-            "--config",
-            f'model_reasoning_effort="{effort}"',
-            "--dangerously-bypass-approvals-and-sandbox",
-        ]
-        if args.agent == "codex"
-        else [agent, "--model", "opus", "--effort", effort, "--dangerously-skip-permissions"]
-    )
-    command = shlex.join([*agent_args, prompt])
+    command = shlex.join([*agent_command(args.agent, agent, effort), prompt])
     try:
         moved.document.write_text(updated, encoding="utf-8")
         result = subprocess.run(

@@ -95,7 +95,7 @@ Onevoke 把需求讨论和任务执行分开. 人始终保留一个需求会话,
 - 需求会话是决策面: 使用 Plan mode 明确需求、方案、验收条件和范围.
 - 主 worktree 是协调面: 放唯一的本机看板, 由人确认任务进入 `todo`.
 - 任务 worktree 是执行面: 每张已领取的代码任务独占一个分支和 worktree.
-- Codex 或 Claude 是执行 Agent: 读取规则与任务卡, 实现、验证、提交和集成.
+- Codex, Claude 或 Grok 是执行 Agent: 读取规则与任务卡, 实现、验证、提交和集成.
 - 审核角色是独立门禁: `PM` 检查需求完整性, `QA` 检查正确性与回归, 安全角色按风险触发.
 
 ![Onevoke 工作流](docs/workflow.svg)
@@ -151,6 +151,8 @@ kanban pick 20260802-login-retry-task
 kanban start 20260802-login-retry-task
 # 或
 kanban start --agent claude 20260802-login-retry-task
+# 或
+kanban start --agent grok 20260802-login-retry-task
 ```
 
 `pick` 会执行带完整性校验的 `backlog -> todo`. 不传任务 ID 时, 它只列 `backlog` 任务供人选择. 卡片仍有缺失或 `<填写>` 时会拒绝, 此时回需求会话补清楚, 不绕过门禁.
@@ -163,7 +165,7 @@ kanban start --agent claude 20260802-login-retry-task
 4. 在当前 tmux session 新建 `kb-<任务标题>` window, cwd 为项目根.
 5. 要求新 Agent 先读 `kanban rules`、任务卡和项目规则, 再准备代码工作区.
 
-小任务默认使用中等推理强度, 大任务使用高推理强度. Codex 固定用 `gpt-5.6-sol`, Claude 固定用 `opus`. `kanban start` 默认以 YOLO 模式启动, 会绕过 Agent 自身的 approval 或 permission 提示; 因此只应在可信本机和已确认范围内使用.
+小任务默认使用中等推理强度, 大任务使用高推理强度. Codex 固定用 `gpt-5.6-sol`, Claude 固定用 `opus`, Grok 不锁模型并跟随其 CLI 默认. `kanban start` 默认以 YOLO 模式启动, 会绕过 Agent 自身的 approval 或 permission 提示; 因此只应在可信本机和已确认范围内使用.
 
 只有 `todo` 卡能启动. tmux window 创建前失败会回滚卡片; window 已创建后 Agent 认证失败、退出或中断, 卡片继续留在 `working`, 不自动重派.
 

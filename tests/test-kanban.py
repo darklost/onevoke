@@ -104,7 +104,7 @@ printf '%s\\n' '@9'
             encoding="utf-8",
         )
         tmux.chmod(0o755)
-        for name in ("codex", "claude"):
+        for name in ("codex", "claude", "grok"):
             agent = fake_bin / name
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             agent.chmod(0o755)
@@ -398,11 +398,27 @@ printf '%s\\n' '@9'
         self.assertIn("--model opus --effort medium", command)
         self.assertIn("--dangerously-skip-permissions", command)
 
+    def test_start_with_grok_launches_bypass_permission_session(self) -> None:
+        task_id, task = self.make_todo("start-grok")
+        fake_bin = self.install_fake_launchers()
+
+        result = self.run_command("start", "--agent", "grok", task_id)
+
+        self.assertIn("agent=grok", result.stdout)
+        started = self.root / "working" / task.name
+        self.assertIn("- 负责人: grok\n", started.read_text(encoding="utf-8"))
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn(str(fake_bin / "grok"), command)
+        self.assertNotIn("--model", command)
+        self.assertIn("--reasoning-effort medium --permission-mode bypassPermissions", command)
+        self.assertIn(task_id, command)
+
     def test_start_uses_high_effort_for_large_tasks(self) -> None:
         self.install_fake_launchers()
         for agent, expected in (
             ("codex", '--model gpt-5.6-sol --config \'model_reasoning_effort="high"\''),
             ("claude", "--model opus --effort high"),
+            ("grok", "--reasoning-effort high --permission-mode bypassPermissions"),
         ):
             slug = f"large-{agent}"
             task_id = f"{datetime.now().strftime('%Y%m%d')}-{slug}-task"

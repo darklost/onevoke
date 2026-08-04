@@ -38,7 +38,7 @@ kanban show <task-id>
 kanban new [--large] <feature|bug|chore|research> <slug> <title...>
 kanban move <task-id> <todo|working|done|archived|trash>
 kanban pick [task-id]
-kanban start [--agent codex|claude] [task-id]
+kanban start [--agent codex|claude|grok] [task-id]
 kanban check
 ```
 
@@ -48,9 +48,9 @@ kanban check
 - `new` 默认在 `backlog/` 建小任务; `--large` 建带 `spec.md` 的大任务目录.
 - `move` 只走本文件定义的正向迁移, 校验目标不存在及迁移后状态.
 - `pick` 将 `backlog` 卡片移入 `todo`, 沿用 `todo` 完整性校验; 不指定任务就列 `backlog` 让用户按编号选.
-- `start` 默认起 `codex`; `--agent claude` 换 Claude. 指定任务只收 `todo` 卡片; 不指定就列 `todo` 让用户按编号选.
-- `start` 按任务规模设置 Agent: 大任务用 `codex gpt-5.6-sol/high` 或 `claude opus/high`; 小任务对应使用 `medium`.
-- `start` 默认用 YOLO 模式启动 Agent: Codex 绕过 approval 和 sandbox, Claude 跳过权限确认.
+- `start` 默认起 `codex`; `--agent claude` 换 Claude, `--agent grok` 换 Grok. 指定任务只收 `todo` 卡片; 不指定就列 `todo` 让用户按编号选.
+- `start` 按任务规模设置 Agent: 大任务用 `codex gpt-5.6-sol/high`, `claude opus/high` 或 `grok high`; 小任务对应使用 `medium`. Grok 不锁模型, 跟随其 CLI 默认.
+- `start` 默认用 YOLO 模式启动 Agent: Codex 绕过 approval 和 sandbox, Claude 跳过权限确认, Grok 用 `bypassPermissions`.
 - `start` 只在当前 tmux session 新建并切 window, 不建 session. 新 window cwd 是项目根, 名 `kb-<任务标题>`: 标题里的空白折叠为 `-`, 全名截断到 50 字符; 卡片无标题时回退 `kb-<slug>`.
 - 进 `todo/` 前校验: 任务目标, 预期成果, 验收条件, 不在本轮范围都填了.
 - 进 `done/` 前校验 `结果: completed`; 小任务还要 `完成总结`, 大任务还要 `report.md`.
@@ -198,7 +198,7 @@ todo/
 
 ```sh
 kanban move <task-id> working
-kanban start [--agent codex|claude] [task-id]
+kanban start [--agent codex|claude|grok] [task-id]
 ```
 
 - 只有命令迁移成功的人拿到任务. 失败, 源文件没了, 目标已存在 → 立刻停手重查; 不建替代卡片.
