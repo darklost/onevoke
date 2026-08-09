@@ -10,7 +10,7 @@
 | `~/.agents/GIT-RULES.md` | 建分支, 提交, push, 审核, 集成前 |
 | `~/.agents/REVIEW-RULES.md` | 触发审核前 |
 | `~/.agents/CODE-RULES.md` | 改代码前 |
-| `~/.agents/KANBAN-RULES.md` | 操作全局文件看板前, 用 `kanban rules` 读取 |
+| `~/.agents/KANBAN-RULES.md` | 收到 Bug 或功能开发需求时, 及操作看板前; 用 `kanban rules` 读取 |
 
 - 优先级高到低: 当前任务明确用户指令 > 离目标文件最近项目级 `AGENTS.md` 或 `CLAUDE.md` > 上表各分册 > 本文件. 本文件是兜底默认值, 分册与本文件冲突时从分册.
 - 同目录 `AGENTS.md` 与 `CLAUDE.md` 冲突且用户指令未消解时, 停止受影响操作, 问用户.
@@ -69,3 +69,4 @@
 ## 任务完成
 
 - 每个任务结束时, 一句话总结任务目标, 完成情况, commit 状态和所在分支; 非 Git 任务明确写 "无提交, 分支不适用".
+- 看板任务改用 `~/.agents/KANBAN-RULES.md`「完成报告」的模板汇报.

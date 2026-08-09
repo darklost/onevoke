@@ -80,7 +80,7 @@ ln -s ~/.agents/ONEVOKE-AGENTS.md ~/.codex/AGENTS.md
 
 ### 容量上限
 
-Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. `ONEVOKE-AGENTS.md` 约 4.0 KiB, 留给项目级的还有约 28.0 KiB — 其余规则是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
+Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. `ONEVOKE-AGENTS.md` 约 4.2 KiB, 留给项目级的还有约 27.8 KiB — 其余规则是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
 
 ```toml
 project_doc_max_bytes = 65536
@@ -126,6 +126,16 @@ Onevoke 把需求讨论和任务执行分开. 人始终保留一个需求会话,
 
 ### 3. 退出 Plan mode 并创建任务卡
 
+计划定稿后, Agent 把 "计划是否通过" 和 "走不走看板" 合并成一组编号选项一次问完, 不分两次确认:
+
+```text
+1. 确认计划并走看板 (建卡并 kanban start)
+2. 确认计划, 不走看板, 在本会话直接做
+3. 调整计划
+```
+
+选 1 才进入下面的建卡与启动流程; 选 2 在当前会话直接实施, 不建卡; 选 3 回到 Plan mode 继续调整, 更新后重新给出同一组选项. 纯问答、只读排查、纯文档或配置微调、发布部署等运维操作不触发这组选项, 已由 `kanban start` 拉起的会话也不再重复问.
+
 退出 Plan mode 后, 明确让当前 Agent 使用 `kanban new` 创建任务卡. Agent 必须基于刚完成的讨论填完整卡片, 不能只生成带 `<填写>` 的空模板.
 
 ```sh
@@ -170,6 +180,8 @@ kanban start --agent grok 20260802-login-retry-task
 只有 `todo` 卡能启动. tmux window 创建前失败会回滚卡片; window 已创建后 Agent 认证失败、退出或中断, 卡片继续留在 `working`, 不自动重派.
 
 ### 5. 回到需求会话讨论下一项
+
+协调 Agent 在 `kanban start` 成功后就结束本轮, 把执行完全交给任务 Agent: 不轮询 tmux、不抓窗口输出、不检查任务 worktree 进度、不给任务 Agent 注入指令. 需要看进度时由人明确要求.
 
 任务启动成功后, 不在协调 window 等它完成. 回到刚才讨论需求的会话, 执行 `/new` 创建干净上下文, 再次进入 Plan mode, 用 `gpt-5.6-xhigh` 或 `opus-xhigh` 讨论下一个需求.
 
@@ -286,6 +298,8 @@ reviewer 的报告不是自动真理. 主代理必须回到代码、规则和可
 kanban move 20260802-login-retry-task done
 kanban list done
 ```
+
+卡片进入 `done` 后, 执行 Agent 按 `KANBAN-RULES.md`「完成报告」的固定模板汇报一次, 覆盖任务卡与最终提交、交付结果、验收条件、验证结果、审核结果、集成与清理、偏差风险遗留和完成结论. 没内容的字段写 `无` 或 `N/A`, 失败或未执行的验证不许写成通过, 最终提交写完整 40 位 SHA. 这份报告取代平时的一句话任务总结; 代码任务未完成集成或卡片没进 `done` 时不发.
 
 `done` 保留近期已验收任务. 人确认无需继续展示后再移入 `archived`. 取消、重复或明确不修的任务也可归档, 但必须记录 `cancelled`、`duplicate` 或 `wontfix` 及原因. `trash` 只用于人明确要求删除的卡片, Agent 不自动清空.
 
