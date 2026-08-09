@@ -1,6 +1,6 @@
 # 审核规则
 
-本文件是 `~/.agents/GIT-RULES.md`「审核」的完整契约, 装在 `~/.agents/REVIEW-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `ONEVOKE-AGENTS.md`.
+本文件是 `~/.agents/GIT-RULES.md`「审核」的完整契约, 装在 `~/.agents/REVIEW-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > `~/.agents/ONEVOKE-AGENTS.md`「默认取值」 > 本文件.
 
 ## Reviewer 选择
 
@@ -11,7 +11,7 @@
 | Codex (默认) | `codex-review.sh` | `codex` | `--sandbox read-only`, `--ephemeral` |
 | Grok | `grok-review.sh` | `grok` | `--sandbox read-only`, `--no-memory`, `--no-subagents` |
 
-- 按优先级取第一个明确指定 reviewer 的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则 (Claude Code 为 `~/.claude/CLAUDE.md`, Codex 为 `~/.codex/AGENTS.md`, 或 `~/.agents/AGENTS.md`). 都未指定时用 Codex.
+- 按优先级取第一个明确指定 reviewer 的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则 (Claude Code 为 `~/.claude/CLAUDE.md`, Codex 为 `~/.codex/AGENTS.md`, 或 `~/.agents/AGENTS.md`); (4) `~/.agents/ONEVOKE-AGENTS.md`「Reviewer」的取值. 全都未指定时用 Codex.
 - 第 (3) 档只对本节的 reviewer 取值有效, 是本分册为自身设定声明的额外来源, 不改变 `~/.agents/ONEVOKE-AGENTS.md` 的通用优先级链. 该档文件已在会话上下文里就直接判读; 未自动载入且当前任务需要判定时读取它, 读不到按未指定处理.
 - 同一任务不得混用两个 reviewer 的阶段结论. 任务中途换 reviewer 视为重新审核: 已通过的阶段结论全部作废, 从第一阶段重启.
 - 下文的「reviewer」「reviewer CLI」「wrapper」均指本节选定的那一个.

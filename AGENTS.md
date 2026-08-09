@@ -8,8 +8,11 @@
 
 ## Project Structure & Module Organization
 
-- `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 其余分册由它对应小节按需引用: `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约 (Codex 与 Grok 共用), `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
-- 新增分册时把引用加进 `ONEVOKE-AGENTS.md` 对应小节即可; `install.sh` 和安装测试都遍历 `rules/*.md`, 不必改.
+- `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 只放分册索引, 优先级和三项默认取值 (分支, Reviewer, 看板任务完成). 其余分册由它的分册表按需引用: `BASE-RULES.md` 跨项目通用条款, `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约 (Codex 与 Grok 共用), `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
+- 入口装的是用户可改的默认取值: `install.sh` 只在它缺失时种一次, 已存在就原样保留并在 stderr 提示, 分册仍每次覆盖. 入口的三项取值高于分册, 分册在对应条款里显式让位; 改取值语义时必须同步对应分册的让位措辞.
+- 过期入口的判据是正文不引用 `BASE-RULES.md`. 改入口模板时保留这个引用, 否则老用户拿不到升级提示.
+- 入口存在却读不到 (悬空软链, 目录, 权限不足) 是坏现场, 不是"已保留": 安装器在装任何东西之前报错退 1, 不留半套状态, 也不把它诊断成过期入口.
+- 新增分册时把它加进 `ONEVOKE-AGENTS.md` 的分册表即可; `install.sh` 和安装测试都遍历 `rules/*.md`, 不必改.
 - 分册改名或合并时, 把旧文件名加进 `install.sh` 的 `stale_rules`. 安装器只覆盖不删除, 旧文件会以过期内容留在用户的 `~/.agents/`, 靠这份清单点名警告; 任何情况下都不得让脚本代为删除.
 - 本仓库根目录的 `AGENTS.md` 是本仓库自己的开发规则, 与 `rules/` 下的发布物是两回事, 不要混改.
 - `bin/kanban` 是 Python 3 CLI 的唯一实现, 包含看板定位、任务校验、状态迁移和命令解析.

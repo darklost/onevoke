@@ -8,7 +8,8 @@ Onevoke - One person. Many agents.
 
 | 位置 | 作用 |
 |---|---|
-| `rules/ONEVOKE-AGENTS.md` | 全局规则入口. 优先级、交流格式、工作原则、记忆与验证, 其余按需引用下面几份 |
+| `rules/ONEVOKE-AGENTS.md` | 全局规则入口. 分册索引、优先级, 以及三项可改的默认取值 (分支、Reviewer、看板任务完成) |
+| `rules/BASE-RULES.md` | 跨项目通用条款. 交流格式、工作原则、记忆管理、探索与验证、安全 |
 | `rules/GIT-RULES.md` | Git 工作流. worktree 隔离、提交与 push 策略、集成与清理 |
 | `rules/CODE-RULES.md` | 架构与代码质量契约. 模块边界、依赖方向、抽象门槛、错误处理与测试要求 |
 | `rules/KANBAN-RULES.md` + `bin/kanban` | 文件看板. 任务卡片的状态流转、领取并发、文档完整性门禁 |
@@ -23,7 +24,7 @@ Onevoke - One person. Many agents.
 - Codex CLI (`codex`) 或 Grok CLI (`grok`) — 审核门禁必需, 装选定的那个即可, 默认用 Codex
 - tmux — `kanban start` 启动 Agent 需要
 
-memsearch 是**可选**的, 需要自己安装. 装了才适用 `ONEVOKE-AGENTS.md` 的「记忆管理」一节; 没装时该节不适用, `merge-worktree-memory.py` 报告无事可做并以 0 退出, 集成流程可以无条件调用它.
+memsearch 是**可选**的, 需要自己安装. 装了才适用 `BASE-RULES.md` 的「记忆管理」一节; 没装时该节不适用, `merge-worktree-memory.py` 报告无事可做并以 0 退出, 集成流程可以无条件调用它.
 
 ## 安装
 
@@ -33,13 +34,19 @@ memsearch 是**可选**的, 需要自己安装. 装了才适用 `ONEVOKE-AGENTS.
 
 命令装到 `~/.local/bin/` (`kanban`, `codex-review.sh`, `grok-review.sh`, `merge-worktree-memory.py`), `rules/` 下全部规则装到 `~/.agents/`.
 
-安装器**不碰** `~/.agents/AGENTS.md` — 那是你自己的全局规则, 与本仓库无关. 规则文件都由本仓库拥有, 每次安装直接覆盖.
+安装器**不碰** `~/.agents/AGENTS.md` — 那是你自己的全局规则, 与本仓库无关.
+
+分册 (`BASE-RULES.md`、`GIT-RULES.md`、`REVIEW-RULES.md`、`CODE-RULES.md`、`KANBAN-RULES.md`) 由本仓库拥有, 每次安装直接覆盖. 入口 `ONEVOKE-AGENTS.md` 例外: 它装的是**你可以改的默认取值**, 安装器只在它不存在时种一次, 之后升级只覆盖分册, 并在 stderr 提示入口被保留和模板位置. 改入口不会被下次安装冲掉.
+
+入口存在却读不出来 (悬空软链、目录、权限不足) 时安装器直接报错退出, 什么都不装 —— 那种状态下你实际没有可加载的规则入口, 装一半再报成功只会更难查. 按提示修好或删掉那个路径再装.
 
 安装器也**从不删除任何文件**. 早期版本的规则文件改名或合并后, 旧文件会以过期内容留在 `~/.agents/`; 安装器检测到就逐个点名警告 (走 stderr, 不影响退出码), 删不删由你决定.
 
 ### 从旧版升级
 
 规则入口已由 `SOLO-AGENTS.md` 改名为 `ONEVOKE-AGENTS.md`, 两份审核规则已合并为 `REVIEW-RULES.md`. 装过旧版的话, **先按「接入」一节把 `@` 导入行或软链改指 `ONEVOKE-AGENTS.md`, 再删 `~/.agents/` 下的旧文件** — 顺序反了会留下悬空软链或失效导入, 而这两种失效都是静默的, 不报错.
+
+入口的通用条款随后又拆进了 `BASE-RULES.md`, 入口只留分册索引、优先级和默认取值. 拆分前装过 `ONEVOKE-AGENTS.md` 的话, 安装器不会覆盖它 (它现在归你所有), 只会在 stderr 报 `pre-split entry file`. 照提示把 `rules/ONEVOKE-AGENTS.md` 复制过去, 再把你自己的改动重新加回来; 接入方式不变, 软链和 `@` 导入都还指向同一个文件名.
 
 装完规则只是躺在 `~/.agents/`, **还不生效**. 接入是单独一步, 安装器不做 — 见下一节.
 
@@ -75,18 +82,48 @@ ln -s ~/.agents/ONEVOKE-AGENTS.md ~/.codex/AGENTS.md
 
 | 做法 | 得到 | 代价 |
 |---|---|---|
-| 软链 `ONEVOKE-AGENTS.md`, 个人规则下沉到各项目的 `AGENTS.md` | 升级自动传播 | 个人偏好要在每个项目重复一遍 |
+| 软链 `ONEVOKE-AGENTS.md`, 个人规则下沉到各项目的 `AGENTS.md` | 分册升级自动传播 | 个人偏好要在每个项目重复一遍 |
 | 保留自己的 `~/.codex/AGENTS.md`, 把 `ONEVOKE-AGENTS.md` 内容合并进去 | 一个文件管全部 | 升级不会传播, 每次都要重新合并 |
+
+### 自动载入的只有入口
+
+无论哪种接入方式, 会话启动时自动载入的都只有入口这一个文件. 分册 (含通用条款 `BASE-RULES.md`) 靠入口的分册表按需读取 — 表里写明了每份该在什么时机读, `BASE-RULES.md` 是每个任务开始时.
 
 ### 容量上限
 
-Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. `ONEVOKE-AGENTS.md` 约 4.2 KiB, 留给项目级的还有约 27.8 KiB — 其余规则是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
+Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. 入口 `ONEVOKE-AGENTS.md` 约 2.3 KiB, 留给项目级的还有约 29.7 KiB — 分册是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
 
 ```toml
 project_doc_max_bytes = 65536
 ```
 
 Claude Code 的 `@` 导入不受这个限制.
+
+## 定制默认取值
+
+入口预设三项最常要改的取值, 其余全在分册里:
+
+| 取值 | 默认 |
+|---|---|
+| 分支 | 长期分支 `main` + `develop`; 默认集成分支 `develop`, `main` 只在用户确认后从 `develop` 前进 |
+| Reviewer | `PM` / `CSA` / `Hacker` / `QA` 四个角色一律用 `codex-review.sh` |
+| 看板任务完成 | 审核通过后先报告并等用户确认, 确认后才合回初始分支 |
+
+这三项**高于分册**: 分册定机制, 入口定取值, 分册在对应条款里显式让位. 其余一切仍以分册为准, 入口不复述分册内容.
+
+改法两种, 按影响范围挑:
+
+- **改这台机器** — 直接编辑 `~/.agents/ONEVOKE-AGENTS.md`. 安装器只在它缺失时种一次, 不覆盖你的改动.
+- **只改一个项目** — 写进该项目根的 `AGENTS.md` 或 `CLAUDE.md`, 优先级高于入口. 仓库没有 `develop`、某个项目换 reviewer、某类任务要自动合回, 都走这条.
+
+例: 某项目直接在 `main` 上集成, 且看板任务审核通过就自动合回:
+
+```markdown
+## Agent 门禁
+
+- 默认集成分支是 `main`, 本仓库没有 `develop`.
+- 看板任务审核通过后自动 fast-forward 合回 `main`, 不等用户验收.
+```
 
 ## 完整工作流
 
@@ -264,7 +301,7 @@ reviewer 的报告不是自动真理. 主代理必须回到代码、规则和可
 
 ### 9. 验收、集成与清理
 
-审核通过不等于任务完成. 特别是 Bug 修复, 必须等人确认实际问题已解决; 未验收时卡片继续留在 `working`.
+审核通过不等于任务完成. 入口的默认取值要求**所有**看板任务在合回前先报告并等人确认, 不只是 Bug 修复; 未确认时不 push 集成分支、不清理 worktree, 卡片继续留在 `working`. 某个项目要审核通过就自动合回, 在该项目的 `AGENTS.md` 里改这项取值.
 
 验收后, Agent 将任务分支 rebase 到最新集成分支并重新验证. 若无实质冲突, 沿用已完成的审核门; 有本人手工解决的代码冲突时重新审核. 集成只允许 fast-forward 或项目规定的 PR 流程, 不产生 merge commit.
 

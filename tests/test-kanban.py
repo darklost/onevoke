@@ -699,6 +699,125 @@ printf '%s\\n' '@9'
             (install_home / ".agents" / "ONEVOKE-AGENTS.md").read_bytes(),
         )
 
+    def test_installer_seeds_the_entry_rule_but_never_overwrites_it(self) -> None:
+        install_home = self.root / "entry-home"
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+        entry = install_home / ".agents" / "ONEVOKE-AGENTS.md"
+        booklet = install_home / ".agents" / "BASE-RULES.md"
+
+        first = subprocess.run(
+            ["sh", str(INSTALLER)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        # 入口缺失时照常种一份, 没有可保留的定制就不该提示.
+        self.assertEqual("", first.stderr)
+        self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
+
+        # 用户改了入口的默认取值, 又把分册改坏; 再装必须只覆盖分册.
+        customized = entry.read_text(encoding="utf-8").replace(
+            "默认集成分支是 `develop`", "默认集成分支是 `trunk`"
+        )
+        self.assertNotEqual(entry.read_text(encoding="utf-8"), customized)
+        entry.write_text(customized, encoding="utf-8")
+        booklet.write_text("被改坏的分册\n", encoding="utf-8")
+
+        second = subprocess.run(
+            ["sh", str(INSTALLER)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertEqual("Onevoke installed\n", second.stdout)
+        self.assertEqual(customized, entry.read_text(encoding="utf-8"))
+        self.assertIn("left untouched", second.stderr)
+        self.assertIn("rules/ONEVOKE-AGENTS.md", second.stderr)
+        for source in sorted(RULES_DIR.glob("*.md")):
+            if source.name == AGENT_RULES.name:
+                continue
+            self.assertEqual(
+                source.read_bytes(),
+                (install_home / ".agents" / source.name).read_bytes(),
+                source.name,
+            )
+
+    def test_installer_stops_when_the_entry_rule_cannot_be_read(self) -> None:
+        # 入口存在却读不出来时不能当成"已保留": 那台机器根本没有可加载的入口,
+        # 报成拆分前入口会让用户照错误的迁移指引处理文件.
+        broken = {
+            # dotfiles 仓库管着入口, 源文件已删, 只剩悬空软链.
+            "dangling-home": lambda path: path.symlink_to(
+                self.root / "gone" / "ONEVOKE-AGENTS.md"
+            ),
+            # 手滑把入口建成了目录.
+            "directory-home": lambda path: path.mkdir(),
+        }
+
+        for home_name, make_broken in broken.items():
+            with self.subTest(home_name):
+                install_home = self.root / home_name
+                env = os.environ.copy()
+                env["HOME"] = str(install_home)
+                agents_dir = install_home / ".agents"
+                agents_dir.mkdir(parents=True)
+                entry = agents_dir / "ONEVOKE-AGENTS.md"
+                make_broken(entry)
+
+                result = subprocess.run(
+                    ["sh", str(INSTALLER)],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertEqual(1, result.returncode, result.stderr)
+                # 半套状态比不装更难查: 报错时命令和分册都不该落地.
+                self.assertEqual("", result.stdout)
+                self.assertIn("cannot be read", result.stderr)
+                self.assertIn("Nothing was installed", result.stderr)
+                self.assertNotIn("pre-split", result.stderr)
+                self.assertFalse((agents_dir / "BASE-RULES.md").exists())
+                self.assertFalse((install_home / ".local" / "bin").exists())
+                # 坏现场要原样留给用户处理, 安装器不代为删改.
+                self.assertTrue(entry.is_symlink() or entry.is_dir())
+
+    def test_installer_flags_an_entry_rule_from_before_the_split(self) -> None:
+        install_home = self.root / "presplit-home"
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+        agents_dir = install_home / ".agents"
+        agents_dir.mkdir(parents=True)
+        legacy = agents_dir / "ONEVOKE-AGENTS.md"
+        # 拆分前的入口装的是全量通用条款, 判据是它不引用拆出去的 BASE-RULES.md.
+        legacy_text = "# Onevoke 全局工作流规则\n\n拆分前的全量通用条款.\n"
+        legacy.write_text(legacy_text, encoding="utf-8")
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        # 内容过期不是失败: 安装照常完成, 保留原文件, 只在 stderr 点名.
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertIn("pre-split entry file", result.stderr)
+        self.assertIn("BASE-RULES.md", result.stderr)
+        self.assertEqual(legacy_text, legacy.read_text(encoding="utf-8"))
+        self.assertEqual(
+            (RULES_DIR / "BASE-RULES.md").read_bytes(),
+            (agents_dir / "BASE-RULES.md").read_bytes(),
+        )
+
     def test_installer_reports_but_keeps_stale_rule_files(self) -> None:
         install_home = self.root / "stale-home"
         env = os.environ.copy()

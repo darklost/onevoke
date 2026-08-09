@@ -1,12 +1,12 @@
 # Git 工作流规则
 
-本文件是 `~/.agents/ONEVOKE-AGENTS.md`「Git 工作流」的完整契约, 装在 `~/.agents/GIT-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件 > `ONEVOKE-AGENTS.md`.
+本文件是 `~/.agents/BASE-RULES.md`「Git 工作流」的完整契约, 装在 `~/.agents/GIT-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > `~/.agents/ONEVOKE-AGENTS.md`「默认取值」 > 本文件.
 
 本文件只适用 Git 仓库. 非 Git 目录无分支, worktree, 审核, 集成, 直接改文件.
 
 ## 分支与 worktree
 
-- 默认集成分支由项目规则指定; 未指定用 `refs/remotes/origin/HEAD` 指向的分支. 两者都无且本地仓库无法唯一确定时先问用户.
+- 默认集成分支由项目规则指定; 项目未指定时取 `~/.agents/ONEVOKE-AGENTS.md`「分支」的取值, 该取值指的分支在仓库不存在时用 `refs/remotes/origin/HEAD` 指向的分支. 都无且本地仓库无法唯一确定时先问用户.
 - 除下述 Markdown 直改路径外, 所有改文件任务都用独立任务分支和 `<仓库根目录>/worktrees/<task-name>/` 专用 worktree. `<task-name>` 同分支名, 短 kebab-case; 任务分支不得是默认集成分支或 detached `HEAD`. 已在当前任务专用 worktree 和任务分支时直接复用.
 - 有 `origin` 且用户未要求仅本地集成时, 先 fetch, 再基于最新 `origin/<默认集成分支>` 建任务分支; fetch 失败则停止创建并报告. 无 `origin` 或用户明确要求仅本地集成时, 基于本地默认集成分支建任务分支, 报告未同步远端.
 - Markdown 直改路径须同时满足: 任务只改 Markdown 文件; 当前分支是默认集成分支或用户明确指定目标分支; 任务开始时工作树无未提交或未跟踪文件. 任一不满足用专用 worktree.
@@ -29,6 +29,7 @@
 ## 集成与清理
 
 - 项目要求 PR 或发布门禁, 用户要求暂停或不合回, 或 Bug 修复未获用户验证确认时, 不做直接集成.
+- 看板任务的合回时机另受 `~/.agents/ONEVOKE-AGENTS.md`「看板任务完成」约束; 该取值要求先等用户确认时, 未确认不进集成流程.
 - 审核是集成前一次性门: 进集成流程前, 基于当时审核 base 完成验证, 并完成审核且通过, 或按适用审核分册的豁免条件跳过审核且已告知用户. 集成流程 (rebase 到最新集成分支, push, ff 同步) 一旦开始, 集成分支前进只重做 rebase 和验证, 沿用已通过审核结论, 不再审核. 例外: rebase 引入实质代码冲突并由本人手动解决, 或用户明确要求时重审.
 - 远端集成路径: 在任务 worktree fetch, rebase 到最新 `origin/<默认集成分支>`, 该远端 commit 记为审核 base, 再验证和审核, 通过后进集成流程. 已 push 的任务分支审核通过后仅用 `git push --force-with-lease` 更新; lease 失败则停止, 不覆盖远端改动.
 - 本地集成路径: 无 `origin` 或用户明确要求仅本地集成时, rebase 到本地默认集成分支, 其当前 commit 记为审核 base, 再验证和审核, 通过后进集成流程.
