@@ -889,7 +889,7 @@ N/A
             "## 完成总结\n\n",
             encoding="utf-8",
         )
-        outside_dir = self.root.parent / "evil-task"
+        outside_dir = self.root / "evil-task-outside"
         outside_dir.mkdir()
         (outside_dir / "spec.md").write_text("# evil\n", encoding="utf-8")
         self.assertIn("# 任务 dir-swap", self.run_command("show", task_id).stdout)

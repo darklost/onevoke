@@ -302,27 +302,48 @@ def ensure_no_symlinks_under_board(root: Path, path: Path) -> None:
             raise KanbanError(f"路径分量不得是符号链接: {current}")
 
 
-def open_task_document(entry: Entry, *, write: bool = False) -> int:
-    """打开任务文档且不跟随软链, 防止 scan 后被替换为看板外目标."""
-    root = board_root_from_entry(entry)
-    ensure_no_symlinks_under_board(root, entry.path)
-    ensure_no_symlinks_under_board(root, entry.document)
-    path = entry.document
-    flags = os.O_RDWR if write else os.O_RDONLY
+def openat_nofollow(dir_fd: int, name: str, flags: int) -> int:
+    open_flags = flags
     if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+        open_flags |= os.O_NOFOLLOW
     try:
-        fd = os.open(path, flags)
+        return os.open(name, open_flags, dir_fd=dir_fd)
     except OSError as error:
-        # Linux 对软链返回 ELOOP
         if getattr(error, "errno", None) in {getattr(os, "ELOOP", 40), 40}:
-            raise KanbanError(f"任务文档不得是符号链接: {path}") from error
-        raise KanbanError(f"无法打开任务文档: {path}: {error}") from error
+            raise KanbanError(f"路径分量不得是符号链接: {name}") from error
+        raise
+
+
+def open_path_nofollow(root: Path, path: Path, *, write: bool = False) -> int:
+    """从看板根用 openat+O_NOFOLLOW 逐级打开, 关闭中间目录 fd 掉包窗口."""
+    ensure_no_symlinks_under_board(root, path)
+    relative = os.path.relpath(str(path), str(root.resolve(strict=False)))
+    parts = [] if relative in ("", ".") else list(Path(relative).parts)
+    if not parts:
+        raise KanbanError(f"任务文档路径无效: {path}")
+    dir_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for part in parts[:-1]:
+            next_fd = openat_nofollow(
+                dir_fd, part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            os.close(dir_fd)
+            dir_fd = next_fd
+        final_flags = os.O_RDWR if write else os.O_RDONLY
+        fd = openat_nofollow(dir_fd, parts[-1], final_flags)
+    finally:
+        os.close(dir_fd)
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode):
         os.close(fd)
         raise KanbanError(f"任务文档必须是普通文件: {path}")
     return fd
+
+
+def open_task_document(entry: Entry, *, write: bool = False) -> int:
+    """打开任务文档且不跟随软链, 防止 scan 后被替换为看板外目标."""
+    root = board_root_from_entry(entry)
+    return open_path_nofollow(root, entry.document, write=write)
 
 
 def read_document(entry: Entry) -> str:

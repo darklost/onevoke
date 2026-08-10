@@ -347,6 +347,22 @@ class MergeTest(unittest.TestCase):
         self.assertIn("Nothing to merge", result.stdout)
         self.assertEqual(b"### 09:30\n- kept\n", (self.target_memory / "keep.md").read_bytes())
 
+    def test_empty_source_dir_that_gains_a_file_during_check_fails(self) -> None:
+        original_assert = merger.assert_source_unchanged
+
+        def create_then_assert(source_memory: Path, snapshots: dict[Path, bytes]) -> None:
+            (source_memory / "late.md").write_bytes(b"### 09:30\n- late first file\n")
+            original_assert(source_memory, snapshots)
+
+        with mock.patch.object(
+            merger, "assert_source_unchanged", side_effect=create_then_assert
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                merger.merge(str(self.source), str(self.target), dry_run=False)
+
+        self.assertEqual(1, raised.exception.code)
+        self.assertTrue((self.source_memory / "late.md").exists())
+
     def test_unstable_source_snapshot_is_rejected(self) -> None:
         source_file = self.write_source("a.md", b"### 09:30\n- first\n")
         original_attempts = merger.SOURCE_STABLE_ATTEMPTS

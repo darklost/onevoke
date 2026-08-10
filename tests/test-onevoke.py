@@ -886,6 +886,9 @@ class OnevokeCommandTest(unittest.TestCase):
                     "## 默认取值\n"
                     "| 分册 | 说明 |\n"
                     "| `BASE-RULES.md` | 通用条款 |\n"
+                    "| `GIT-RULES.md` | Git 工作流 |\n"
+                    "### 看板任务完成\n"
+                    "- 先报告再合回 develop\n"
                 ),
             ),
             "claude": (
@@ -908,7 +911,10 @@ class OnevokeCommandTest(unittest.TestCase):
                 ),
                 (
                     "# Onevoke 全局工作流规则\n"
-                    "分册见 ~/.agents/BASE-RULES.md\n"
+                    "## 默认取值\n"
+                    "分册见 ~/.agents/BASE-RULES.md 与 GIT-RULES.md\n"
+                    "### 看板任务完成\n"
+                    "- 先报告\n"
                 ),
             ),
         }

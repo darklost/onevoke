@@ -405,11 +405,17 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         print(f"Nothing to merge: {source_memory} does not exist")
         return
 
-    if not list_source_memory_files(source_memory):
+    # 目录已存在时即使当前为空也要做稳定快照: 避免 Stop hook 稍后才创建首个文件
+    # 时被误判为空操作成功, 随后 worktree 被清理导致首条记录丢失.
+    snapshots = read_stable_source_files(source_memory)
+    if not snapshots:
+        # 再次确认空目录稳定后, 仍做一次合并后复核.
+        if dry_run:
+            print(f"Nothing to merge: no memory files in {source_memory}")
+            return
+        assert_source_unchanged(source_memory, snapshots)
         print(f"Nothing to merge: no memory files in {source_memory}")
         return
-
-    snapshots = read_stable_source_files(source_memory)
 
     if dry_run:
         merge_files(source_root, target_root, source_memory, snapshots, True)
@@ -422,6 +428,10 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # 持锁后再采一次稳定快照, 避免等待锁期间 Stop hook 已写入新条目或新文件.
         snapshots = read_stable_source_files(source_memory)
+        if not snapshots:
+            assert_source_unchanged(source_memory, snapshots)
+            print(f"Nothing to merge: no memory files in {source_memory}")
+            return
         merge_files(source_root, target_root, source_memory, snapshots, False)
 
 
