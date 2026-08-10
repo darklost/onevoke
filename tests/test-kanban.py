@@ -808,6 +808,71 @@ printf '%s\\n' '@9'
         self.assertIn(healthy, self.run_command("list").stdout)
         self.assertEqual(secret, outside.read_text(encoding="utf-8"))
 
+    def test_document_replaced_with_symlink_is_rejected_on_read(self) -> None:
+        # 大任务: 入口目录合法, 仅 spec.md 在 scan 后被换成看板外软链.
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-swap-link-task"
+        task_dir = self.root / "todo" / task_id
+        task_dir.mkdir()
+        spec = task_dir / "spec.md"
+        contract = """# 任务 swap-link
+
+- 类型: Bug
+- 创建时间: 2026-08-11 00:00
+- 负责人:
+- 开始时间:
+- 完成时间:
+- 任务分支:
+- 结果:
+
+## 任务目标
+
+目标
+
+## 用户决策
+
+N/A
+
+## 预期成果
+
+成果
+
+## 验收条件
+
+- [ ] 条件
+
+## 威胁模型
+
+N/A
+
+## 不在本轮范围
+
+- 无
+
+## 讨论与决策
+
+N/A
+
+## 实施与验证
+
+N/A
+
+## 完成总结
+
+"""
+        spec.write_text(contract, encoding="utf-8")
+        outside = self.root.parent / "swap-secret.md"
+        outside.write_text("external\n", encoding="utf-8")
+        self.assertIn("# 任务 swap-link", self.run_command("show", task_id).stdout)
+        spec.unlink()
+        spec.symlink_to(outside)
+
+        show = self.run_command("show", task_id, succeeds=False)
+        self.assertTrue(
+            "不得是符号链接" in show.stderr or "符号链接" in show.stderr,
+            show.stderr,
+        )
+        self.assertEqual("external\n", outside.read_text(encoding="utf-8"))
+
     def test_symlink_entry_is_rejected_without_blocking_others(self) -> None:
         healthy, todo_path = self.make_todo("fine")
         link = self.root / "backlog" / f"{datetime.now().strftime('%Y%m%d')}-link-task.md"

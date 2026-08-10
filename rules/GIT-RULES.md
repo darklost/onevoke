@@ -40,5 +40,5 @@
 - 用 PR 时先 push 当前任务分支. PR 必须说明改了什么, 为何改, 如何验证; 可见 UI 变更附截图; 测试或快照变更列实际命令. 等 CI 全通过后, 按仓库策略 squash 或 rebase 合并, 仓库未指定默认 squash. 仓库未配 CI 先问用户, 不自动合并.
 - 清理的唯一前置是任务改动已进入 `develop`. 远端直接集成先 fetch 再用 `git merge-base --is-ancestor <最终任务 commit> origin/develop` 判定; 本地直接集成同法核对本地 `develop`. PR 路径不用这个判定, 因为 squash 或 rebase 合并会重写 commit, 以 PR 已标记为 merged 且目标分支是 `develop` 为准. 判不出来或判定为否时不清理, 保留 worktree 和分支并报告.
 - 主树 `git merge --ff-only` 失败不阻塞清理. 上条判定通过即照常清理, 同时向用户报告主树未同步的具体原因 (未提交改动, 本地领先, 已分叉) 和恢复办法; 禁为了同步主树擅自 stash, reset, 丢弃或提交主树里的用户改动.
-- 满足清理前置后, 先跑 `~/.local/bin/merge-worktree-memory.py --source <worktree-path>`. 源 worktree 没有 `.memsearch/memory` (未装 memsearch, 或尚未产生记忆) 时该命令是空操作并以 0 退出, 照常执行, 不跳过也不据此报错; 若来源在读取或合并期间仍被写入且无法证明稳定, 命令必须失败并阻止清理 worktree.
+- 满足清理前置后, 先跑 `~/.local/bin/merge-worktree-memory.py --source <worktree-path>`. 源 worktree 没有 `.memsearch/memory` (未装 memsearch, 或尚未产生记忆) 时该命令是空操作并以 0 退出, 照常执行, 不跳过也不据此报错; 若来源在读取或合并期间仍被写入且无法证明稳定, 命令必须失败并阻止清理 worktree. 新条目写入前清理非法 UTF-8; 不对可能仍被追加的目标文件做整文件 rewrite (无 MemSearch 协作封口协议时, 改写无法证明不丢并发追加).
 - `merge-worktree-memory.py` 成功后, 删对应 worktree, 本地任务分支及仅为该 worktree 建的临时或预览 tag; 非本地集成还须删远端任务分支. 脚本失败则保留 worktree 和分支. 禁删正式发布 tag.

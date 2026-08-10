@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -274,9 +275,40 @@ def locate(board: Board, value: str) -> Entry:
         raise KanbanError(f"任务不存在: {task_id}") from error
 
 
+def open_task_document(path: Path, *, write: bool = False) -> int:
+    """打开任务文档且不跟随软链, 防止 scan 后被替换为看板外目标."""
+    if path.is_symlink():
+        raise KanbanError(f"任务文档不得是符号链接: {path}")
+    flags = os.O_RDWR if write else os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        # Linux 对软链返回 ELOOP
+        if getattr(error, "errno", None) in {getattr(os, "ELOOP", 40), 40}:
+            raise KanbanError(f"任务文档不得是符号链接: {path}") from error
+        raise KanbanError(f"无法打开任务文档: {path}: {error}") from error
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
+        raise KanbanError(f"任务文档必须是普通文件: {path}")
+    return fd
+
+
 def read_document(entry: Entry) -> str:
     try:
-        return entry.document.read_text(encoding="utf-8")
+        fd = open_task_document(entry.document, write=False)
+        try:
+            chunks: list[bytes] = []
+            while True:
+                piece = os.read(fd, 1 << 20)
+                if not piece:
+                    break
+                chunks.append(piece)
+            return b"".join(chunks).decode("utf-8")
+        finally:
+            os.close(fd)
     except UnicodeError as error:
         raise KanbanError(f"任务文档不是有效 UTF-8: {entry.document}") from error
 
@@ -323,13 +355,22 @@ def completion_metadata(text: str) -> str:
 
 
 def write_text_atomic(path: Path, text: str) -> None:
+    if path.is_symlink():
+        raise KanbanError(f"任务文档不得是符号链接: {path}")
+    # 先确认现有目标不是软链/非常规文件, 再原子替换.
+    if path.exists():
+        fd = open_task_document(path, write=False)
+        os.close(fd)
     handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     temp_path = Path(temp_name)
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as file:
             file.write(text)
-        os.chmod(temp_path, path.stat().st_mode)
+        if path.exists() and not path.is_symlink():
+            os.chmod(temp_path, path.stat().st_mode)
         os.replace(temp_path, path)
+        if path.is_symlink():
+            raise KanbanError(f"写入后任务文档变成符号链接: {path}")
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise
@@ -683,7 +724,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     effort = "high" if entry.kind == "large" else "medium"
     agent_argv = [*agent_command(agent_name, agent, effort), prompt]
     try:
-        moved.document.write_text(updated, encoding="utf-8")
+        write_text_atomic(moved.document, updated)
         if launcher == "tmux":
             command = shlex.join(agent_argv)
             result = subprocess.run(
@@ -716,7 +757,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 raise KanbanError(f"启动 Agent 失败: {error}") from error
     except (KanbanError, OSError, UnicodeError) as error:
         try:
-            moved.document.write_text(original, encoding="utf-8")
+            write_text_atomic(moved.document, original)
             moved.path.rename(entry.path)
         except (OSError, UnicodeError) as rollback_error:
             raise KanbanError(

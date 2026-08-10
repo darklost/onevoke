@@ -181,9 +181,22 @@ def _claude_rules_import_present(text: str, entry: Path) -> bool:
 
 
 def _merged_rules_present(text: str) -> bool:
-    """Codex/Grok 合并文件须有完整入口标题行, 以及非否定语境的分册引用."""
+    """Codex/Grok 合并文件须有完整入口标题, 以及正向分册引用结构."""
     has_heading = False
     has_base = False
+    # 只认表格/路径式正向引用, 拒绝 "BASE-RULES.md 已禁用" 一类后置否定.
+    base_positive = re.compile(
+        r"(?:"
+        r"\|[ \t]*`?BASE-RULES\.md`?[ \t]*\|"  # 分册表
+        r"|[~/\w.-]*BASE-RULES\.md"  # 路径尾部
+        r")"
+    )
+    base_negated = re.compile(
+        r"(?:"
+        r"(不|勿|别|没有|未|禁止|跳过).{0,16}BASE-RULES\.md"
+        r"|BASE-RULES\.md.{0,16}(不|勿|别|没有|未|禁止|跳过|禁用|停用|废弃)"
+        r")"
+    )
     for raw in _strip_comments_and_fences(text).splitlines():
         line = raw.strip()
         if line == "# Onevoke 全局工作流规则":
@@ -193,9 +206,10 @@ def _merged_rules_present(text: str) -> bool:
             continue
         if "TODO" in line or "占位" in line:
             continue
-        if re.search(r"(不|勿|别|没有|未|禁止|跳过).{0,16}BASE-RULES\.md", line):
+        if base_negated.search(line):
             continue
-        if re.search(r"(?:^|[\s`|/(['\"])BASE-RULES\.md(?:$|[\s`|)/,'\"])", line):
+        if base_positive.search(line):
+            # 路径尾部匹配后若整行主要是否定说明, 已在 base_negated 排除.
             has_base = True
     return has_heading and has_base
 
@@ -805,12 +819,7 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         )
 
     if shutil.which("tmux"):
-        if not os.environ.get("TMUX"):
-            print(
-                f"提示: tmux 已安装但当前不在 session. kanban start --launcher tmux "
-                f"前请先运行: {TMUX_SESSION_HINT}",
-                file=sys.stderr,
-            )
+        # doctor 已输出唯一启动命令; 这里不再重复.
         launcher_choices = [("tmux", "tmux 新窗口"), ("foreground", "当前终端前台运行")]
         config["launcher"] = ask_choice(
             "kanban start 使用哪种启动方式?", launcher_choices, existing["launcher"]

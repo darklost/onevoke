@@ -229,18 +229,17 @@ class MergeTest(unittest.TestCase):
         self.assertIn("merged=0 skipped=0 empty_files=1", result.stdout)
         self.assertFalse((self.target_memory / "a.md").exists())
 
-    def test_cleans_invalid_utf8_after_merge(self) -> None:
-        # 写入路径会先清新条目; 这里预置脏目标文件, 覆盖 clean_directory 路径.
+    def test_new_entries_are_cleaned_on_write_without_rewriting_live_target(self) -> None:
+        # 预置脏目标保留; 新条目写入前清理. 不对活跃目标做整文件 rewrite.
         (self.target_memory / "a.md").write_bytes(b"### 08:00\n- old \xff dirty\n")
         self.write_source("a.md", b"### 09:30\n- dirty \xff byte\n")
 
         result = self.run_merger()
 
         merged = (self.target_memory / "a.md").read_bytes()
-        self.assertNotIn(b"\xff", merged)
-        merged.decode("utf-8")
-        self.assertIn(b"- dirty  byte", merged)
-        self.assertIn("cleaned 1 file(s)", result.stdout)
+        self.assertIn(b"\xff", merged)  # 预置脏字节保留
+        self.assertIn(b"- dirty  byte", merged)  # 新条目已清理
+        self.assertIn("left 1 dirty file(s) unchanged", result.stdout)
 
     def test_clean_target_is_not_rewritten(self) -> None:
         self.write_source("a.md", b"### 09:30\n- clean\n")
@@ -250,9 +249,9 @@ class MergeTest(unittest.TestCase):
         result = self.run_merger()
 
         self.assertEqual(before, (self.target_memory / "a.md").stat().st_ino)
-        self.assertIn("cleaned 0 file(s)", result.stdout)
+        self.assertIn("left 0 dirty file(s) unchanged", result.stdout)
 
-    def test_rewrite_preserves_permissions(self) -> None:
+    def test_preexisting_dirty_target_keeps_permissions_and_bytes(self) -> None:
         target_file = self.target_memory / "a.md"
         target_file.write_bytes(b"### 08:00\n- old \xff byte\n")
         os.chmod(target_file, 0o640)
@@ -261,7 +260,7 @@ class MergeTest(unittest.TestCase):
         self.run_merger()
 
         self.assertEqual(0o640, target_file.stat().st_mode & 0o777)
-        self.assertNotIn(b"\xff", target_file.read_bytes())
+        self.assertIn(b"\xff", target_file.read_bytes())
 
     def test_entry_pending_in_another_worktree_is_not_skipped(self) -> None:
         # A 的记忆文件是上次合并的产物, 条目一的正文之后带着条目二的头部标记,
@@ -298,7 +297,8 @@ class MergeTest(unittest.TestCase):
         result = self.run_merger("--dry-run")
 
         self.assertIn(f"Would merge a.md entry {GOLDEN_HASHES[0]}", result.stdout)
-        self.assertIn("Would clean invalid UTF-8", result.stdout)
+        self.assertIn("Would scan invalid UTF-8", result.stdout)
+        self.assertIn("without rewriting live files", result.stdout)
         self.assertFalse((self.target_memory / "a.md").exists())
 
     def test_source_equal_to_target_is_a_noop(self) -> None:
@@ -438,27 +438,28 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(1, raised.exception.code)
         self.assertIn(b"late", source_file.read_bytes())
 
-    def test_target_append_during_clean_fails_without_losing_new_bytes(self) -> None:
+    def test_merge_does_not_rewrite_target_so_concurrent_appends_survive(self) -> None:
         target_file = self.target_memory / "a.md"
-        dirty = b"### 08:00\n- dirty \xff byte\n"
-        target_file.write_bytes(dirty)
+        target_file.write_bytes(b"### 08:00\n- dirty \xff byte\n")
         self.write_source("a.md", b"### 09:30\n- clean entry\n")
 
-        original_clean = merger.clean_bytes
+        def append_during_merge() -> None:
+            time.sleep(0.05)
+            with open(target_file, "ab") as handle:
+                handle.write(b"### 09:50\n- concurrent target append\n")
 
-        def append_then_clean(data: bytes) -> bytes:
-            if b"\xff" in data:
-                with open(target_file, "ab") as handle:
-                    handle.write(b"### 09:50\n- concurrent target append\n")
-            return original_clean(data)
+        thread = threading.Thread(target=append_during_merge)
+        thread.start()
+        try:
+            result = self.run_merger()
+        finally:
+            thread.join(timeout=2)
 
-        with mock.patch.object(merger, "clean_bytes", side_effect=append_then_clean):
-            with self.assertRaises(SystemExit) as raised:
-                merger.merge(str(self.source), str(self.target), dry_run=False)
-
-        self.assertEqual(1, raised.exception.code)
+        self.assertEqual(0, result.returncode, result.stderr)
         final = target_file.read_bytes()
         self.assertIn(b"concurrent target append", final)
+        self.assertIn(b"\xff", final)
+        self.assertIn(b"clean entry", final)
 
 
 if __name__ == "__main__":

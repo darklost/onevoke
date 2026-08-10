@@ -900,7 +900,11 @@ class OnevokeCommandTest(unittest.TestCase):
             ),
             "grok": (
                 self.home / ".grok" / "AGENTS.md",
-                "残留 BASE-RULES.md 但没有入口标题\n",
+                (
+                    "# Onevoke 全局工作流规则\n"
+                    "BASE-RULES.md 已禁用\n"
+                    "残留 BASE-RULES.md 但没有入口标题\n"
+                ),
                 (
                     "# Onevoke 全局工作流规则\n"
                     "见 ~/.agents/BASE-RULES.md\n"

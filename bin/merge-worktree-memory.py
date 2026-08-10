@@ -165,69 +165,27 @@ def clean_bytes(data: bytes) -> bytes:
     return data.decode("utf-8", errors="ignore").encode("utf-8")
 
 
-def _read_fd(fd: int) -> bytes:
-    os.lseek(fd, 0, os.SEEK_SET)
-    chunks: list[bytes] = []
-    while True:
-        piece = os.read(fd, 1 << 20)
-        if not piece:
-            break
-        chunks.append(piece)
-    return b"".join(chunks)
+def scan_dirty_files(directory: Path) -> tuple[int, int]:
+    """扫描非法 UTF-8, 但不改写已有文件.
 
-
-def rewrite_if_unchanged(path: Path, data: bytes, expected: bytes) -> None:
-    """在同一 inode 上原地改写, 避免 os.replace 切断仍打开的追加 fd.
-
-    持文件锁后再次核对内容; 写完再读回校验. 无法证明未被并发改写时失败,
-    而不是静默丢掉追加字节. flock 对不协作 writer 只是尽力, 最终靠内容校验兜底.
+    新合并条目在写入前已清理. 对可能被 Stop hook 并发追加的目标文件做
+    truncate/replace 无法在无协作协议下证明不丢字节, 因此这里 fail-closed:
+    只报告脏文件数量, 留给空闲时的运维清理, 合并本身不覆盖活跃目标.
     """
-    fd = os.open(path, os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        current = _read_fd(fd)
-        if current != expected:
-            die(
-                f"target memory changed during clean: {path}; "
-                "refusing to overwrite concurrent appends"
-            )
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        written = 0
-        view = memoryview(data)
-        while written < len(data):
-            written += os.write(fd, view[written:])
-        os.fsync(fd)
-        final = _read_fd(fd)
-        if final != data:
-            die(
-                f"target memory changed during clean write: {path}; "
-                "refusing success after concurrent modification"
-            )
-    finally:
-        os.close(fd)
-
-
-def clean_directory(directory: Path) -> tuple[int, int]:
-    """递归清理目录下的 *.md. 不跟随符号链接, 内容未变则不重写."""
     scanned = 0
-    changed = 0
-    # 物化迭代器, 避免 clean 失败 raise 时留下未关闭的 scandir.
+    dirty = 0
     for entry in list(os.scandir(directory)):
         path = Path(entry.path)
         if entry.is_dir(follow_symlinks=False):
-            sub_scanned, sub_changed = clean_directory(path)
+            sub_scanned, sub_dirty = scan_dirty_files(path)
             scanned += sub_scanned
-            changed += sub_changed
+            dirty += sub_dirty
         elif entry.is_file(follow_symlinks=False) and path.suffix.lower() == ".md":
             scanned += 1
             original = path.read_bytes()
-            cleaned = clean_bytes(original)
-            if cleaned != original:
-                rewrite_if_unchanged(path, cleaned, original)
-                changed += 1
-    return scanned, changed
+            if clean_bytes(original) != original:
+                dirty += 1
+    return scanned, dirty
 
 
 def list_source_memory_files(source_memory: Path) -> list[Path]:
@@ -418,12 +376,15 @@ def merge_files(
     print(f"Source: {source_root}")
     print(f"Target: {target_root}")
 
-    # 合并只做字节透传, 脏字节会从 worktree 记忆一路带进主树, 在这里收掉.
+    # 新条目写入前已清理. 不对目标整文件 rewrite, 避免与并发 append 竞态丢记录.
     if dry_run:
-        print(f"Would clean invalid UTF-8 in {target_memory}")
+        print(f"Would scan invalid UTF-8 in {target_memory} without rewriting live files")
     elif target_memory.is_dir():
-        scanned, changed = clean_directory(target_memory)
-        print(f"scanned {scanned} markdown file(s), cleaned {changed} file(s)")
+        scanned, dirty = scan_dirty_files(target_memory)
+        print(
+            f"scanned {scanned} markdown file(s), "
+            f"left {dirty} dirty file(s) unchanged to avoid concurrent loss"
+        )
 
     if not dry_run:
         assert_source_unchanged(source_memory, snapshots)
