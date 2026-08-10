@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +37,9 @@ ENTRY_MARKER = re.compile(
     rb"^<!-- merged-worktree-memory (?:entry|file-entry):([0-9a-f]+) -->$"
 )
 SOURCE_MARKER = re.compile(rb"^<!-- merged-worktree-memory source:.* -->$")
+# Stop hook 可能在合并窗口内继续追加; 两次读取一致才视为来源稳定.
+SOURCE_STABLE_ATTEMPTS = 5
+SOURCE_STABLE_DELAY_SECONDS = 0.1
 
 
 def die(message: str) -> None:
@@ -162,7 +166,8 @@ def clean_bytes(data: bytes) -> bytes:
     return data.decode("utf-8", errors="ignore").encode("utf-8")
 
 
-def atomic_replace(path: Path, data: bytes) -> None:
+def atomic_replace_if_unchanged(path: Path, data: bytes, expected: bytes) -> None:
+    """仅当磁盘内容仍等于 expected 时替换, 防止清 UTF-8 时抹掉并发追加."""
     mode = path.stat().st_mode
     handle, temp_name = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
@@ -174,7 +179,24 @@ def atomic_replace(path: Path, data: bytes) -> None:
             temp_file.flush()
             os.fsync(temp_file.fileno())
         os.chmod(temp_path, mode)
-        os.replace(temp_path, path)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            chunks: list[bytes] = []
+            while True:
+                piece = os.read(fd, 1 << 20)
+                if not piece:
+                    break
+                chunks.append(piece)
+            current = b"".join(chunks)
+            if current != expected:
+                die(
+                    f"target memory changed during clean: {path}; "
+                    "refusing to overwrite concurrent appends"
+                )
+            os.replace(temp_path, path)
+        finally:
+            os.close(fd)
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise
@@ -191,7 +213,8 @@ def clean_directory(directory: Path) -> tuple[int, int]:
     """递归清理目录下的 *.md. 不跟随符号链接, 内容未变则不重写."""
     scanned = 0
     changed = 0
-    for entry in os.scandir(directory):
+    # 物化迭代器, 避免 clean 失败 raise 时留下未关闭的 scandir.
+    for entry in list(os.scandir(directory)):
         path = Path(entry.path)
         if entry.is_dir(follow_symlinks=False):
             sub_scanned, sub_changed = clean_directory(path)
@@ -202,9 +225,55 @@ def clean_directory(directory: Path) -> tuple[int, int]:
             original = path.read_bytes()
             cleaned = clean_bytes(original)
             if cleaned != original:
-                atomic_replace(path, cleaned)
+                atomic_replace_if_unchanged(path, cleaned, original)
                 changed += 1
     return scanned, changed
+
+
+def read_stable_source_files(source_files: list[Path]) -> dict[Path, bytes]:
+    """连续两次读取内容一致才接受; 不稳定则重试, 耗尽后失败阻止清理 worktree."""
+    if not source_files:
+        return {}
+    last_error = "source memory files were unstable"
+    for attempt in range(1, SOURCE_STABLE_ATTEMPTS + 1):
+        first: dict[Path, bytes] = {}
+        try:
+            for path in source_files:
+                if not path.is_file():
+                    die(f"source memory file disappeared: {path}")
+                first[path] = path.read_bytes()
+            time.sleep(SOURCE_STABLE_DELAY_SECONDS)
+            stable = True
+            for path, data in first.items():
+                if not path.is_file():
+                    die(f"source memory file disappeared: {path}")
+                if path.read_bytes() != data:
+                    stable = False
+                    last_error = (
+                        f"source memory changed while reading: {path.name} "
+                        f"(attempt {attempt}/{SOURCE_STABLE_ATTEMPTS}); "
+                        "Stop hook may still be writing"
+                    )
+                    break
+            if stable:
+                return first
+        except OSError as error:
+            last_error = f"failed to read source memory: {error}"
+    die(last_error)
+
+
+def assert_source_unchanged(snapshots: dict[Path, bytes]) -> None:
+    """合并后再核对来源; 若 Stop hook 晚到写入则失败, 阻止清理 worktree."""
+    for path, expected in snapshots.items():
+        try:
+            current = path.read_bytes()
+        except OSError as error:
+            die(f"source memory unreadable after merge: {path}: {error}")
+        if current != expected:
+            die(
+                f"source memory changed after merge: {path.name}; "
+                "refusing success so the worktree is not cleaned"
+            )
 
 
 def git_output(directory: str, *args: str) -> str | None:
@@ -263,7 +332,7 @@ def format_entry(marker_hash: str, kind: str, source_root: str, name: str,
 def merge_files(
     source_root: str,
     target_root: str,
-    source_files: list[Path],
+    snapshots: dict[Path, bytes],
     dry_run: bool,
 ) -> None:
     target_memory = Path(target_root) / ".memsearch" / "memory"
@@ -273,10 +342,10 @@ def merge_files(
     merged = skipped = empty = 0
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
 
-    for source_file in source_files:
+    for source_file in sorted(snapshots, key=lambda path: path.name):
         target_file = target_memory / source_file.name
         seen = target_hashes(target_file)
-        data = source_file.read_bytes()
+        data = snapshots[source_file]
 
         blocks = emit_entry_blocks(data)
         entries: list[tuple[str, str, bytes]] = [
@@ -320,6 +389,9 @@ def merge_files(
         scanned, changed = clean_directory(target_memory)
         print(f"scanned {scanned} markdown file(s), cleaned {changed} file(s)")
 
+    if not dry_run:
+        assert_source_unchanged(snapshots)
+
 
 def merge(source_root: str, target_root: str, dry_run: bool) -> None:
     source_memory = Path(source_root) / ".memsearch" / "memory"
@@ -329,7 +401,8 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         print("Source is the main worktree; no memory merge needed.")
         return
 
-    # 未安装 memsearch 时 worktree 里根本没有这个目录: 属于正常情况, 空操作返回.
+    # 源 worktree 没有 .memsearch/memory 时是正常空操作: 常见于未装 memsearch,
+    # 或已装但本 worktree 尚未产生记忆. 不创建任何目录, 以 0 退出.
     if not source_memory.is_dir():
         print(f"Nothing to merge: {source_memory} does not exist")
         return
@@ -339,8 +412,10 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         print(f"Nothing to merge: no memory files in {source_memory}")
         return
 
+    snapshots = read_stable_source_files(source_files)
+
     if dry_run:
-        merge_files(source_root, target_root, source_files, True)
+        merge_files(source_root, target_root, snapshots, True)
         return
 
     state_dir = Path(target_root) / ".memsearch"
@@ -348,7 +423,9 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
     lock_path = state_dir / ".merge-worktree-memory.lock"
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        merge_files(source_root, target_root, source_files, False)
+        # 持锁后再采一次稳定快照, 避免等待锁期间 Stop hook 已写入新条目.
+        snapshots = read_stable_source_files(source_files)
+        merge_files(source_root, target_root, snapshots, False)
 
 
 def main() -> int:

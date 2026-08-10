@@ -27,7 +27,7 @@ Onevoke - One person. Many agents.
 - tmux 可选; 不安装时 `kanban start` 可在当前终端前台运行
 - uv 可选; 仅 Onevoke 自动安装或修正 MemSearch CLI 版本时需要
 
-memsearch 是可选依赖. welcome 要求 CLI 版本正好为 `0.4.15`, 并验证当前执行 Agent 的真实插件或 hooks, 缺失时询问是否安装. CLI 或当前 Agent 插件任一未就绪时, `BASE-RULES.md` 的「记忆管理」不适用; 记忆合并命令仍以成功空操作退出.
+memsearch 是可选依赖. welcome 要求 CLI 版本正好为 `0.4.15`, 并验证当前执行 Agent 的真实插件或 hooks, 缺失时询问是否安装. CLI 或当前 Agent 插件任一未就绪时, `BASE-RULES.md` 的「记忆管理」不适用. 源 worktree 没有 `.memsearch/memory` 时记忆合并命令以成功空操作退出; 来源在合并窗口内仍被写入且无法证明稳定时必须失败并阻止清理 worktree.
 
 ## 安装
 
@@ -111,7 +111,7 @@ Grok 的接入目标是 `~/.grok/AGENTS.md`. 可以把它软链到入口, 或把
 
 ### 容量上限
 
-Codex 的 `project_doc_max_bytes` 默认 32 KiB, 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. 入口 `ONEVOKE-AGENTS.md` 约 2.3 KiB, 留给项目级的还有约 29.7 KiB — 分册是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
+Codex 的 `project_doc_max_bytes` 默认 32 KiB (`32768` 字节), 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. 入口 `ONEVOKE-AGENTS.md` 约 2.8 KiB, 留给项目级的还有约 29.9 KiB — 分册是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
 
 ```toml
 project_doc_max_bytes = 65536
@@ -129,7 +129,7 @@ Claude Code 的 `@` 导入不受这个限制.
 | 执行 Agent | `onevoke welcome` 选择, 未配置时回落到 Codex |
 | Reviewer | `PM` / `CSA` / `Hacker` / `QA` 分别在 welcome 中选择 Codex 或 Grok |
 | launcher | 有 tmux 时默认可选独立 window; 没有时可选当前终端前台运行 |
-| 看板任务完成 | 审核通过后先报告并等用户确认, 确认后才合回初始分支 |
+| 看板任务完成 | 审核通过后先报告并等用户确认, 确认后才合回 `develop` |
 
 查看和修改本机配置:
 
@@ -148,18 +148,25 @@ Onevoke 把需求讨论和任务执行分开. 人始终保留一个需求会话,
 - 主 worktree 是协调面: 放唯一的本机看板, 由人确认任务进入 `todo`.
 - 任务 worktree 是执行面: 每张已领取的代码任务独占一个分支和 worktree.
 - Codex, Claude 或 Grok 是执行 Agent: 读取规则与任务卡, 实现、验证、提交和集成.
-- 审核角色是独立门禁: `PM` 检查需求完整性, `QA` 检查正确性与回归, 安全角色按风险触发.
+- 审核角色是独立门禁: `PM` 检查需求完整性, `QA` 检查正确性与回归, 安全角色按风险触发. 例如实现登录重试时 `PM` 核对验收条件是否写进卡且被测到, `QA` 核对失败重试与回归用例; 涉及 token 或远程接口时再触发 `CSA`/`Hacker`, 纯本地脚本与规则仓库通常标 N/A.
 
 ![Onevoke 工作流](docs/workflow.svg)
 
 ### 1. 新建计划会话
 
-每轮从一个干净会话开始. 创建新会话后立即进入 Plan mode, 让 Agent 先分析和提问, 不直接改文件.
+每轮从一个干净会话开始. 若本机用 `tmux` launcher, 先进入持久 session 再开协调会话, 否则 `kanban start` 会因不在 session 而失败:
+
+```sh
+tmux new -A -s onevoke
+```
+
+创建新会话后立即进入 Plan mode, 让 Agent 先分析和提问, 不直接改文件.
 
 需求讨论使用高推理强度模型:
 
 - Codex: `gpt-5.6-xhigh`.
 - Claude: `opus-xhigh`.
+- Grok: 进入其 CLI 的计划/只读讨论入口 (随 CLI 默认; 不锁模型与推理强度), 先讨论方案再实现.
 
 高推理强度只用于需求澄清和方案决策. 后续 `kanban start` 会按任务规模选择执行模型和推理强度, 不必让计划会话继续承担实现.
 
@@ -231,7 +238,7 @@ kanban start --launcher foreground 20260802-login-retry-task
 
 小任务默认使用中等推理强度, 大任务使用高推理强度. Codex 固定用 `gpt-5.6-sol`, Claude 固定用 `opus`; Grok 不锁模型也不接受推理强度, 一律跟随其 CLI 默认. `kanban start` 默认以 YOLO 模式启动, 会绕过 Agent 自身的 approval 或 permission 提示; 因此只应在可信本机和已确认范围内使用.
 
-只有 `todo` 卡能启动. launcher 创建前失败会回滚卡片; tmux window 或前台 Agent 进程已经创建后, Agent 认证失败、退出或中断时卡片继续留在 `working`, 不自动重派. foreground 必须从真实交互终端运行, 在 CI、管道或无 TTY 的 Agent 工具调用中会拒绝且不领卡.
+只有 `todo` 卡能启动. launcher 创建前失败会回滚卡片; tmux window 或前台 Agent 进程已经创建后, Agent 认证失败、退出或中断时卡片继续留在 `working`, 不自动重派. foreground 必须从真实交互终端运行 (stdin/stdout/stderr 均为 tty); 在 CI、管道或无 TTY 的 Agent 工具调用中会拒绝且不领卡, 此时应改用 `kanban start --launcher tmux <task-id>`, 并先执行 `tmux new -A -s onevoke`.
 
 ### 5. 回到需求会话讨论下一项
 

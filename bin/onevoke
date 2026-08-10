@@ -89,6 +89,10 @@ def find_commands() -> dict[str, str | None]:
     return {name: shutil.which(name) for name in COMMANDS}
 
 
+VERSION_FAILED = "版本检查失败"
+TMUX_SESSION_HINT = "tmux new -A -s onevoke"
+
+
 def agent_version(command: str) -> str:
     try:
         result = subprocess.run(
@@ -99,9 +103,14 @@ def agent_version(command: str) -> str:
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return "版本检查失败"
+        return VERSION_FAILED
     output = (result.stdout or result.stderr).strip().splitlines()
-    return output[0] if result.returncode == 0 and output else "版本检查失败"
+    return output[0] if result.returncode == 0 and output else VERSION_FAILED
+
+
+def agent_usable(state: dict[str, str | bool | None]) -> bool:
+    """PATH 上有二进制且 --version 成功才算可用."""
+    return bool(state.get("path")) and state.get("version") not in (None, VERSION_FAILED)
 
 
 def find_agents() -> dict[str, dict[str, str | bool | None]]:
@@ -116,6 +125,54 @@ def find_agents() -> dict[str, dict[str, str | bool | None]]:
             "memsearch": name in ("codex", "claude"),
         }
     return agents
+
+
+def _claude_rules_import_present(text: str, entry: Path) -> bool:
+    """Claude 只认独立行的 @ 导入, 拒绝注释/否定/占位中的路径残片."""
+    candidates: set[str] = {"~/.agents/ONEVOKE-AGENTS.md"}
+    try:
+        resolved = entry.expanduser().resolve()
+        candidates.add(str(entry))
+        candidates.add(str(resolved))
+        candidates.add(str(resolved).replace(str(Path.home()), "~", 1))
+    except OSError:
+        candidates.add(str(entry))
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("<!--") or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"@([^\s]+)", line)
+        if not match:
+            continue
+        ref = match.group(1).strip()
+        if ref in candidates:
+            return True
+        try:
+            if Path(ref).expanduser().resolve() == entry.expanduser().resolve():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _merged_rules_present(text: str) -> bool:
+    """Codex/Grok 合并文件须有完整入口标题行, 以及非否定语境的分册引用."""
+    has_heading = False
+    has_base = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line == "# Onevoke 全局工作流规则":
+            has_heading = True
+            continue
+        if "BASE-RULES.md" not in line:
+            continue
+        if line.startswith("<!--") or "TODO" in line or "占位" in line:
+            continue
+        if re.search(r"(不|勿|别|没有|未|禁止|跳过).{0,16}BASE-RULES\.md", line):
+            continue
+        if re.search(r"(?:^|[\s`|/(['\"])BASE-RULES\.md(?:$|[\s`|)/,'\"])", line):
+            has_base = True
+    return has_heading and has_base
 
 
 def rules_integration(agent: str) -> tuple[bool, str]:
@@ -135,12 +192,9 @@ def rules_integration(agent: str) -> tuple[bool, str]:
     except (OSError, UnicodeError):
         return False, f"无法读取 {target}"
     if agent == "claude":
-        markers = (str(entry), "~/.agents/ONEVOKE-AGENTS.md")
-        integrated = any(marker in text for marker in markers)
+        integrated = _claude_rules_import_present(text, entry)
     else:
-        integrated = (
-            "# Onevoke 全局工作流规则" in text and "BASE-RULES.md" in text
-        )
+        integrated = _merged_rules_present(text)
     if integrated:
         return True, str(target)
     return False, f"{target} 未导入或合并 ONEVOKE-AGENTS.md"
@@ -340,13 +394,18 @@ def print_doctor() -> bool:
     tmux = shutil.which("tmux")
     if tmux:
         success(f"tmux: {tmux}")
+        if not os.environ.get("TMUX"):
+            print(
+                f"[-] tmux: 已安装但当前不在 session. 启动: {TMUX_SESSION_HINT}",
+                file=sys.stderr,
+            )
     else:
         print("[-] tmux: 未安装; 可在 welcome 中选择前台启动模式", file=sys.stderr)
 
     agents = find_agents()
     print("\nAgent 能力:", file=sys.stderr)
     for name, state in agents.items():
-        if state["path"]:
+        if agent_usable(state):
             capabilities = ["执行"]
             if state["review"]:
                 capabilities.append("审核")
@@ -356,12 +415,18 @@ def print_doctor() -> bool:
                 f"{AGENT_LABELS[name]}: {state['version']} "
                 f"({', '.join(capabilities)}; 认证未验证)"
             )
+        elif state["path"]:
+            healthy = False
+            warning(
+                f"{AGENT_LABELS[name]}: 位于 {state['path']}, 但 --version 失败; "
+                "不视为可用, 也不能在 welcome 中选择."
+            )
         else:
             print(f"[-] {AGENT_LABELS[name]}: 未安装", file=sys.stderr)
-    if not any(state["path"] for state in agents.values()):
+    if not any(agent_usable(state) for state in agents.values()):
         healthy = False
         warning("没有发现可执行 Agent; kanban 无法启动任务.")
-    if not any(agents[name]["path"] for name in REVIEW_AGENTS):
+    if not any(agent_usable(agents[name]) for name in REVIEW_AGENTS):
         healthy = False
         warning("没有发现 Reviewer; 审核流程无法运行.")
 
@@ -393,19 +458,76 @@ def print_doctor() -> bool:
     else:
         if config["welcome_complete"]:
             success(f"配置: {config_path()}")
-            selected_agent = effective_config(config)["kanban_agent"]
-            memory_enabled = bool(
-                memory["cli_ready"]
-                and memory.get(f"{selected_agent}_plugin", False)
-            )
-            if config["memsearch"]["enabled"] and not memory_enabled:
-                healthy = False
-                warning(
-                    "配置启用了 MemSearch, 但当前执行 Agent 的 CLI 或插件未就绪; "
-                    "请重新运行 onevoke welcome --reset."
-                )
+            healthy = validate_configured_resources(config, agents, memory) and healthy
         else:
             print(f"[-] 配置: 尚未完成 ({config_path()})", file=sys.stderr)
+    return healthy
+
+
+def validate_configured_resources(
+    config: dict[str, Any],
+    agents: dict[str, dict[str, str | bool | None]],
+    memory: dict[str, str | bool | None],
+) -> bool:
+    """对生效配置逐项核对执行 Agent、Reviewer、wrapper 和 launcher."""
+    healthy = True
+    effective = effective_config(config)
+    selected_agent = effective["kanban_agent"]
+    selected_state = agents.get(selected_agent, {})
+    if not agent_usable(selected_state):
+        healthy = False
+        warning(
+            f"配置的执行 Agent 不可用: {selected_agent}; "
+            "请安装后重新运行 onevoke welcome --reset."
+        )
+
+    for role in REVIEW_ROLES:
+        reviewer = effective["reviewers"][role]
+        reviewer_state = agents.get(reviewer, {})
+        if not agent_usable(reviewer_state):
+            healthy = False
+            warning(
+                f"配置的 {role} Reviewer 不可用: {reviewer}; "
+                "请安装后重新运行 onevoke welcome --reset."
+            )
+            continue
+        wrapper_name = f"{reviewer}-review.sh"
+        if not shutil.which(wrapper_name):
+            healthy = False
+            warning(
+                f"配置的 {role} wrapper 不在 PATH: {wrapper_name}; "
+                "请把 ~/.local/bin 加入 PATH 或重新安装 Onevoke."
+            )
+
+    launcher = effective["launcher"]
+    if launcher == "tmux":
+        if not shutil.which("tmux"):
+            healthy = False
+            warning(
+                "配置的 launcher 是 tmux, 但 tmux 不在 PATH; "
+                "请安装 tmux 或运行 onevoke welcome --reset 改选 foreground."
+            )
+        elif not os.environ.get("TMUX"):
+            print(
+                f"[-] launcher=tmux 需要先进入 session: {TMUX_SESSION_HINT}",
+                file=sys.stderr,
+            )
+    elif launcher == "foreground":
+        print(
+            "[-] launcher=foreground 需要交互终端 "
+            "(stdin/stdout/stderr 均为 tty); 无 TTY 时改用 tmux 或在真实终端运行.",
+            file=sys.stderr,
+        )
+
+    memory_enabled = bool(
+        memory["cli_ready"] and memory.get(f"{selected_agent}_plugin", False)
+    )
+    if effective["memsearch"]["enabled"] and not memory_enabled:
+        healthy = False
+        warning(
+            "配置启用了 MemSearch, 但当前执行 Agent 的 CLI 或插件未就绪; "
+            "请重新运行 onevoke welcome --reset."
+        )
     return healthy
 
 
@@ -570,12 +692,19 @@ def install_memsearch_for(agent: str) -> bool:
             warning("MemSearch Codex 插件安装失败.")
             return False
     elif agent == "claude":
+        # 插件可能已就绪, 本次只是修 CLI; 先复检再决定是否提示 marketplace.
+        state = memsearch_state()
+        if state["cli_ready"] and state.get("claude_plugin"):
+            return True
         warning("Claude 的 MemSearch 插件需要在 Claude Code 内通过 marketplace 安装.")
         print(
             "运行 /plugin marketplace add zilliztech/memsearch, "
             "再运行 /plugin install memsearch.",
             file=sys.stderr,
         )
+        state = memsearch_state()
+        if state["cli_ready"] and state.get("claude_plugin"):
+            return True
         return False
     state = memsearch_state()
     if not state["cli_ready"] or not state.get(f"{agent}_plugin", False):
@@ -613,34 +742,50 @@ def install_tmux() -> bool:
 
 def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
     agents = find_agents()
+    for name, state in agents.items():
+        if state["path"] and not agent_usable(state):
+            warning(
+                f"{AGENT_LABELS[name]} 的 --version 失败, 已从可选列表排除: {state['path']}"
+            )
     execution_choices = [
         (name, f"{AGENT_LABELS[name]} ({state['version']})")
         for name, state in agents.items()
-        if state["path"]
+        if agent_usable(state)
     ]
     if not execution_choices:
-        raise OnevokeError("没有发现可执行的 Agent. 请先安装 Codex、Claude 或 Grok.")
+        raise OnevokeError(
+            "没有发现可用的 Agent (--version 须成功). 请先安装 Codex、Claude 或 Grok."
+        )
 
     config = default_config()
     config["kanban_agent"] = ask_choice(
         "kanban 默认用哪个 Agent 执行任务?",
         execution_choices,
-        existing["kanban_agent"],
+        existing["kanban_agent"] if agent_usable(agents.get(existing["kanban_agent"], {})) else None,
     )
 
     review_choices = [
         (name, f"{AGENT_LABELS[name]} ({agents[name]['version']})")
         for name in REVIEW_AGENTS
-        if agents[name]["path"]
+        if agent_usable(agents[name])
     ]
     if not review_choices:
         raise OnevokeError("没有发现可用 Reviewer. 请安装 Codex 或 Grok.")
     for role in REVIEW_ROLES:
+        previous = existing["reviewers"][role]
         config["reviewers"][role] = ask_choice(
-            f"{role} 使用哪个 Reviewer?", review_choices, existing["reviewers"][role]
+            f"{role} 使用哪个 Reviewer?",
+            review_choices,
+            previous if agent_usable(agents.get(previous, {})) else None,
         )
 
     if shutil.which("tmux"):
+        if not os.environ.get("TMUX"):
+            print(
+                f"提示: tmux 已安装但当前不在 session. kanban start --launcher tmux "
+                f"前请先运行: {TMUX_SESSION_HINT}",
+                file=sys.stderr,
+            )
         launcher_choices = [("tmux", "tmux 新窗口"), ("foreground", "当前终端前台运行")]
         config["launcher"] = ask_choice(
             "kanban start 使用哪种启动方式?", launcher_choices, existing["launcher"]

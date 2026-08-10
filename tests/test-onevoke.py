@@ -838,6 +838,264 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertTrue(log.exists())
 
+    def test_doctor_rejects_agent_when_version_check_fails(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command("codex", "#!/bin/sh\nexit 1\n")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("Codex:", result.stderr)
+        self.assertIn("--version 失败", result.stderr)
+        self.assertNotRegex(result.stderr, r"\[OK\].*Codex:")
+
+    def test_welcome_excludes_agent_with_failed_version(self) -> None:
+        self.install_fake_environment(tmux=False)
+        self.fake_command("codex", "#!/bin/sh\nexit 1\n")
+        self.fake_command("claude", "#!/bin/sh\nexit 1\n")
+        # Only grok reports a version; four reviewers must also be usable.
+
+        # 仅 Grok 可用: 执行 1; 四个 Reviewer 各 1; 拒绝装 tmux 2; 保存 1.
+        returncode, output = self.run_on_tty("1\n1\n1\n1\n1\n2\n1\n", "welcome")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("--version 失败", output)
+        self.assertIn("已从可选列表排除", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("grok", config["kanban_agent"])
+        self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_rules_integration_rejects_comment_negation_and_placeholder(self) -> None:
+        onevoke = load_onevoke_module()
+        entry = self.home / ".agents" / "ONEVOKE-AGENTS.md"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("# Onevoke 全局工作流规则\n", encoding="utf-8")
+
+        cases = {
+            "codex": (
+                self.home / ".codex" / "AGENTS.md",
+                (
+                    "# 其它标题\n"
+                    "<!-- # Onevoke 全局工作流规则 -->\n"
+                    "不要使用 BASE-RULES.md\n"
+                    "TODO 占位 BASE-RULES.md\n"
+                ),
+                (
+                    "# Onevoke 全局工作流规则\n"
+                    "| 分册 | 说明 |\n"
+                    "| `BASE-RULES.md` | 通用条款 |\n"
+                ),
+            ),
+            "claude": (
+                self.home / ".claude" / "CLAUDE.md",
+                (
+                    "# 说明\n"
+                    "未导入 ~/.agents/ONEVOKE-AGENTS.md\n"
+                    "<!-- @~/.agents/ONEVOKE-AGENTS.md -->\n"
+                    "# @~/.agents/ONEVOKE-AGENTS.md\n"
+                ),
+                "@~/.agents/ONEVOKE-AGENTS.md\n\n## 我自己的规则\n",
+            ),
+            "grok": (
+                self.home / ".grok" / "AGENTS.md",
+                "残留 BASE-RULES.md 但没有入口标题\n",
+                (
+                    "# Onevoke 全局工作流规则\n"
+                    "见 ~/.agents/BASE-RULES.md\n"
+                ),
+            ),
+        }
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            for agent, (target, bad, good) in cases.items():
+                with self.subTest(agent=agent, case="reject"):
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(bad, encoding="utf-8")
+                    ok, _ = onevoke.rules_integration(agent)
+                    self.assertFalse(ok)
+                with self.subTest(agent=agent, case="accept"):
+                    target.write_text(good, encoding="utf-8")
+                    ok, detail = onevoke.rules_integration(agent)
+                    self.assertTrue(ok, detail)
+
+    def test_doctor_validates_configured_agent_reviewers_wrapper_and_launcher(self) -> None:
+        self.install_fake_environment(tmux=True)
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "claude",
+            "launcher": "tmux",
+            "reviewers": {
+                "PM": "codex",
+                "CSA": "grok",
+                "Hacker": "codex",
+                "QA": "grok",
+            },
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        # Remove configured execution agent and one reviewer wrapper.
+        (self.fake_bin / "claude").unlink()
+        (self.fake_bin / "grok-review.sh").unlink()
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("配置的执行 Agent 不可用: claude", result.stderr)
+        self.assertIn("配置的 QA wrapper 不在 PATH: grok-review.sh", result.stderr)
+
+    def test_doctor_rejects_tmux_launcher_when_tmux_missing(self) -> None:
+        self.install_fake_environment(tmux=False)
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("配置的 launcher 是 tmux", result.stderr)
+        self.assertIn("welcome --reset", result.stderr)
+
+    def test_install_memsearch_for_claude_succeeds_when_plugin_ready_after_cli_fix(
+        self,
+    ) -> None:
+        """插件已就绪、仅 CLI 损坏时, 修 CLI 后应直接启用, 不因 marketplace 提示失败."""
+        self.install_fake_environment(tmux=True, memsearch=False)
+        onevoke = load_onevoke_module()
+        plugin = self.install_fake_claude_memsearch_plugin("0.4.15")
+        hashes = {
+            str(path.relative_to(plugin)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in plugin.rglob("*")
+            if path.is_file()
+        }
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 9.9.9'\n"
+        )
+        uv_log, _, _ = self.install_fake_memsearch_tools(
+            "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8"
+        )
+        env_keys = (
+            "PATH",
+            "HOME",
+            "UV_LOG",
+            "FAKE_BIN",
+            "MEMSEARCH_TEMPLATE",
+            "ONEVOKE_MEMSEARCH_SOURCE",
+        )
+        previous = {key: os.environ.get(key) for key in env_keys}
+        try:
+            os.environ["PATH"] = str(self.fake_bin)
+            os.environ["HOME"] = str(self.home)
+            for key in ("UV_LOG", "FAKE_BIN", "MEMSEARCH_TEMPLATE", "ONEVOKE_MEMSEARCH_SOURCE"):
+                if key in self.env:
+                    os.environ[key] = self.env[key]
+            with mock.patch.object(Path, "home", return_value=self.home):
+                with mock.patch.object(onevoke, "CLAUDE_PLUGIN_HASHES", hashes):
+                    self.assertTrue(onevoke.claude_memsearch_ready())
+                    _, version, ready = onevoke.memsearch_cli_state()
+                    self.assertFalse(ready, version)
+                    self.assertTrue(onevoke.install_memsearch_for("claude"))
+                    _, fixed_version, fixed_ready = onevoke.memsearch_cli_state()
+                    self.assertTrue(fixed_ready, fixed_version)
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
+
+    def test_claude_plugin_full_hash_table_positive_path(self) -> None:
+        """正向路径覆盖 CLAUDE_PLUGIN_HASHES 的全部键, 不只是 hooks 子集."""
+        self.install_fake_environment(tmux=True, memsearch=False)
+        onevoke = load_onevoke_module()
+        plugin = self.root / "claude-full-plugin"
+        hashes: dict[str, str] = {}
+        for relative in onevoke.CLAUDE_PLUGIN_HASHES:
+            path = plugin / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = f"fixture:{relative}\n".encode()
+            path.write_bytes(content)
+            hashes[relative] = hashlib.sha256(content).hexdigest()
+        # hooks.json must be valid for hooks_directory.
+        hooks = {
+            event: [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"bash ${{CLAUDE_PLUGIN_ROOT}}/hooks/{name}",
+                        }
+                    ]
+                }
+            ]
+            for event, name in {
+                "SessionStart": "session-start.sh",
+                "UserPromptSubmit": "user-prompt-submit.sh",
+                "Stop": "stop.sh",
+            }.items()
+        }
+        (plugin / "hooks" / "hooks.json").write_text(
+            json.dumps({"hooks": hooks}), encoding="utf-8"
+        )
+        hashes["hooks/hooks.json"] = hashlib.sha256(
+            (plugin / "hooks" / "hooks.json").read_bytes()
+        ).hexdigest()
+        for name in (
+            "session-start.sh",
+            "user-prompt-submit.sh",
+            "stop.sh",
+            "common.sh",
+        ):
+            script = plugin / "hooks" / name
+            script.write_text(f"#!/bin/sh\n# {name}\n", encoding="utf-8")
+            script.chmod(0o755)
+            hashes[f"hooks/{name}"] = hashlib.sha256(script.read_bytes()).hexdigest()
+        (plugin / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "memsearch", "version": "0.4.15"}),
+            encoding="utf-8",
+        )
+        hashes[".claude-plugin/plugin.json"] = hashlib.sha256(
+            (plugin / ".claude-plugin" / "plugin.json").read_bytes()
+        ).hexdigest()
+
+        settings = self.home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(
+            json.dumps({"enabledPlugins": {"memsearch@memsearch-plugins": True}}),
+            encoding="utf-8",
+        )
+        installed = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_text(
+            json.dumps(
+                {
+                    "plugins": {
+                        "memsearch@memsearch-plugins": [{"installPath": str(plugin)}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with mock.patch.object(onevoke, "CLAUDE_PLUGIN_HASHES", hashes):
+                self.assertTrue(onevoke.claude_memsearch_ready())
+                # 真实表上任一摘要不一致必须拒绝.
+                broken = dict(hashes)
+                broken["README.md"] = "0" * 64
+                with mock.patch.object(onevoke, "CLAUDE_PLUGIN_HASHES", broken):
+                    self.assertFalse(onevoke.claude_memsearch_ready())
+
     def test_welcome_ctrl_c_exits_without_traceback_or_config(self) -> None:
         self.install_fake_environment(tmux=False)
         master, slave = pty.openpty()

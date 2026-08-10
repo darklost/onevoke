@@ -488,6 +488,8 @@ printf '%s\\n' '@9'
         result = self.run_command("start", task_id, succeeds=False)
 
         self.assertIn("前台启动模式需要交互终端", result.stderr)
+        self.assertIn("stdin/stdout/stderr 均为 tty", result.stderr)
+        self.assertIn("--launcher tmux", result.stderr)
         self.assertTrue(task.exists())
         self.assertFalse((self.root / "working" / task.name).exists())
 
@@ -623,6 +625,7 @@ printf '%s\\n' '@9'
         result = self.run_command("start", task_id, succeeds=False)
 
         self.assertIn("当前不在 tmux session", result.stderr)
+        self.assertIn("tmux new -A -s onevoke", result.stderr)
         self.assertTrue(task.exists())
 
     def test_rejects_invalid_transition_and_duplicate_id(self) -> None:
@@ -750,7 +753,8 @@ printf '%s\\n' '@9'
 
         self.assertEqual(1, result.returncode)
         self.assertIn("notes.md", result.stderr)
-        self.assertIn("ok: 0 tasks", result.stdout)
+        self.assertIn("checked: 0 valid, 1 invalid", result.stdout)
+        self.assertNotIn("ok:", result.stdout)
 
     def test_check_passes_on_a_clean_board(self) -> None:
         self.make_todo("clean")
@@ -782,6 +786,27 @@ printf '%s\\n' '@9'
 
         self.assertIn(healthy, listing.stdout)
         self.assertIn("大任务缺少 spec.md", blocked.stderr)
+
+    def test_symlink_spec_is_rejected_and_outside_bytes_stay_intact(self) -> None:
+        healthy, _ = self.make_todo("fine")
+        outside = self.root.parent / "outside-secret.md"
+        secret = "do-not-touch-external-target\n"
+        outside.write_text(secret, encoding="utf-8")
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-symlink-spec-task"
+        task_dir = self.root / "todo" / task_id
+        task_dir.mkdir()
+        (task_dir / "spec.md").symlink_to(outside)
+
+        check = self.run_command("check", succeeds=False)
+        show = self.run_command("show", task_id, succeeds=False)
+        start = self.run_command("start", task_id, succeeds=False)
+
+        self.assertIn("spec.md 不得是符号链接", check.stderr)
+        self.assertIn("checked:", check.stdout)
+        self.assertIn("spec.md 不得是符号链接", show.stderr)
+        self.assertIn("spec.md 不得是符号链接", start.stderr)
+        self.assertIn(healthy, self.run_command("list").stdout)
+        self.assertEqual(secret, outside.read_text(encoding="utf-8"))
 
     def test_symlink_entry_is_rejected_without_blocking_others(self) -> None:
         healthy, todo_path = self.make_todo("fine")

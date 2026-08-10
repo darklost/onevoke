@@ -241,7 +241,7 @@ kanban start [--agent codex|claude|grok] [--launcher tmux|foreground] [task-id]
 - 代码完了但没验收 → 卡片继续留 `working/`; 不提前进 `done/`.
 - Bug 修复守项目验收门禁. 没拿到确认不许拿 "代码已完成" 当理由标 `done`.
 - 被阻塞就留 `working/`, 写清阻塞条件和解除条件. 不因一时失败自动归档.
-- 合回初始分支的时机取 `~/.agents/ONEVOKE-AGENTS.md`「看板任务完成」的值. 默认要先报告并等用户确认, 确认前不集成, 不清理 worktree, 卡片留 `working/`.
+- 合回 `develop` 的时机取 `~/.agents/ONEVOKE-AGENTS.md`「看板任务完成」的值. 默认要先报告并等用户确认, 确认前不集成, 不清理 worktree, 卡片留 `working/`.
 - 实现完 + 验证过 + 必要审核过 + 用户验收完 + 代码按规则集成, 才能进 `done/`.
 - 进 `done/` 前在小任务文件或大任务 `spec.md` 填 `结果: completed`, 并写完总结或 `report.md`.
 

@@ -5,9 +5,11 @@ import fcntl
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -342,6 +344,100 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("Nothing to merge", result.stdout)
         self.assertEqual(b"### 09:30\n- kept\n", (self.target_memory / "keep.md").read_bytes())
+
+    def test_unstable_source_snapshot_is_rejected(self) -> None:
+        source_file = self.write_source("a.md", b"### 09:30\n- first\n")
+        original_attempts = merger.SOURCE_STABLE_ATTEMPTS
+        original_delay = merger.SOURCE_STABLE_DELAY_SECONDS
+        merger.SOURCE_STABLE_ATTEMPTS = 2
+        merger.SOURCE_STABLE_DELAY_SECONDS = 0.01
+        reads = {"count": 0}
+        real_read_bytes = Path.read_bytes
+
+        def flaky_read(self: Path) -> bytes:
+            data = real_read_bytes(self)
+            if self == source_file:
+                reads["count"] += 1
+                if reads["count"] % 2 == 0:
+                    return data + b"### 09:45\n- late\n"
+            return data
+
+        try:
+            with mock.patch.object(Path, "read_bytes", flaky_read):
+                with self.assertRaises(SystemExit) as raised:
+                    merger.read_stable_source_files([source_file])
+        finally:
+            merger.SOURCE_STABLE_ATTEMPTS = original_attempts
+            merger.SOURCE_STABLE_DELAY_SECONDS = original_delay
+
+        self.assertEqual(1, raised.exception.code)
+
+    def test_source_late_append_during_stable_read_fails(self) -> None:
+        source_file = self.write_source("a.md", b"### 09:30\n- first\n")
+        original_attempts = merger.SOURCE_STABLE_ATTEMPTS
+        original_delay = merger.SOURCE_STABLE_DELAY_SECONDS
+        merger.SOURCE_STABLE_ATTEMPTS = 2
+        merger.SOURCE_STABLE_DELAY_SECONDS = 0.05
+        writer_stop = threading.Event()
+
+        def append_during_merge() -> None:
+            while not writer_stop.is_set():
+                source_file.write_bytes(
+                    source_file.read_bytes() + b"### 09:45\n- racing\n"
+                )
+                time.sleep(0.02)
+
+        thread = threading.Thread(target=append_during_merge)
+        thread.start()
+        try:
+            with self.assertRaises(SystemExit) as raised:
+                merger.merge(str(self.source), str(self.target), dry_run=False)
+        finally:
+            writer_stop.set()
+            thread.join(timeout=2)
+            merger.SOURCE_STABLE_ATTEMPTS = original_attempts
+            merger.SOURCE_STABLE_DELAY_SECONDS = original_delay
+
+        self.assertEqual(1, raised.exception.code)
+
+    def test_source_changed_after_merge_fails(self) -> None:
+        source_file = self.write_source("a.md", b"### 09:30\n- first\n")
+        original_assert = merger.assert_source_unchanged
+
+        def mutate_then_assert(snapshots: dict[Path, bytes]) -> None:
+            source_file.write_bytes(b"### 09:30\n- first\n### 09:40\n- late\n")
+            original_assert(snapshots)
+
+        with mock.patch.object(
+            merger, "assert_source_unchanged", side_effect=mutate_then_assert
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                merger.merge(str(self.source), str(self.target), dry_run=False)
+
+        self.assertEqual(1, raised.exception.code)
+        self.assertIn(b"late", source_file.read_bytes())
+
+    def test_target_append_during_clean_fails_without_losing_new_bytes(self) -> None:
+        target_file = self.target_memory / "a.md"
+        dirty = b"### 08:00\n- dirty \xff byte\n"
+        target_file.write_bytes(dirty)
+        self.write_source("a.md", b"### 09:30\n- clean entry\n")
+
+        original_clean = merger.clean_bytes
+
+        def append_then_clean(data: bytes) -> bytes:
+            if b"\xff" in data:
+                with open(target_file, "ab") as handle:
+                    handle.write(b"### 09:50\n- concurrent target append\n")
+            return original_clean(data)
+
+        with mock.patch.object(merger, "clean_bytes", side_effect=append_then_clean):
+            with self.assertRaises(SystemExit) as raised:
+                merger.merge(str(self.source), str(self.target), dry_run=False)
+
+        self.assertEqual(1, raised.exception.code)
+        final = target_file.read_bytes()
+        self.assertIn(b"concurrent target append", final)
 
 
 if __name__ == "__main__":

@@ -224,9 +224,17 @@ def scan(root: Path) -> Board:
             if not TASK_ID_RE.fullmatch(task_id):
                 reject(path, f"无效任务 ID: {task_id}")
                 continue
-            if kind == "large" and not document.is_file():
-                reject(path, f"大任务缺少 spec.md: {path}", task_id)
-                continue
+            if kind == "large":
+                if document.is_symlink():
+                    reject(
+                        path,
+                        f"大任务 spec.md 不得是符号链接: {document}",
+                        task_id,
+                    )
+                    continue
+                if not document.is_file():
+                    reject(path, f"大任务缺少 spec.md: {path}", task_id)
+                    continue
             if task_id in blocked:
                 problems.append(Problem(path, f"任务 ID 存在冲突: {task_id}"))
                 continue
@@ -594,10 +602,15 @@ def start_metadata(text: str, agent: str) -> str:
     return text
 
 
+TMUX_SESSION_HINT = "tmux new -A -s onevoke"
+
+
 def tmux_session_id(tmux: str) -> str:
     pane = os.environ.get("TMUX_PANE")
     if not os.environ.get("TMUX") or not pane:
-        raise KanbanError("当前不在 tmux session")
+        raise KanbanError(
+            f"当前不在 tmux session. 先运行: {TMUX_SESSION_HINT}"
+        )
     result = subprocess.run(
         [tmux, "display-message", "-p", "-t", pane, "#{session_id}"],
         text=True,
@@ -653,7 +666,10 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             raise KanbanError("tmux 不在 PATH; 运行 onevoke welcome 选择前台启动模式")
         session = tmux_session_id(tmux)
     elif not (sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()):
-        raise KanbanError("前台启动模式需要交互终端")
+        raise KanbanError(
+            "前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). "
+            "在 CI、管道或无 TTY 环境请改用: kanban start --launcher tmux <task-id>"
+        )
 
     original = read_document(entry)
     updated = start_metadata(original, agent_name)
@@ -726,8 +742,13 @@ def command_check(root: Path) -> int:
     board = scan(root)
     for problem in board.problems:
         print(f"invalid: {problem.message}", file=sys.stderr)
+    if board.problems:
+        print(
+            f"checked: {len(board.entries)} valid, {len(board.problems)} invalid"
+        )
+        return 1
     print(f"ok: {len(board.entries)} tasks")
-    return 1 if board.problems else 0
+    return 0
 
 
 def parser() -> argparse.ArgumentParser:
