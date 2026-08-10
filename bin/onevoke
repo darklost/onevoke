@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -42,10 +43,27 @@ MEMSEARCH_HOOKS = {
     "UserPromptSubmit": "user-prompt-submit.sh",
     "Stop": "stop.sh",
 }
-MEMSEARCH_HOOK_MARKERS = {
-    "session-start.sh": "# SessionStart hook:",
-    "user-prompt-submit.sh": "# UserPromptSubmit hook:",
-    "stop.sh": "# Stop hook:",
+# Complete plugins/claude-code tree at MEMSEARCH_COMMIT.
+CLAUDE_PLUGIN_HASHES = {
+    ".claude-plugin/plugin.json": "bfb1787dbcd9cd874a6e7705e4b566d4b37c7ee91fe13d2c841db8545009ac8f",
+    "README.md": "c1db07a71d8ca8cdaa3098fa17da0014687fcc9bd333d3541e010102cce952e9",
+    "hooks/common.sh": "9aa7ea76c4241dbd1b2b6ad1ea32ec446f534e6bd0bbbd89d8bdd262edee1c06",
+    "hooks/hooks.json": "ef55f112ea0b0df12fe2a1e52584d5a7aa475a3a617e24b9e17e092b71e3a094",
+    "hooks/parse-transcript.sh": "6ce5b2ac8d24b64961e681fa8fd2eba50265c74c03c192c29320c462fa515e6c",
+    "hooks/session-end.sh": "c68f354aecba0d5badeb9d0362dff39b2fe595576d55aaedb329bfb02fcf5c67",
+    "hooks/session-start.sh": "9c8ce984c8c294911f91c731bc6de648c72337bcdef6a12483a73d8abdcb3715",
+    "hooks/stop.sh": "f7f6af5d00c14affa57f72e60786b6a6ac1e28a4387bf803c446195144f5ad74",
+    "hooks/user-prompt-submit.sh": "cb0476786ced0229d385d5c7fc4a66c1605963b4dd1e9d77cd523de2ae73d810",
+    "prompts/memory_to_skill.txt": "633d2af85f836a4d0e5a3873d33e9566291e817c2d997de34934f438ea627e01",
+    "prompts/project_review.txt": "321579ff511c9e84c0706613c25dfd00f3358d612898a25e967529de7464edeb",
+    "prompts/summarize.txt": "e7fb99d8201dfd2e357b8d6db7ce0dd81e409744502f46d61515b015b4bc4f9c",
+    "prompts/user_profile.txt": "d37e1981df3d999d9b39ac3edda0a072a416147dde5a7caf290cd0370f234ddb",
+    "scripts/derive-collection.sh": "f1f99290a3c776c09b1a09c4a4ff4ed4fb542fc374cf4011fbc6d675015a0ce4",
+    "scripts/maintenance-runner.py": "9e497c1e390d7ad8a516a04496e0e75bcf8737e0be788022a1766bb17ca6ff1f",
+    "skills/memory-config/SKILL.md": "7296e5539675b0ab149c904ab1c018fb526c9d89570b87e9f9e1ae8b33ca067c",
+    "skills/memory-recall/SKILL.md": "39cddb7879123a96941825dc03edd04faf17ca6e9027b48c48ca5cea8365cca8",
+    "skills/memory-to-skill/SKILL.md": "45b84bcb689649487140c9662436d32582a97ee50f6cd07b76ef55a272b2f032",
+    "transcript.py": "a587c3a4a4a8943efd931240154c675b165ca3aeda90e02e0c3102cadd7607a6",
 }
 
 
@@ -211,14 +229,13 @@ def hooks_directory(raw: object, root: Path | None = None) -> Path | None:
     return resolved[0].parent if len(directories) == 1 else None
 
 
-def hook_scripts_identified(hooks_dir: Path) -> bool:
-    if not (hooks_dir / "common.sh").is_file():
-        return False
-    for name, marker in MEMSEARCH_HOOK_MARKERS.items():
+def claude_plugin_identified(root: Path) -> bool:
+    for relative, expected in CLAUDE_PLUGIN_HASHES.items():
         try:
-            if marker not in (hooks_dir / name).read_text(encoding="utf-8"):
+            digest = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+            if digest != expected:
                 return False
-        except (OSError, UnicodeError):
+        except OSError:
             return False
     return True
 
@@ -266,7 +283,7 @@ def claude_memsearch_ready() -> bool:
         hooks_dir = hooks_directory(read_json_file(root / "hooks" / "hooks.json"), root)
         if (
             hooks_dir == (root / "hooks").resolve()
-            and hook_scripts_identified(hooks_dir)
+            and claude_plugin_identified(root)
         ):
             return True
     return False

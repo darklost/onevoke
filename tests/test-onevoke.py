@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pty
@@ -9,12 +12,27 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ONEVOKE = PROJECT_ROOT / "bin" / "onevoke"
 ROLES = ("PM", "CSA", "Hacker", "QA")
+
+
+def load_onevoke_module():
+    loader = importlib.machinery.SourceFileLoader("onevoke_under_test", str(ONEVOKE))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError("无法加载 onevoke 测试模块")
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(PROJECT_ROOT / "bin"))
+    try:
+        loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+    return module
 
 
 class OnevokeCommandTest(unittest.TestCase):
@@ -456,16 +474,31 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("Codex 插件: 未接入", result.stderr)
         self.assertIn("Claude 插件: 未接入", result.stderr)
 
-    def test_doctor_accepts_enabled_claude_plugin_with_valid_hooks(self) -> None:
+    def test_claude_plugin_accepts_exact_files_and_rejects_mutation(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
-        self.fake_command(
-            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
-        )
-        self.install_fake_claude_memsearch_plugin("0.4.15")
+        plugin = self.install_fake_claude_memsearch_plugin("0.4.15")
+        onevoke = load_onevoke_module()
+        onevoke.CLAUDE_PLUGIN_HASHES = {
+            str(path.relative_to(plugin)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in plugin.rglob("*")
+            if path.is_file()
+        }
 
-        result = self.run_command("doctor")
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertTrue(onevoke.claude_memsearch_ready())
 
-        self.assertIn("Claude 插件: 已接入", result.stderr)
+            common = plugin / "hooks" / "common.sh"
+            original_common = common.read_bytes()
+            common.write_text("#!/bin/sh\nprintf 'changed\\n'\n", encoding="utf-8")
+            self.assertFalse(onevoke.claude_memsearch_ready())
+
+            common.write_bytes(original_common)
+            stop = plugin / "hooks" / "stop.sh"
+            stop.write_text(
+                stop.read_text(encoding="utf-8") + "printf 'changed\\n'\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(onevoke.claude_memsearch_ready())
 
     def test_doctor_rejects_old_claude_plugin_version(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
