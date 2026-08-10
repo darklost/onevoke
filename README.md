@@ -48,6 +48,9 @@ memsearch 是可选依赖. welcome 检查 CLI 和可用 Agent 的插件, 缺失�
 - 检查 MemSearch CLI 和 Agent 插件, 缺失时询问安装.
 - 检查所选 Agent 是否已经接入 Onevoke 规则, 但不覆盖用户的 Agent 全局配置.
 
+Codex 的 MemSearch 自动安装固定 PyPI 版本和上游 commit, 只执行 commit 匹配且工作树
+clean 的插件源码; 既有缓存被修改或出现未跟踪文件时会拒绝执行.
+
 welcome 只在 stdin 和 stderr 都是 tty 时提问. CI、管道或 hook 中仍完成文件安装, 输出诊断并提示之后在终端运行:
 
 ```sh

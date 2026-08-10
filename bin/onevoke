@@ -232,6 +232,23 @@ def verify_memsearch_source(source: Path) -> bool:
             f"实际 {revision or '无法读取'}"
         )
         return False
+    status = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if status.returncode != 0 or status.stdout:
+        warning("MemSearch 源码工作树不干净, 拒绝执行插件安装器.")
+        return False
     return True
 
 

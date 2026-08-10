@@ -74,7 +74,9 @@ class OnevokeCommandTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-    def install_fake_memsearch_tools(self, revision: str) -> tuple[Path, Path, Path]:
+    def install_fake_memsearch_tools(
+        self, revision: str, source_status: str = ""
+    ) -> tuple[Path, Path, Path]:
         uv_log = self.root / "uv.log"
         git_log = self.root / "git.log"
         bash_log = self.root / "bash.log"
@@ -89,6 +91,7 @@ class OnevokeCommandTest(unittest.TestCase):
                 "FAKE_BIN": str(self.fake_bin),
                 "MEMSEARCH_TEMPLATE": str(memsearch_template),
                 "MEMSEARCH_REVISION": revision,
+                "MEMSEARCH_SOURCE_STATUS": source_status,
                 "ONEVOKE_MEMSEARCH_SOURCE": str(self.root / "memsearch-source"),
             }
         )
@@ -102,7 +105,12 @@ class OnevokeCommandTest(unittest.TestCase):
             "git",
             "#!/bin/sh\n"
             "if [ \"$1\" = '-C' ]; then\n"
-            "  printf '%s\\n' \"$MEMSEARCH_REVISION\"\n"
+            "  if [ \"$3\" = 'rev-parse' ]; then\n"
+            "    printf '%s\\n' \"$MEMSEARCH_REVISION\"\n"
+            "  elif [ \"$3\" = 'status' ] && "
+            "[ -n \"$MEMSEARCH_SOURCE_STATUS\" ]; then\n"
+            "    printf '%s\\n' \"$MEMSEARCH_SOURCE_STATUS\"\n"
+            "  fi\n"
             "  exit 0\n"
             "fi\n"
             "printf '%s\\n' \"$*\" > \"$GIT_LOG\"\n"
@@ -302,6 +310,59 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertFalse((self.root / "memsearch-source").exists())
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_rejects_a_dirty_cached_memsearch_source(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        _, _, bash_log = self.install_fake_memsearch_tools(
+            "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8",
+            " M plugins/codex/scripts/install.sh",
+        )
+        installer = (
+            self.root
+            / "memsearch-source"
+            / "plugins"
+            / "codex"
+            / "scripts"
+            / "install.sh"
+        )
+        installer.parent.mkdir(parents=True)
+        installer.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 源码工作树不干净", output)
+        self.assertFalse(bash_log.exists())
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_decline_keeps_existing_config_unchanged(self) -> None:
+        self.install_fake_environment(tmux=True)
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "grok",
+            "launcher": "foreground",
+            "reviewers": {role: "grok" for role in ROLES},
+            "memsearch": {"enabled": True},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=4) + "\n",
+            encoding="utf-8",
+        )
+        before = self.config.read_bytes()
+
+        # 重选所有项目, 最后拒绝保存.
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n2\n", "welcome", "--reset"
+        )
+
+        self.assertEqual(1, returncode, output)
+        self.assertIn("用户取消, 配置未更改", output)
+        self.assertEqual(before, self.config.read_bytes())
 
     def test_review_dispatches_role_to_configured_wrapper(self) -> None:
         log = self.root / "review.log"
