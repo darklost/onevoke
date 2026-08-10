@@ -181,12 +181,25 @@ def _claude_rules_import_present(text: str, entry: Path) -> bool:
 
 
 def _merged_rules_present(text: str, entry: Path) -> bool:
-    """Codex/Grok 合并文件必须包含当前安装入口的完整正文, 拒绝旧版/残片."""
+    """Codex/Grok 合并文件必须包含当前安装入口全文, 且不得处于否定/废弃语境."""
     try:
         expected = entry.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
         return False
-    if not expected or expected not in _strip_comments_and_fences(text):
+    if not expected:
+        return False
+    body = _strip_comments_and_fences(text)
+    index = body.find(expected)
+    if index < 0:
+        return False
+    before = body[max(0, index - 120) : index]
+    after = body[index + len(expected) : index + len(expected) + 120]
+    context = f"{before}\n{after}"
+    if re.search(
+        r"(禁用|废弃|停用|不要遵守|勿遵守|不再生效|已失效|请忽略|do not follow)",
+        context,
+        flags=re.IGNORECASE,
+    ):
         return False
     return True
 

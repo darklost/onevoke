@@ -448,15 +448,7 @@ def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -
     temp_name = f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
     temp_fd = None
     try:
-        temp_fd = openat_nofollow(
-            parent_fd, temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        )
-        with os.fdopen(temp_fd, "w", encoding="utf-8", newline="\n") as file:
-            temp_fd = None
-            file.write(text)
-            file.flush()
-            os.fsync(file.fileno())
-        # 若目标已存在, 先用 O_NOFOLLOW 确认仍是普通文件再替换.
+        mode = None
         try:
             existing = openat_nofollow(parent_fd, path.name, os.O_RDONLY)
         except KanbanError:
@@ -470,9 +462,20 @@ def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -
                 info = os.fstat(existing)
                 if not stat.S_ISREG(info.st_mode):
                     raise KanbanError(f"任务文档必须是普通文件: {path}")
-                os.chmod(path.name, stat.S_IMODE(info.st_mode), dir_fd=parent_fd)
+                mode = stat.S_IMODE(info.st_mode)
             finally:
                 os.close(existing)
+
+        temp_fd = openat_nofollow(
+            parent_fd, temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        )
+        if mode is not None:
+            os.fchmod(temp_fd, mode)
+        with os.fdopen(temp_fd, "w", encoding="utf-8", newline="\n") as file:
+            temp_fd = None
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
         os.replace(temp_name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
     except BaseException:
         if temp_fd is not None:

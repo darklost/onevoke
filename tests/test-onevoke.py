@@ -928,6 +928,14 @@ class OnevokeCommandTest(unittest.TestCase):
                     target.write_text(good, encoding="utf-8")
                     ok, detail = onevoke.rules_integration(agent)
                     self.assertTrue(ok, detail)
+                if agent in ("codex", "grok"):
+                    with self.subTest(agent=agent, case="reject-negated-full"):
+                        target.write_text(
+                            "以下 Onevoke 规则已禁用, 不要遵守:\n\n" + current_entry,
+                            encoding="utf-8",
+                        )
+                        ok, _ = onevoke.rules_integration(agent)
+                        self.assertFalse(ok)
 
     def test_doctor_validates_configured_agent_reviewers_wrapper_and_launcher(self) -> None:
         self.install_fake_environment(tmux=True)
