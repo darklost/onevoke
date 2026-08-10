@@ -275,10 +275,39 @@ def locate(board: Board, value: str) -> Entry:
         raise KanbanError(f"任务不存在: {task_id}") from error
 
 
-def open_task_document(path: Path, *, write: bool = False) -> int:
+def board_root_from_entry(entry: Entry) -> Path:
+    # 入口恒为 <board>/<state>/<name>, 文档在入口内或即入口本身.
+    return entry.path.parent.parent
+
+
+def ensure_no_symlinks_under_board(root: Path, path: Path) -> None:
+    """从看板根走到 path 的每一级分量都不得是软链, 防止中间目录被掉包."""
+    root = root.resolve(strict=False)
+    candidate = path if path.is_absolute() else root / path
+    try:
+        common = os.path.commonpath([str(root), str(candidate)])
+    except ValueError as error:
+        raise KanbanError(f"任务路径越出看板: {path}") from error
+    if common != str(root):
+        raise KanbanError(f"任务路径越出看板: {path}")
+    relative = os.path.relpath(str(candidate), str(root))
+    current = root
+    if current.is_symlink():
+        raise KanbanError(f"路径分量不得是符号链接: {current}")
+    if relative in ("", "."):
+        return
+    for part in Path(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise KanbanError(f"路径分量不得是符号链接: {current}")
+
+
+def open_task_document(entry: Entry, *, write: bool = False) -> int:
     """打开任务文档且不跟随软链, 防止 scan 后被替换为看板外目标."""
-    if path.is_symlink():
-        raise KanbanError(f"任务文档不得是符号链接: {path}")
+    root = board_root_from_entry(entry)
+    ensure_no_symlinks_under_board(root, entry.path)
+    ensure_no_symlinks_under_board(root, entry.document)
+    path = entry.document
     flags = os.O_RDWR if write else os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -298,7 +327,7 @@ def open_task_document(path: Path, *, write: bool = False) -> int:
 
 def read_document(entry: Entry) -> str:
     try:
-        fd = open_task_document(entry.document, write=False)
+        fd = open_task_document(entry, write=False)
         try:
             chunks: list[bytes] = []
             while True:
@@ -354,13 +383,14 @@ def completion_metadata(text: str) -> str:
     )
 
 
-def write_text_atomic(path: Path, text: str) -> None:
-    if path.is_symlink():
+def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -> None:
+    if entry is not None:
+        ensure_no_symlinks_under_board(board_root_from_entry(entry), entry.path)
+        ensure_no_symlinks_under_board(board_root_from_entry(entry), path)
+    elif path.is_symlink():
         raise KanbanError(f"任务文档不得是符号链接: {path}")
-    # 先确认现有目标不是软链/非常规文件, 再原子替换.
-    if path.exists():
-        fd = open_task_document(path, write=False)
-        os.close(fd)
+    if path.exists() and path.is_symlink():
+        raise KanbanError(f"任务文档不得是符号链接: {path}")
     handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     temp_path = Path(temp_name)
     try:
@@ -368,6 +398,8 @@ def write_text_atomic(path: Path, text: str) -> None:
             file.write(text)
         if path.exists() and not path.is_symlink():
             os.chmod(temp_path, path.stat().st_mode)
+        if path.parent.is_symlink():
+            raise KanbanError(f"路径分量不得是符号链接: {path.parent}")
         os.replace(temp_path, path)
         if path.is_symlink():
             raise KanbanError(f"写入后任务文档变成符号链接: {path}")
@@ -606,10 +638,11 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
     if entry.path.exists() or not target.exists():
         raise KanbanError("迁移后状态校验失败, 请保留现场")
     document = target if entry.kind == "small" else target / "spec.md"
+    moved = Entry(entry.task_id, target_state, target, document, entry.kind)
     if updated != text:
         try:
-            write_text_atomic(document, updated)
-        except (OSError, UnicodeError) as error:
+            write_text_atomic(document, updated, entry=moved)
+        except (OSError, UnicodeError, KanbanError) as error:
             try:
                 target.rename(entry.path)
             except (OSError, UnicodeError) as rollback_error:
@@ -617,7 +650,7 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
                     f"记录完成时间失败且回滚失败; 卡片保留在 done: {error}; {rollback_error}"
                 ) from error
             raise KanbanError(f"记录完成时间失败: {error}") from error
-    return Entry(entry.task_id, target_state, target, document, entry.kind)
+    return moved
 
 
 def command_move(args: argparse.Namespace, root: Path) -> None:
@@ -724,7 +757,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     effort = "high" if entry.kind == "large" else "medium"
     agent_argv = [*agent_command(agent_name, agent, effort), prompt]
     try:
-        write_text_atomic(moved.document, updated)
+        write_text_atomic(moved.document, updated, entry=moved)
         if launcher == "tmux":
             command = shlex.join(agent_argv)
             result = subprocess.run(
@@ -757,7 +790,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 raise KanbanError(f"启动 Agent 失败: {error}") from error
     except (KanbanError, OSError, UnicodeError) as error:
         try:
-            write_text_atomic(moved.document, original)
+            write_text_atomic(moved.document, original, entry=moved)
             moved.path.rename(entry.path)
         except (OSError, UnicodeError) as rollback_error:
             raise KanbanError(

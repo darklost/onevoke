@@ -883,6 +883,7 @@ class OnevokeCommandTest(unittest.TestCase):
                 ),
                 (
                     "# Onevoke 全局工作流规则\n"
+                    "## 默认取值\n"
                     "| 分册 | 说明 |\n"
                     "| `BASE-RULES.md` | 通用条款 |\n"
                 ),
@@ -907,7 +908,7 @@ class OnevokeCommandTest(unittest.TestCase):
                 ),
                 (
                     "# Onevoke 全局工作流规则\n"
-                    "见 ~/.agents/BASE-RULES.md\n"
+                    "分册见 ~/.agents/BASE-RULES.md\n"
                 ),
             ),
         }

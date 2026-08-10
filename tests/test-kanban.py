@@ -6,6 +6,7 @@ import json
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -872,6 +873,36 @@ N/A
             show.stderr,
         )
         self.assertEqual("external\n", outside.read_text(encoding="utf-8"))
+
+    def test_task_directory_swapped_for_symlink_is_rejected(self) -> None:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-dir-swap-task"
+        task_dir = self.root / "todo" / task_id
+        task_dir.mkdir()
+        (task_dir / "spec.md").write_text(
+            "# 任务 dir-swap\n\n"
+            "- 类型: Bug\n- 创建时间: 2026-08-11 00:00\n- 负责人:\n"
+            "- 开始时间:\n- 完成时间:\n- 任务分支:\n- 结果:\n\n"
+            "## 任务目标\n\n目标\n\n## 用户决策\n\nN/A\n\n"
+            "## 预期成果\n\n成果\n\n## 验收条件\n\n- [ ] 条件\n\n"
+            "## 威胁模型\n\nN/A\n\n## 不在本轮范围\n\n- 无\n\n"
+            "## 讨论与决策\n\nN/A\n\n## 实施与验证\n\nN/A\n\n"
+            "## 完成总结\n\n",
+            encoding="utf-8",
+        )
+        outside_dir = self.root.parent / "evil-task"
+        outside_dir.mkdir()
+        (outside_dir / "spec.md").write_text("# evil\n", encoding="utf-8")
+        self.assertIn("# 任务 dir-swap", self.run_command("show", task_id).stdout)
+        # 模拟 scan 后把任务目录换成指向外部的软链.
+        shutil.rmtree(task_dir)
+        task_dir.symlink_to(outside_dir)
+
+        show = self.run_command("show", task_id, succeeds=False)
+        self.assertTrue(
+            "符号链接" in show.stderr or "无效" in show.stderr or "不存在" in show.stderr,
+            show.stderr,
+        )
+        self.assertEqual("# evil\n", (outside_dir / "spec.md").read_text(encoding="utf-8"))
 
     def test_symlink_entry_is_rejected_without_blocking_others(self) -> None:
         healthy, todo_path = self.make_todo("fine")

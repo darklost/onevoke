@@ -17,7 +17,7 @@ Onevoke - One person. Many agents.
 | `bin/onevoke` | 首次引导、环境诊断、配置展示和 Reviewer 分发 |
 | `bin/codex-review.sh` + `bin/grok-review.sh` | 两个 reviewer wrapper, 只读跑上述角色, 参数一致 |
 
-`bin/merge-worktree-memory.py` 在任务集成后把 worktree 的 memsearch 记忆并回主树, 顺带清掉记忆里的非法 UTF-8 字节.
+`bin/merge-worktree-memory.py` 在任务集成后把 worktree 的 memsearch 记忆并回主树; 新条目写入前清理非法 UTF-8, 既有目标文件只扫描报告、不整文件 rewrite, 以免与并发追加竞态丢记录.
 
 ## 依赖
 
@@ -340,7 +340,7 @@ onevoke welcome --reset
 
 主 worktree 因用户改动、本地领先或分叉而不能 fast-forward 时, 不擅自 stash、reset 或提交这些改动. 只要已确认远端集成成功, 仍可合并任务记忆并清理任务 worktree, 同时报告主树未同步的原因和恢复办法.
 
-未安装 memsearch 时, 记忆合并命令是成功的空操作. 安装后, 它会合并并去重任务 worktree 的会话记录, 清除非法 UTF-8 字节, 再允许清理 worktree.
+未安装 memsearch 时, 记忆合并命令是成功的空操作. 安装后, 它会合并并去重任务 worktree 的会话记录, 写入前清理新条目的非法 UTF-8, 并扫描报告既有脏文件但不改写活跃目标; 来源在合并窗口内无法证明稳定时失败并阻止清理 worktree.
 
 ### 10. 完成卡片
 

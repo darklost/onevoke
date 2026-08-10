@@ -181,9 +181,11 @@ def _claude_rules_import_present(text: str, entry: Path) -> bool:
 
 
 def _merged_rules_present(text: str) -> bool:
-    """Codex/Grok 合并文件须有完整入口标题, 以及正向分册引用结构."""
+    """Codex/Grok 合并文件须像当前入口: 标题 + 分册结构 + 正向 BASE-RULES 引用."""
+    body = _strip_comments_and_fences(text)
     has_heading = False
     has_base = False
+    has_structure = False
     # 只认表格/路径式正向引用, 拒绝 "BASE-RULES.md 已禁用" 一类后置否定.
     base_positive = re.compile(
         r"(?:"
@@ -197,11 +199,12 @@ def _merged_rules_present(text: str) -> bool:
         r"|BASE-RULES\.md.{0,16}(不|勿|别|没有|未|禁止|跳过|禁用|停用|废弃)"
         r")"
     )
-    for raw in _strip_comments_and_fences(text).splitlines():
+    for raw in body.splitlines():
         line = raw.strip()
         if line == "# Onevoke 全局工作流规则":
             has_heading = True
-            continue
+        if "分册" in line or "默认取值" in line or "ONEVOKE-AGENTS" in line:
+            has_structure = True
         if "BASE-RULES.md" not in line:
             continue
         if "TODO" in line or "占位" in line:
@@ -209,9 +212,8 @@ def _merged_rules_present(text: str) -> bool:
         if base_negated.search(line):
             continue
         if base_positive.search(line):
-            # 路径尾部匹配后若整行主要是否定说明, 已在 base_negated 排除.
             has_base = True
-    return has_heading and has_base
+    return has_heading and has_base and has_structure
 
 
 def rules_integration(agent: str) -> tuple[bool, str]:
@@ -497,9 +499,10 @@ def print_doctor() -> bool:
     else:
         if config["welcome_complete"]:
             success(f"配置: {config_path()}")
-            healthy = validate_configured_resources(config, agents, memory) and healthy
         else:
             print(f"[-] 配置: 尚未完成 ({config_path()})", file=sys.stderr)
+        # 无论 welcome 是否完成, 都校验 effective_config 指向的实际资源.
+        healthy = validate_configured_resources(config, agents, memory) and healthy
     return healthy
 
 
@@ -546,17 +549,20 @@ def validate_configured_resources(
                 "配置的 launcher 是 tmux, 但 tmux 不在 PATH; "
                 "请安装 tmux 或运行 onevoke welcome --reset 改选 foreground."
             )
-        elif not os.environ.get("TMUX"):
+        elif not os.environ.get("TMUX") and config.get("welcome_complete"):
+            # 通用 tmux 段已给出唯一启动命令; 这里只在已完成配置时补充契约提示.
             print(
-                f"[-] launcher=tmux 需要先进入 session: {TMUX_SESSION_HINT}",
+                "[-] launcher=tmux 需要先进入上述 tmux session",
                 file=sys.stderr,
             )
     elif launcher == "foreground":
-        print(
-            "[-] launcher=foreground 需要交互终端 "
-            "(stdin/stdout/stderr 均为 tty); 无 TTY 时改用 tmux 或在真实终端运行.",
-            file=sys.stderr,
-        )
+        # 仅在配置已完成时提示, 避免与通用 doctor 输出叠床架屋.
+        if config.get("welcome_complete"):
+            print(
+                "[-] launcher=foreground 需要交互终端 "
+                "(stdin/stdout/stderr 均为 tty); 无 TTY 时改用 tmux 或在真实终端运行.",
+                file=sys.stderr,
+            )
 
     memory_enabled = bool(
         memory["cli_ready"] and memory.get(f"{selected_agent}_plugin", False)

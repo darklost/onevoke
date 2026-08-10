@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 
-"""把任务 worktree 的 memsearch 记忆并入主 worktree, 并清除非法 UTF-8 字节.
+"""把任务 worktree 的 memsearch 记忆并入主 worktree.
 
 不依赖 memsearch 本身: 只读写 `.memsearch/memory/*.md`, 从不调用它的二进制.
 未安装 memsearch 时 worktree 里没有该目录, 本脚本报告无事可做并以 0 退出,
 不创建任何目录, 集成流程可以无条件调用它.
 
 全程按字节处理. 记忆文件由 hook 自动追加, 历史数据可能含非法 UTF-8 序列;
-先解码再处理会丢字节或直接抛错, 因此切分, 归一化和哈希都在 bytes 上完成,
-只有最后的清理步骤按 UTF-8 语义丢弃非法序列.
+先解码再处理会丢字节或直接抛错, 因此切分, 归一化和哈希都在 bytes 上完成.
+新合并条目在写入前丢弃非法 UTF-8; 不对可能仍被追加的目标整文件 rewrite
+(无 MemSearch 协作封口协议时, 改写无法证明不丢并发字节). 既有脏文件只扫描报告.
 
 条目哈希与既有记忆文件中的 `<!-- merged-worktree-memory entry:... -->` 标记
 兼容, 改动切分或归一化逻辑会让已合并条目重新判定为新条目.
@@ -427,7 +428,8 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Merge .memsearch/memory entries from a task worktree into the "
-        "main worktree, then strip invalid UTF-8 from the result."
+        "main worktree. New entries are UTF-8 cleaned on write; existing target "
+        "files are scanned but not rewritten while they may still receive appends."
     )
     parser.add_argument(
         "--source", metavar="PATH",
