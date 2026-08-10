@@ -51,6 +51,8 @@ memsearch 是可选依赖. welcome 要求 CLI 版本正好为 `0.4.15`, 并验�
 
 Codex 的 MemSearch 自动安装固定 PyPI 版本、上游 tag 和 commit, 只执行 tag、commit 均匹配且工作树 clean 的插件源码; 安装器返回后重新验证 CLI 和三个 hooks, 未实际接入时不标记启用. 既有缓存被修改或出现未跟踪文件时会拒绝执行.
 
+Claude 的 MemSearch 接入只接受固定 `0.4.15` 发布树: manifest、hooks、辅助脚本、prompts 和 skills 必须逐文件通过 SHA-256 校验, 也不得增加可自动发现的插件组件; 仅忽略 Claude 自己创建的 `.in_use/` 运行时标记.
+
 welcome 只在 stdin 和 stderr 都是 tty 时提问. CI、管道或 hook 中仍完成文件安装, 输出诊断并提示之后在终端运行:
 
 ```sh

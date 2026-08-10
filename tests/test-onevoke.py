@@ -485,6 +485,9 @@ class OnevokeCommandTest(unittest.TestCase):
         }
 
         with mock.patch.object(Path, "home", return_value=self.home):
+            runtime_marker = plugin / ".in_use" / "session"
+            runtime_marker.parent.mkdir()
+            runtime_marker.write_text("active\n", encoding="utf-8")
             self.assertTrue(onevoke.claude_memsearch_ready())
 
             common = plugin / "hooks" / "common.sh"
@@ -494,10 +497,17 @@ class OnevokeCommandTest(unittest.TestCase):
 
             common.write_bytes(original_common)
             stop = plugin / "hooks" / "stop.sh"
+            original_stop = stop.read_bytes()
             stop.write_text(
                 stop.read_text(encoding="utf-8") + "printf 'changed\\n'\n",
                 encoding="utf-8",
             )
+            self.assertFalse(onevoke.claude_memsearch_ready())
+
+            stop.write_bytes(original_stop)
+            extra_skill = plugin / "skills" / "extra" / "SKILL.md"
+            extra_skill.parent.mkdir(parents=True)
+            extra_skill.write_text("extra instructions\n", encoding="utf-8")
             self.assertFalse(onevoke.claude_memsearch_ready())
 
     def test_doctor_rejects_old_claude_plugin_version(self) -> None:
@@ -537,6 +547,26 @@ class OnevokeCommandTest(unittest.TestCase):
         result = self.run_command("doctor")
 
         self.assertIn("Codex 插件: 未接入", result.stderr)
+
+    def test_doctor_rejects_codex_hook_command_with_extra_tokens(self) -> None:
+        self.install_fake_environment(tmux=True)
+        hooks_file = self.home / ".codex" / "hooks.json"
+        original = json.loads(hooks_file.read_text(encoding="utf-8"))
+
+        for position in ("prefix", "suffix"):
+            with self.subTest(position=position):
+                hooks = json.loads(json.dumps(original))
+                command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+                if position == "prefix":
+                    command = f"false {command.split(' ', 1)[1]}"
+                else:
+                    command = f"{command} extra"
+                hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] = command
+                hooks_file.write_text(json.dumps(hooks), encoding="utf-8")
+
+                result = self.run_command("doctor")
+
+                self.assertIn("Codex 插件: 未接入", result.stderr)
 
     def test_doctor_fails_without_any_agent_or_reviewer(self) -> None:
         for name in (

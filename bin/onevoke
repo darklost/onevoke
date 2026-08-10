@@ -182,19 +182,21 @@ def resolve_hook_script(command: object, expected: str, root: Path | None) -> Pa
         tokens = shlex.split(command)
     except ValueError:
         return None
-    for token in tokens:
-        if root is not None:
-            token = token.replace("${CLAUDE_PLUGIN_ROOT}", str(root))
-        if "$" in token:
-            continue
-        candidate = Path(token).expanduser()
-        if (
-            candidate.is_absolute()
-            and candidate.name == expected
-            and candidate.is_file()
-            and os.access(candidate, os.X_OK)
-        ):
-            return candidate.resolve()
+    if len(tokens) != 2 or tokens[0] != "bash":
+        return None
+    token = tokens[1]
+    if root is not None:
+        token = token.replace("${CLAUDE_PLUGIN_ROOT}", str(root))
+    if "$" in token:
+        return None
+    candidate = Path(token).expanduser()
+    if (
+        candidate.is_absolute()
+        and candidate.name == expected
+        and candidate.is_file()
+        and os.access(candidate, os.X_OK)
+    ):
+        return candidate.resolve()
     return None
 
 
@@ -230,6 +232,31 @@ def hooks_directory(raw: object, root: Path | None = None) -> Path | None:
 
 
 def claude_plugin_identified(root: Path) -> bool:
+    if root.is_symlink() or not root.is_dir():
+        return False
+    expected_files = {Path(relative) for relative in CLAUDE_PLUGIN_HASHES}
+    expected_directories = {parent for path in expected_files for parent in path.parents}
+    actual_files: set[Path] = set()
+    try:
+        for entry in root.rglob("*"):
+            relative = entry.relative_to(root)
+            if relative.parts[0] == ".in_use":
+                continue
+            if entry.is_symlink():
+                return False
+            if entry.is_dir():
+                if relative not in expected_directories:
+                    return False
+            elif entry.is_file():
+                if relative not in expected_files:
+                    return False
+                actual_files.add(relative)
+            else:
+                return False
+    except OSError:
+        return False
+    if actual_files != expected_files:
+        return False
     for relative, expected in CLAUDE_PLUGIN_HASHES.items():
         try:
             digest = hashlib.sha256((root / relative).read_bytes()).hexdigest()
