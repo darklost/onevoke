@@ -9,7 +9,8 @@
 ## Project Structure & Module Organization
 
 - `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 只放分册索引, 优先级和三项默认取值 (分支, Reviewer, 看板任务完成). 其余分册由它的分册表按需引用: `BASE-RULES.md` 跨项目通用条款, `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约 (Codex 与 Grok 共用), `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
-- 入口装的是用户可改的默认取值: `install.sh` 只在它缺失时种一次, 已存在就原样保留并在 stderr 提示, 分册仍每次覆盖. 入口的三项取值高于分册, 分册在对应条款里显式让位; 改取值语义时必须同步对应分册的让位措辞.
+- 入口装的是用户可改的默认取值, 分册仍每次覆盖. `install.sh` 按 `entry_action` 四态处理入口: `seed` 缺失时种一份, `same` 与模板一致时静默跳过, `replace` 用户在提示里选了覆盖, `keep` 保留. 有 tty 时先打 `diff -u` 再让用户选, 只有明确回 `1` 才是 `replace`; 无 tty 一律 `keep` 并在 stderr 说明. 交互分支只能用伪终端测, 见 `tests/test-kanban.py` 的 `run_installer_on_a_tty`.
+- 安装测试的 `subprocess.run` 一律显式传 `stdin=subprocess.DEVNULL`, 否则从终端跑测试时会落进交互分支卡住. 入口的三项取值高于分册, 分册在对应条款里显式让位; 改取值语义时必须同步对应分册的让位措辞.
 - 过期入口的判据是正文不引用 `BASE-RULES.md`. 改入口模板时保留这个引用, 否则老用户拿不到升级提示.
 - 入口存在却读不到 (悬空软链, 目录, 权限不足) 是坏现场, 不是"已保留": 安装器在装任何东西之前报错退 1, 不留半套状态, 也不把它诊断成过期入口.
 - 新增分册时把它加进 `ONEVOKE-AGENTS.md` 的分册表即可; `install.sh` 和安装测试都遍历 `rules/*.md`, 不必改.

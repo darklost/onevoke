@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import os
+import pty
 import re
 import runpy
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -641,6 +643,7 @@ printf '%s\\n' '@9'
         env["HOME"] = str(install_home)
         result = subprocess.run(
             ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
             env=env,
             text=True,
             capture_output=True,
@@ -684,6 +687,7 @@ printf '%s\\n' '@9'
         for _ in range(2):
             result = subprocess.run(
                 ["sh", str(INSTALLER)],
+                stdin=subprocess.DEVNULL,
                 env=env,
                 text=True,
                 capture_output=True,
@@ -699,7 +703,131 @@ printf '%s\\n' '@9'
             (install_home / ".agents" / "ONEVOKE-AGENTS.md").read_bytes(),
         )
 
-    def test_installer_seeds_the_entry_rule_but_never_overwrites_it(self) -> None:
+    def seed_customized_entry(self, home_name: str) -> tuple[Path, Path]:
+        """先装一份, 再改掉入口, 模拟"用户已经定制过默认取值"的现场."""
+        install_home = self.root / home_name
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+        subprocess.run(
+            ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        entry = install_home / ".agents" / "ONEVOKE-AGENTS.md"
+        entry.write_text(
+            entry.read_text(encoding="utf-8") + "\n# 我的定制\n", encoding="utf-8"
+        )
+        return install_home, entry
+
+    def run_installer_on_a_tty(self, home: Path, answer: str) -> tuple[int, str, str]:
+        """在伪终端里跑安装器并喂一个答案, 返回 (退出码, stdout, 终端上看到的内容).
+
+        交互分支只在 stdin 和 stderr 都是 tty 时才走, 用管道测不到.
+        """
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        master, slave = pty.openpty()
+        process = subprocess.Popen(
+            ["sh", str(INSTALLER)],
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=slave,
+            env=env,
+            text=True,
+            close_fds=True,
+        )
+        os.close(slave)
+        seen: list[bytes] = []
+
+        # diff 可能撑满 pty 缓冲区, 不同步读走就会双向阻塞.
+        def drain() -> None:
+            while True:
+                try:
+                    data = os.read(master, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                seen.append(data)
+
+        reader = threading.Thread(target=drain)
+        reader.start()
+        try:
+            os.write(master, answer.encode("utf-8"))
+            stdout, _ = process.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise
+        finally:
+            os.close(master)
+            reader.join(timeout=5)
+        return process.returncode, stdout, b"".join(seen).decode("utf-8", "replace")
+
+    def test_installer_overwrites_the_entry_rule_when_the_user_agrees(self) -> None:
+        install_home, entry = self.seed_customized_entry("prompt-overwrite-home")
+
+        returncode, stdout, tty = self.run_installer_on_a_tty(install_home, "1\n")
+
+        self.assertEqual(0, returncode, tty)
+        self.assertEqual("Onevoke installed\n", stdout)
+        # 覆盖前必须先把差异摆出来, 否则用户是在盲选.
+        self.assertIn("differs from this version's template", tty)
+        self.assertIn("-# 我的定制", tty)
+        self.assertIn("Choose [1/2]", tty)
+        self.assertIn("was overwritten", tty)
+        self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
+
+    def test_installer_keeps_the_entry_rule_when_the_user_declines(self) -> None:
+        install_home, entry = self.seed_customized_entry("prompt-keep-home")
+        before = entry.read_text(encoding="utf-8")
+
+        returncode, stdout, tty = self.run_installer_on_a_tty(install_home, "2\n")
+
+        self.assertEqual(0, returncode, tty)
+        self.assertEqual("Onevoke installed\n", stdout)
+        self.assertIn("Choose [1/2]", tty)
+        self.assertIn("left as it is", tty)
+        self.assertEqual(before, entry.read_text(encoding="utf-8"))
+
+    def test_installer_treats_an_unrecognised_answer_as_keep(self) -> None:
+        install_home, entry = self.seed_customized_entry("prompt-junk-home")
+        before = entry.read_text(encoding="utf-8")
+
+        # 回车, 乱敲, 直接 EOF (Ctrl-D) 都不能被当成同意覆盖.
+        for answer in ("\n", "y\n", "\x04"):
+            with self.subTest(answer=answer):
+                returncode, _, tty = self.run_installer_on_a_tty(install_home, answer)
+
+                self.assertEqual(0, returncode, tty)
+                self.assertEqual(before, entry.read_text(encoding="utf-8"))
+                self.assertNotIn("was overwritten", tty)
+
+    def test_installer_stays_quiet_when_the_entry_rule_matches_the_template(
+        self,
+    ) -> None:
+        install_home = self.root / "same-entry-home"
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+
+        for _ in range(2):
+            result = subprocess.run(
+                ["sh", str(INSTALLER)],
+                stdin=subprocess.DEVNULL,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("Onevoke installed\n", result.stdout)
+            # 入口和模板一字不差就没什么可选的, 不该提示, 也不该问.
+            self.assertEqual("", result.stderr)
+
+    def test_installer_seeds_the_entry_rule_and_keeps_it_without_a_tty(self) -> None:
         install_home = self.root / "entry-home"
         env = os.environ.copy()
         env["HOME"] = str(install_home)
@@ -708,6 +836,7 @@ printf '%s\\n' '@9'
 
         first = subprocess.run(
             ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
             env=env,
             text=True,
             capture_output=True,
@@ -728,6 +857,7 @@ printf '%s\\n' '@9'
 
         second = subprocess.run(
             ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
             env=env,
             text=True,
             capture_output=True,
@@ -771,6 +901,7 @@ printf '%s\\n' '@9'
 
                 result = subprocess.run(
                     ["sh", str(INSTALLER)],
+                    stdin=subprocess.DEVNULL,
                     env=env,
                     text=True,
                     capture_output=True,
@@ -801,6 +932,7 @@ printf '%s\\n' '@9'
 
         result = subprocess.run(
             ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
             env=env,
             text=True,
             capture_output=True,
@@ -834,6 +966,7 @@ printf '%s\\n' '@9'
 
         result = subprocess.run(
             ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
             env=env,
             text=True,
             capture_output=True,
@@ -868,6 +1001,7 @@ printf '%s\\n' '@9'
 
         result = subprocess.run(
             ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
             env=env,
             text=True,
             capture_output=True,
@@ -885,6 +1019,7 @@ printf '%s\\n' '@9'
     def test_installer_rejects_arguments(self) -> None:
         result = subprocess.run(
             ["sh", str(INSTALLER), "--force"],
+            stdin=subprocess.DEVNULL,
             env={**os.environ, "HOME": str(self.root / "arg-home")},
             text=True,
             capture_output=True,
