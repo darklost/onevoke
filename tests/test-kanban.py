@@ -717,18 +717,28 @@ printf '%s\\n' '@9'
             check=True,
         )
         entry = install_home / ".agents" / "ONEVOKE-AGENTS.md"
-        entry.write_text(
-            entry.read_text(encoding="utf-8") + "\n# 我的定制\n", encoding="utf-8"
+        # 改一行再追加一行, 让 diff 里同时有删除行和新增行.
+        customized = entry.read_text(encoding="utf-8").replace(
+            "默认集成分支是 `develop`", "默认集成分支是 `trunk`"
         )
+        self.assertNotEqual(entry.read_text(encoding="utf-8"), customized)
+        # `---` 是 Markdown 里的常见内容; 删掉它的 diff 行是 `----`, 按前缀会被误认成文件头.
+        entry.write_text(customized + "\n---\n\n# 我的定制\n", encoding="utf-8")
         return install_home, entry
 
-    def run_installer_on_a_tty(self, home: Path, answer: str) -> tuple[int, str, str]:
+    def run_installer_on_a_tty(
+        self, home: Path, answer: str, no_color: bool = False
+    ) -> tuple[int, str, str]:
         """在伪终端里跑安装器并喂一个答案, 返回 (退出码, stdout, 终端上看到的内容).
 
         交互分支只在 stdin 和 stderr 都是 tty 时才走, 用管道测不到.
         """
         env = os.environ.copy()
         env["HOME"] = str(home)
+        # 着色跟随 NO_COLOR, 不能让开发机上已有的取值决定测试结果.
+        env.pop("NO_COLOR", None)
+        if no_color:
+            env["NO_COLOR"] = "1"
         master, slave = pty.openpty()
         process = subprocess.Popen(
             ["sh", str(INSTALLER)],
@@ -775,11 +785,34 @@ printf '%s\\n' '@9'
         self.assertEqual(0, returncode, tty)
         self.assertEqual("Onevoke installed\n", stdout)
         # 覆盖前必须先把差异摆出来, 否则用户是在盲选.
-        self.assertIn("differs from this version's template", tty)
-        self.assertIn("-# 我的定制", tty)
-        self.assertIn("Choose [1/2]", tty)
-        self.assertIn("was overwritten", tty)
+        self.assertIn("与本版模板不一致", tty)
+        # 删除行标红, 新增行标绿, 位置行标青, 文件头加粗.
+        self.assertIn("\033[31m-# 我的定制\033[0m", tty)
+        self.assertIn("\033[32m+", tty)
+        self.assertIn("\033[36m@@", tty)
+        self.assertIn("\033[1m--- ", tty)
+        self.assertIn("\033[1m+++ ", tty)
+        # 内容行 `---` 是删除行, 该标红, 不该被当成文件头加粗.
+        self.assertIn("\033[31m----\033[0m", tty)
+        self.assertIn("请选择 [1/2]", tty)
+        self.assertIn("已用本版模板覆盖", tty)
         self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
+
+    def test_installer_honours_no_color_for_the_diff(self) -> None:
+        install_home, entry = self.seed_customized_entry("prompt-nocolor-home")
+        before = entry.read_text(encoding="utf-8")
+
+        returncode, _, tty = self.run_installer_on_a_tty(
+            install_home, "2\n", no_color=True
+        )
+
+        self.assertEqual(0, returncode, tty)
+        # 差异照常打印, 只是不着色.
+        self.assertIn("-# 我的定制", tty)
+        self.assertNotIn("\033[31m", tty)
+        self.assertNotIn("\033[32m", tty)
+        self.assertNotIn("\033[36m", tty)
+        self.assertEqual(before, entry.read_text(encoding="utf-8"))
 
     def test_installer_keeps_the_entry_rule_when_the_user_declines(self) -> None:
         install_home, entry = self.seed_customized_entry("prompt-keep-home")
@@ -789,8 +822,8 @@ printf '%s\\n' '@9'
 
         self.assertEqual(0, returncode, tty)
         self.assertEqual("Onevoke installed\n", stdout)
-        self.assertIn("Choose [1/2]", tty)
-        self.assertIn("left as it is", tty)
+        self.assertIn("请选择 [1/2]", tty)
+        self.assertIn("保持原样", tty)
         self.assertEqual(before, entry.read_text(encoding="utf-8"))
 
     def test_installer_treats_an_unrecognised_answer_as_keep(self) -> None:
@@ -804,7 +837,7 @@ printf '%s\\n' '@9'
 
                 self.assertEqual(0, returncode, tty)
                 self.assertEqual(before, entry.read_text(encoding="utf-8"))
-                self.assertNotIn("was overwritten", tty)
+                self.assertNotIn("已用本版模板覆盖", tty)
 
     def test_installer_stays_quiet_when_the_entry_rule_matches_the_template(
         self,
@@ -866,7 +899,7 @@ printf '%s\\n' '@9'
         self.assertEqual(0, second.returncode, second.stderr)
         self.assertEqual("Onevoke installed\n", second.stdout)
         self.assertEqual(customized, entry.read_text(encoding="utf-8"))
-        self.assertIn("left untouched", second.stderr)
+        self.assertIn("保持原样", second.stderr)
         self.assertIn("rules/ONEVOKE-AGENTS.md", second.stderr)
         for source in sorted(RULES_DIR.glob("*.md")):
             if source.name == AGENT_RULES.name:
@@ -911,9 +944,9 @@ printf '%s\\n' '@9'
                 self.assertEqual(1, result.returncode, result.stderr)
                 # 半套状态比不装更难查: 报错时命令和分册都不该落地.
                 self.assertEqual("", result.stdout)
-                self.assertIn("cannot be read", result.stderr)
-                self.assertIn("Nothing was installed", result.stderr)
-                self.assertNotIn("pre-split", result.stderr)
+                self.assertIn("读不出来", result.stderr)
+                self.assertIn("什么都没装", result.stderr)
+                self.assertNotIn("拆分前的旧入口", result.stderr)
                 self.assertFalse((agents_dir / "BASE-RULES.md").exists())
                 self.assertFalse((install_home / ".local" / "bin").exists())
                 # 坏现场要原样留给用户处理, 安装器不代为删改.
@@ -942,7 +975,7 @@ printf '%s\\n' '@9'
         # 内容过期不是失败: 安装照常完成, 保留原文件, 只在 stderr 点名.
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("Onevoke installed\n", result.stdout)
-        self.assertIn("pre-split entry file", result.stderr)
+        self.assertIn("拆分前的旧入口", result.stderr)
         self.assertIn("BASE-RULES.md", result.stderr)
         self.assertEqual(legacy_text, legacy.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -976,7 +1009,7 @@ printf '%s\\n' '@9'
         # 检测到旧文件不是失败: 安装照常完成, 警告只走 stderr.
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("Onevoke installed\n", result.stdout)
-        self.assertIn("outdated rule files", result.stderr)
+        self.assertIn("早期 Onevoke 版本的规则文件", result.stderr)
         # 提示必须逐个点名, 且明确说明安装器不会代为删除.
         for name in stale_names:
             self.assertIn(str(agents_dir / name), result.stderr)
@@ -985,7 +1018,7 @@ printf '%s\\n' '@9'
                 (agents_dir / name).read_text(encoding="utf-8"),
                 name,
             )
-        self.assertIn("never deletes", result.stderr)
+        self.assertIn("从不删除文件", result.stderr)
 
     def test_installer_reports_only_the_stale_files_that_exist(self) -> None:
         install_home = self.root / "partial-stale-home"
@@ -1027,7 +1060,7 @@ printf '%s\\n' '@9'
         )
 
         self.assertEqual(2, result.returncode)
-        self.assertIn("Usage: install.sh", result.stderr)
+        self.assertIn("用法: install.sh", result.stderr)
 
 
 if __name__ == "__main__":

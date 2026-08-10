@@ -3,8 +3,8 @@
 set -eu
 
 if [ "$#" -gt 0 ]; then
-  echo "Usage: install.sh" >&2
-  echo "Installs Onevoke commands to ~/.local/bin and rules to ~/.agents." >&2
+  echo "用法: install.sh" >&2
+  echo "把 Onevoke 命令装到 ~/.local/bin, 规则装到 ~/.agents." >&2
   exit 2
 fi
 
@@ -16,6 +16,7 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # 现场: 装任何东西之前先停, 免得留下半套状态又谎报安装成功.
 entry_rule='ONEVOKE-AGENTS.md'
 entry_path="$HOME/.agents/$entry_rule"
+entry_template="$project_dir/rules/$entry_rule"
 entry_state='seed'
 
 # -e 不认悬空软链, 补 -L 才能把断链认成"已存在"; 指向普通可读文件的软链仍算正常入口.
@@ -29,15 +30,14 @@ fi
 
 if [ "$entry_state" = 'unreadable' ]; then
   {
-    printf '%s\n' "Error: $entry_path exists but cannot be read."
-    printf '%s\n' '       It is a dangling symlink, a directory, or not readable by this user.'
-    printf '%s\n' '       Nothing was installed. Fix or remove that path, then run install.sh again.'
-    printf '%s\n' "       Template: $project_dir/rules/$entry_rule"
+    printf '%s\n' "错误: $entry_path 存在但读不出来."
+    printf '%s\n' '      它是悬空软链, 目录, 或者当前用户没有读权限.'
+    printf '%s\n' '      本次什么都没装. 修好或删掉这个路径, 再重跑 install.sh.'
+    printf '%s\n' "      模板: $entry_template"
   } >&2
   exit 1
 fi
 
-entry_template="$project_dir/rules/$entry_rule"
 # seed 种新的, same 内容已一致, replace 用户同意覆盖, keep 保留用户的.
 entry_action="$entry_state"
 entry_scan=0
@@ -57,28 +57,41 @@ if [ "$entry_state" = 'kept' ]; then
     {
       printf '%s\n' ''
       if [ "$entry_scan" -eq 1 ]; then
-        printf '%s\n' "$entry_path looks like a pre-split entry file."
-        printf '%s\n' 'The shared rules moved to ~/.agents/BASE-RULES.md; the entry now only holds'
-        printf '%s\n' 'the rule index, the priority chain and the default settings. Overwriting is'
-        printf '%s\n' 'recommended here; re-apply your own edits afterwards.'
+        printf '%s\n' "$entry_path 是拆分前的旧入口."
+        printf '%s\n' '通用条款已经拆到 ~/.agents/BASE-RULES.md, 入口现在只放分册索引, 优先级和'
+        printf '%s\n' '默认取值. 这种情况建议覆盖, 之后再把你自己的改动加回去.'
       else
-        printf '%s\n' "$entry_path differs from this version's template."
-        printf '%s\n' 'It carries your own default settings, so it is never overwritten silently.'
+        printf '%s\n' "$entry_path 与本版模板不一致."
+        printf '%s\n' '它装的是你自己的默认取值, 不会被静默覆盖.'
       fi
       printf '%s\n' ''
     } >&2
 
+    # 先接住 diff 的退出码再输出: 直接管到着色器会把状态换成 sed 的.
     entry_diff=0
-    diff -u "$entry_path" "$entry_template" >&2 || entry_diff=$?
+    entry_diff_text=$(diff -u "$entry_path" "$entry_template") || entry_diff=$?
     if [ "$entry_diff" -gt 1 ]; then
-      printf '%s\n' 'Warning: could not diff the two files; compare them yourself.' >&2
+      printf '%s\n' '警告: 两个文件比不出差异, 请自行对照.' >&2
+    elif [ -n "${NO_COLOR:-}" ]; then
+      printf '%s\n' "$entry_diff_text" >&2
+    else
+      # diff -u 本身不着色. 文件头只认前两行的行号, 不能按 ^---/^+++ 认: 规则文件里
+      # 一条 `---` 分隔线被删掉后, 内容行就是 `----`, 按前缀会被误判成文件头. 头部先
+      # 着色, 在行首插入转义序列, 后面的 /^-/ 和 /^+/ 就不会再吃掉这两行.
+      esc=$(printf '\033')
+      printf '%s\n' "$entry_diff_text" | sed \
+        -e "1s/.*/${esc}[1m&${esc}[0m/" \
+        -e "2s/.*/${esc}[1m&${esc}[0m/" \
+        -e "/^@@/s/.*/${esc}[36m&${esc}[0m/" \
+        -e "/^-/s/.*/${esc}[31m&${esc}[0m/" \
+        -e "/^+/s/.*/${esc}[32m&${esc}[0m/" >&2
     fi
 
     {
       printf '%s\n' ''
-      printf '%s\n' '  1. Overwrite with the template (your own edits are lost)'
-      printf '%s\n' '  2. Keep your current file'
-      printf '%s' 'Choose [1/2]: '
+      printf '%s\n' '  1. 用模板覆盖 (你自己的改动会丢失)'
+      printf '%s\n' '  2. 保留当前文件'
+      printf '%s' '请选择 [1/2]: '
     } >&2
     entry_reply=''
     read -r entry_reply || entry_reply=''
@@ -87,7 +100,7 @@ if [ "$entry_state" = 'kept' ]; then
     2) entry_action='keep' ;;
     *)
       entry_action='keep'
-      printf '%s\n' 'Not 1 or 2; keeping your current file.' >&2
+      printf '%s\n' '不是 1 或 2, 保留当前文件.' >&2
       ;;
     esac
   else
@@ -118,7 +131,7 @@ printf '%s\n' 'Onevoke installed'
 if [ "$entry_action" = 'replace' ]; then
   {
     printf '%s\n' ''
-    printf '%s\n' "Note: $entry_path was overwritten with this version's template."
+    printf '%s\n' "提示: $entry_path 已用本版模板覆盖."
   } >&2 2>/dev/null || true
 fi
 
@@ -126,8 +139,8 @@ fi
 if [ "$entry_action" = 'keep' ] && [ "$entry_prompted" -eq 1 ]; then
   {
     printf '%s\n' ''
-    printf '%s\n' "Note: $entry_path left as it is."
-    printf '%s\n' "      Template: $entry_template"
+    printf '%s\n' "提示: $entry_path 保持原样."
+    printf '%s\n' "      模板: $entry_template"
   } >&2 2>/dev/null || true
 fi
 
@@ -137,19 +150,19 @@ if [ "$entry_action" = 'keep' ] && [ "$entry_prompted" -eq 0 ]; then
   {
     printf '%s\n' ''
     if [ "$entry_scan" -eq 0 ]; then
-      printf '%s\n' "Note: $entry_path already exists and was left untouched."
-      printf '%s\n' '      It carries your own default settings, and there is no tty to ask on.'
-      printf '%s\n' '      Run install.sh from a terminal to see the diff and decide.'
+      printf '%s\n' "提示: $entry_path 已存在, 保持原样."
+      printf '%s\n' '      它装的是你自己的默认取值, 而当前没有 tty 可以询问.'
+      printf '%s\n' '      在终端里重跑 install.sh 就能看到差异并当场决定.'
     elif [ "$entry_scan" -eq 1 ]; then
-      printf '%s\n' "Warning: $entry_path looks like a pre-split entry file."
-      printf '%s\n' '      The shared rules moved to ~/.agents/BASE-RULES.md; the entry now only holds'
-      printf '%s\n' '      the rule index, the priority chain and the default settings.'
-      printf '%s\n' '      Replace it with the template below, then re-apply your own edits.'
+      printf '%s\n' "警告: $entry_path 是拆分前的旧入口."
+      printf '%s\n' '      通用条款已经拆到 ~/.agents/BASE-RULES.md, 入口现在只放分册索引,'
+      printf '%s\n' '      优先级和默认取值.'
+      printf '%s\n' '      在终端里重跑 install.sh 就能看到差异并选择覆盖.'
     else
-      printf '%s\n' "Warning: $entry_path was left untouched but could not be inspected."
-      printf '%s\n' '      Compare it with the template below yourself.'
+      printf '%s\n' "警告: $entry_path 保持原样, 但读不出内容做比较."
+      printf '%s\n' '      请自行对照下面的模板.'
     fi
-    printf '%s\n' "      Template: $entry_template"
+    printf '%s\n' "      模板: $entry_template"
   } >&2 2>/dev/null || true
 fi
 
@@ -169,14 +182,14 @@ done
 if [ "$stale_found" -gt 0 ]; then
   {
     printf '%s\n' ''
-    printf '%s\n' 'Warning: outdated rule files from an earlier Onevoke version remain in ~/.agents:'
+    printf '%s\n' '警告: ~/.agents 里还留着早期 Onevoke 版本的规则文件:'
     for stale in $stale_rules; do
       if [ -e "$HOME/.agents/$stale" ] || [ -L "$HOME/.agents/$stale" ]; then
         printf '%s\n' "  $HOME/.agents/$stale"
       fi
     done
-    printf '%s\n' 'They were renamed or merged into the current rules and are no longer updated.'
-    printf '%s\n' 'Point your CLAUDE.md import or ~/.codex/AGENTS.md symlink at the new names first.'
-    printf '%s\n' 'Then review and remove them yourself; this installer never deletes files.'
+    printf '%s\n' '它们已经改名或合并进现在的规则, 不会再被更新.'
+    printf '%s\n' '先把 CLAUDE.md 的导入行或 ~/.codex/AGENTS.md 软链改指新文件名.'
+    printf '%s\n' '然后自行检查并删除它们; 本安装器从不删除文件.'
   } >&2 2>/dev/null || true
 fi
