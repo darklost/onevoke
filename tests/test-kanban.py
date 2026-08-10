@@ -874,9 +874,35 @@ N/A
         )
         self.assertEqual("external\n", outside.read_text(encoding="utf-8"))
 
+    def test_write_text_atomic_rejects_document_symlink(self) -> None:
+        task_id, task = self.make_todo("write-link")
+        outside = self.root / "write-secret.md"
+        outside.write_text("keep-me\n", encoding="utf-8")
+        self.run_command("move", task_id, "working")
+        working = self.root / "working" / task.name
+        working.unlink()
+        working.symlink_to(outside)
+
+        import runpy
+        import sys as _sys
+
+        _sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_write_link_test")
+        finally:
+            _sys.path.pop(0)
+        entry = kanban["Entry"](
+            task_id, "working", working, working, "small"
+        )
+        with self.assertRaises(kanban["KanbanError"]) as raised:
+            kanban["write_text_atomic"](working, "# rewritten\n", entry=entry)
+
+        self.assertIn("符号链接", str(raised.exception))
+        self.assertEqual("keep-me\n", outside.read_text(encoding="utf-8"))
+
     def test_state_directory_symlink_is_rejected_by_check_and_start(self) -> None:
         task_id, task = self.make_todo("state-link")
-        outside = self.root.parent / "evil-working"
+        outside = self.root / "evil-working-outside"
         outside.mkdir()
         working = self.root / "working"
         shutil.rmtree(working)

@@ -453,12 +453,11 @@ def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -
         mode = None
         try:
             existing = openat_nofollow(parent_fd, path.name, os.O_RDONLY)
-        except KanbanError:
-            existing = None
         except OSError as error:
             if error.errno != getattr(os, "ENOENT", 2):
                 raise KanbanError(f"无法打开任务文档: {path}: {error}") from error
             existing = None
+        # openat_nofollow 对软链抛 KanbanError, 必须原样失败, 不得当缺失文件.
         if existing is not None:
             try:
                 info = os.fstat(existing)

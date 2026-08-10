@@ -128,8 +128,12 @@ def find_agents() -> dict[str, dict[str, str | bool | None]]:
 
 
 def _strip_comments_and_fences(text: str) -> str:
-    """去掉 HTML 注释和 fenced code, 避免注释/示例里的标记造成假接入."""
+    """去掉 HTML 注释和 fenced code, 避免注释/示例里的标记造成假接入.
+
+    未闭合的 `<!--` 一直删到文件末尾, 防止注释残片被当正文.
+    """
     without_comments = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    without_comments = re.sub(r"<!--.*\Z", "", without_comments, flags=re.DOTALL)
     lines: list[str] = []
     fence: str | None = None
     fence_len = 0
@@ -159,7 +163,7 @@ _NEGATION_RE = re.compile(
 
 
 def _candidate_context(text: str, start: int, end: int) -> str:
-    """取候选语境: 同段内容, 加上前序最多 40 行, 用于捕捉远离的否定说明."""
+    """取候选语境: 同段 + 前序/后序各最多 40 行, 捕捉前后否定说明."""
     before = text.rfind("\n\n", 0, start)
     after = text.find("\n\n", end)
     left = 0 if before < 0 else before + 2
@@ -172,7 +176,8 @@ def _candidate_context(text: str, start: int, end: int) -> str:
         right = heading_after
     section = text[left:right]
     prior_lines = text[:start].splitlines()[-40:]
-    return section + "\n" + "\n".join(prior_lines)
+    following_lines = text[end:].splitlines()[:40]
+    return "\n".join([section, *prior_lines, *following_lines])
 
 
 def _claude_rules_import_present(text: str, entry: Path) -> bool:
