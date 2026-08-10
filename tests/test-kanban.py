@@ -874,6 +874,23 @@ N/A
         )
         self.assertEqual("external\n", outside.read_text(encoding="utf-8"))
 
+    def test_state_directory_symlink_is_rejected_by_check_and_start(self) -> None:
+        task_id, task = self.make_todo("state-link")
+        outside = self.root.parent / "evil-working"
+        outside.mkdir()
+        working = self.root / "working"
+        shutil.rmtree(working)
+        working.symlink_to(outside)
+        self.install_fake_launchers()
+
+        check = self.run_command("check", succeeds=False)
+        start = self.run_command("start", task_id, succeeds=False)
+
+        self.assertIn("状态目录不得是符号链接", check.stderr)
+        self.assertIn("状态目录不得是符号链接", start.stderr)
+        self.assertTrue(task.exists())
+        self.assertEqual([], list(outside.iterdir()))
+
     def test_task_directory_swapped_for_symlink_is_rejected(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-dir-swap-task"
         task_dir = self.root / "todo" / task_id

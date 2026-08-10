@@ -936,6 +936,24 @@ class OnevokeCommandTest(unittest.TestCase):
                         )
                         ok, _ = onevoke.rules_integration(agent)
                         self.assertFalse(ok)
+                    with self.subTest(agent=agent, case="reject-far-negation"):
+                        padding = "说明行\n" * 40
+                        target.write_text(
+                            "已废弃, 不要遵守下列入口:\n"
+                            + padding
+                            + current_entry,
+                            encoding="utf-8",
+                        )
+                        ok, _ = onevoke.rules_integration(agent)
+                        self.assertFalse(ok)
+                if agent == "claude":
+                    with self.subTest(agent=agent, case="reject-adjacent-negation"):
+                        target.write_text(
+                            "以下导入已废弃, 不要遵守:\n@~/.agents/ONEVOKE-AGENTS.md\n",
+                            encoding="utf-8",
+                        )
+                        ok, _ = onevoke.rules_integration(agent)
+                        self.assertFalse(ok)
 
     def test_doctor_validates_configured_agent_reviewers_wrapper_and_launcher(self) -> None:
         self.install_fake_environment(tmux=True)

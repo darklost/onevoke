@@ -189,10 +189,12 @@ def command_init(args: argparse.Namespace) -> None:
 
 
 def ensure_layout(root: Path) -> None:
-    if not root.is_dir():
-        raise KanbanError(f"看板目录不存在: {root}")
+    if not root.is_dir() or root.is_symlink():
+        raise KanbanError(f"看板目录不存在或不得是符号链接: {root}")
     for state in STATES:
         path = root / state
+        if path.is_symlink():
+            raise KanbanError(f"状态目录不得是符号链接: {path}")
         if not path.is_dir():
             raise KanbanError(f"状态目录不存在: {path}")
 
@@ -703,21 +705,46 @@ def command_show(args: argparse.Namespace, root: Path) -> None:
     sys.stdout.write(read_document(entry))
 
 
+def rename_entry_nofollow(root: Path, entry: Entry, target_state: str) -> Path:
+    """用状态目录 fd 完成 rename, 拒绝状态目录软链导致的越界迁移."""
+    ensure_no_symlinks_under_board(root, entry.path)
+    source_state_fd = open_dir_nofollow(root, root / entry.state)
+    try:
+        target_state_fd = open_dir_nofollow(root, root / target_state)
+        try:
+            name = entry.path.name
+            try:
+                os.lstat(name, dir_fd=target_state_fd)
+            except FileNotFoundError:
+                pass
+            else:
+                raise KanbanError(f"目标已存在: {root / target_state / name}")
+            try:
+                os.rename(
+                    name,
+                    name,
+                    src_dir_fd=source_state_fd,
+                    dst_dir_fd=target_state_fd,
+                )
+            except OSError as error:
+                raise KanbanError(f"迁移失败: {error}") from error
+        finally:
+            os.close(target_state_fd)
+    finally:
+        os.close(source_state_fd)
+    target = root / target_state / entry.path.name
+    if entry.path.exists() or not target.exists() or target.is_symlink():
+        raise KanbanError("迁移后状态校验失败, 请保留现场")
+    return target
+
+
 def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
     if target_state not in TRANSITIONS[entry.state]:
         raise KanbanError(f"不允许迁移: {entry.state} -> {target_state}")
     text = read_document(entry)
     validate_target(entry, target_state, text)
     updated = completion_metadata(text) if target_state == "done" else text
-    target = root / target_state / entry.path.name
-    if target.exists() or target.is_symlink():
-        raise KanbanError(f"目标已存在: {target}")
-    try:
-        entry.path.rename(target)
-    except OSError as error:
-        raise KanbanError(f"迁移失败: {error}") from error
-    if entry.path.exists() or not target.exists():
-        raise KanbanError("迁移后状态校验失败, 请保留现场")
+    target = rename_entry_nofollow(root, entry, target_state)
     document = target if entry.kind == "small" else target / "spec.md"
     moved = Entry(entry.task_id, target_state, target, document, entry.kind)
     if updated != text:
@@ -725,8 +752,8 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
             write_text_atomic(document, updated, entry=moved)
         except (OSError, UnicodeError, KanbanError) as error:
             try:
-                target.rename(entry.path)
-            except (OSError, UnicodeError) as rollback_error:
+                rename_entry_nofollow(root, moved, entry.state)
+            except (OSError, UnicodeError, KanbanError) as rollback_error:
                 raise KanbanError(
                     f"记录完成时间失败且回滚失败; 卡片保留在 done: {error}; {rollback_error}"
                 ) from error
@@ -870,12 +897,19 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             except OSError as error:
                 raise KanbanError(f"启动 Agent 失败: {error}") from error
     except (KanbanError, OSError, UnicodeError) as error:
+        rollback_errors: list[str] = []
         try:
             write_text_atomic(moved.document, original, entry=moved)
-            moved.path.rename(entry.path)
-        except (OSError, UnicodeError) as rollback_error:
+        except (OSError, UnicodeError, KanbanError) as content_error:
+            rollback_errors.append(f"恢复文档失败: {content_error}")
+        try:
+            rename_entry_nofollow(root, moved, entry.state)
+        except (OSError, UnicodeError, KanbanError) as move_error:
+            rollback_errors.append(f"迁回 todo 失败: {move_error}")
+        if rollback_errors:
             raise KanbanError(
-                f"启动失败且回滚失败; 卡片保留在 working: {error}; {rollback_error}"
+                f"启动失败且回滚失败; 卡片保留在 working: {error}; "
+                + "; ".join(rollback_errors)
             ) from error
         raise
     if launcher == "foreground":

@@ -152,8 +152,31 @@ def _strip_comments_and_fences(text: str) -> str:
     return "\n".join(lines)
 
 
+_NEGATION_RE = re.compile(
+    r"(禁用|废弃|停用|不要遵守|勿遵守|不再生效|已失效|请忽略|do not follow)",
+    flags=re.IGNORECASE,
+)
+
+
+def _candidate_context(text: str, start: int, end: int) -> str:
+    """取候选语境: 同段内容, 加上前序最多 40 行, 用于捕捉远离的否定说明."""
+    before = text.rfind("\n\n", 0, start)
+    after = text.find("\n\n", end)
+    left = 0 if before < 0 else before + 2
+    right = len(text) if after < 0 else after
+    heading_before = text.rfind("\n#", left, start)
+    if heading_before >= left:
+        left = heading_before + 1
+    heading_after = text.find("\n#", end, right)
+    if heading_after >= 0:
+        right = heading_after
+    section = text[left:right]
+    prior_lines = text[:start].splitlines()[-40:]
+    return section + "\n" + "\n".join(prior_lines)
+
+
 def _claude_rules_import_present(text: str, entry: Path) -> bool:
-    """Claude 只认独立行的 @ 导入, 拒绝注释/否定/占位中的路径残片."""
+    """Claude 只认独立行的 @ 导入, 且所在段落不得是否定/废弃语境."""
     candidates: set[str] = {"~/.agents/ONEVOKE-AGENTS.md"}
     try:
         resolved = entry.expanduser().resolve()
@@ -162,26 +185,37 @@ def _claude_rules_import_present(text: str, entry: Path) -> bool:
         candidates.add(str(resolved).replace(str(Path.home()), "~", 1))
     except OSError:
         candidates.add(str(entry))
-    for raw in _strip_comments_and_fences(text).splitlines():
+    body = _strip_comments_and_fences(text)
+    offset = 0
+    for raw in body.splitlines(keepends=True):
         line = raw.strip()
+        line_start = offset
+        offset += len(raw)
         if not line or line.startswith("#"):
             continue
         match = re.fullmatch(r"@([^\s]+)", line)
         if not match:
             continue
         ref = match.group(1).strip()
-        if ref in candidates:
-            return True
-        try:
-            if Path(ref).expanduser().resolve() == entry.expanduser().resolve():
-                return True
-        except OSError:
+        accepted = ref in candidates
+        if not accepted:
+            try:
+                accepted = (
+                    Path(ref).expanduser().resolve() == entry.expanduser().resolve()
+                )
+            except OSError:
+                accepted = False
+        if not accepted:
             continue
+        context = _candidate_context(body, line_start, offset)
+        if _NEGATION_RE.search(context):
+            continue
+        return True
     return False
 
 
 def _merged_rules_present(text: str, entry: Path) -> bool:
-    """Codex/Grok 合并文件必须包含当前安装入口全文, 且不得处于否定/废弃语境."""
+    """Codex/Grok 合并文件必须包含当前安装入口全文, 且语境不得是否定/废弃."""
     try:
         expected = entry.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
@@ -192,14 +226,8 @@ def _merged_rules_present(text: str, entry: Path) -> bool:
     index = body.find(expected)
     if index < 0:
         return False
-    before = body[max(0, index - 120) : index]
-    after = body[index + len(expected) : index + len(expected) + 120]
-    context = f"{before}\n{after}"
-    if re.search(
-        r"(禁用|废弃|停用|不要遵守|勿遵守|不再生效|已失效|请忽略|do not follow)",
-        context,
-        flags=re.IGNORECASE,
-    ):
+    context = _candidate_context(body, index, index + len(expected))
+    if _NEGATION_RE.search(context):
         return False
     return True
 

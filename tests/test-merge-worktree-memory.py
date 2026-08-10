@@ -456,23 +456,38 @@ class MergeTest(unittest.TestCase):
 
     def test_merge_does_not_rewrite_target_so_concurrent_appends_survive(self) -> None:
         target_file = self.target_memory / "a.md"
-        target_file.write_bytes(b"### 08:00\n- dirty \xff byte\n")
+        dirty = b"### 08:00\n- dirty \xff byte\n"
+        target_file.write_bytes(dirty)
+        before_ino = target_file.stat().st_ino
         self.write_source("a.md", b"### 09:30\n- clean entry\n")
+        entered = threading.Event()
+        release = threading.Event()
+        original_scan = merger.scan_dirty_files
 
-        def append_during_merge() -> None:
-            time.sleep(0.05)
+        def blocked_scan(directory: Path) -> tuple[int, int]:
+            entered.set()
+            if not release.wait(timeout=2):
+                raise TimeoutError("writer did not finish during scan")
+            return original_scan(directory)
+
+        def append_during_scan() -> None:
+            if not entered.wait(timeout=2):
+                raise TimeoutError("scan never started")
             with open(target_file, "ab") as handle:
                 handle.write(b"### 09:50\n- concurrent target append\n")
+            release.set()
 
-        thread = threading.Thread(target=append_during_merge)
-        thread.start()
-        try:
-            result = self.run_merger()
-        finally:
-            thread.join(timeout=2)
+        thread = threading.Thread(target=append_during_scan)
+        with mock.patch.object(merger, "scan_dirty_files", side_effect=blocked_scan):
+            thread.start()
+            try:
+                merger.merge(str(self.source), str(self.target), dry_run=False)
+            finally:
+                release.set()
+                thread.join(timeout=2)
 
-        self.assertEqual(0, result.returncode, result.stderr)
         final = target_file.read_bytes()
+        self.assertEqual(before_ino, target_file.stat().st_ino)
         self.assertIn(b"concurrent target append", final)
         self.assertIn(b"\xff", final)
         self.assertIn(b"clean entry", final)
