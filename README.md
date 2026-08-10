@@ -111,7 +111,7 @@ Grok 的接入目标是 `~/.grok/AGENTS.md`. 可以把它软链到入口, 或把
 
 ### 容量上限
 
-Codex 的 `project_doc_max_bytes` 默认 32 KiB (`32768` 字节), 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. 入口 `ONEVOKE-AGENTS.md` 约 2.8 KiB, 留给项目级的还有约 29.9 KiB — 分册是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
+Codex 的 `project_doc_max_bytes` 默认 32 KiB (`32768` 字节), 全局与项目的 `AGENTS.md` 合计超过就**静默截断**, 不报错. 入口 `ONEVOKE-AGENTS.md` 约 2.8 KiB, 留给项目级的还有约 29.3 KiB — 分册是按需读取的独立文件, 不占这个预算. 不够时在 `~/.codex/config.toml` 调高:
 
 ```toml
 project_doc_max_bytes = 65536

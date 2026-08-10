@@ -876,9 +876,10 @@ class OnevokeCommandTest(unittest.TestCase):
                 self.home / ".codex" / "AGENTS.md",
                 (
                     "# 其它标题\n"
-                    "<!-- # Onevoke 全局工作流规则 -->\n"
+                    "<!--\n# Onevoke 全局工作流规则\n| `BASE-RULES.md` |\n-->\n"
                     "不要使用 BASE-RULES.md\n"
                     "TODO 占位 BASE-RULES.md\n"
+                    "```md\n# Onevoke 全局工作流规则\n`BASE-RULES.md`\n```\n"
                 ),
                 (
                     "# Onevoke 全局工作流规则\n"
@@ -891,8 +892,9 @@ class OnevokeCommandTest(unittest.TestCase):
                 (
                     "# 说明\n"
                     "未导入 ~/.agents/ONEVOKE-AGENTS.md\n"
-                    "<!-- @~/.agents/ONEVOKE-AGENTS.md -->\n"
+                    "<!--\n@~/.agents/ONEVOKE-AGENTS.md\n-->\n"
                     "# @~/.agents/ONEVOKE-AGENTS.md\n"
+                    "```\n@~/.agents/ONEVOKE-AGENTS.md\n```\n"
                 ),
                 "@~/.agents/ONEVOKE-AGENTS.md\n\n## 我自己的规则\n",
             ),
@@ -1014,59 +1016,44 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
 
-    def test_claude_plugin_full_hash_table_positive_path(self) -> None:
-        """正向路径覆盖 CLAUDE_PLUGIN_HASHES 的全部键, 不只是 hooks 子集."""
+    def test_claude_plugin_positive_against_production_hashes(self) -> None:
+        """用固定 commit 的真实插件树对照生产 CLAUDE_PLUGIN_HASHES, 不 patch 摘要表."""
         self.install_fake_environment(tmux=True, memsearch=False)
         onevoke = load_onevoke_module()
-        plugin = self.root / "claude-full-plugin"
-        hashes: dict[str, str] = {}
-        for relative in onevoke.CLAUDE_PLUGIN_HASHES:
-            path = plugin / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            content = f"fixture:{relative}\n".encode()
-            path.write_bytes(content)
-            hashes[relative] = hashlib.sha256(content).hexdigest()
-        # hooks.json must be valid for hooks_directory.
-        hooks = {
-            event: [
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": f"bash ${{CLAUDE_PLUGIN_ROOT}}/hooks/{name}",
-                        }
-                    ]
-                }
-            ]
-            for event, name in {
-                "SessionStart": "session-start.sh",
-                "UserPromptSubmit": "user-prompt-submit.sh",
-                "Stop": "stop.sh",
-            }.items()
-        }
-        (plugin / "hooks" / "hooks.json").write_text(
-            json.dumps({"hooks": hooks}), encoding="utf-8"
+        source = self.root / "memsearch-pinned"
+        clone = subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                f"v{onevoke.MEMSEARCH_VERSION}",
+                "https://github.com/zilliztech/memsearch.git",
+                str(source),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
         )
-        hashes["hooks/hooks.json"] = hashlib.sha256(
-            (plugin / "hooks" / "hooks.json").read_bytes()
-        ).hexdigest()
-        for name in (
-            "session-start.sh",
-            "user-prompt-submit.sh",
-            "stop.sh",
-            "common.sh",
-        ):
-            script = plugin / "hooks" / name
-            script.write_text(f"#!/bin/sh\n# {name}\n", encoding="utf-8")
-            script.chmod(0o755)
-            hashes[f"hooks/{name}"] = hashlib.sha256(script.read_bytes()).hexdigest()
-        (plugin / ".claude-plugin" / "plugin.json").write_text(
-            json.dumps({"name": "memsearch", "version": "0.4.15"}),
-            encoding="utf-8",
+        if clone.returncode != 0:
+            self.skipTest(f"无法拉取 MemSearch v{onevoke.MEMSEARCH_VERSION}: {clone.stderr}")
+        head = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=False,
         )
-        hashes[".claude-plugin/plugin.json"] = hashlib.sha256(
-            (plugin / ".claude-plugin" / "plugin.json").read_bytes()
-        ).hexdigest()
+        if head.returncode != 0 or head.stdout.strip() != onevoke.MEMSEARCH_COMMIT:
+            self.skipTest(
+                f"tag v{onevoke.MEMSEARCH_VERSION} 未指向 {onevoke.MEMSEARCH_COMMIT}"
+            )
+        plugin = source / "plugins" / "claude-code"
+        self.assertTrue(plugin.is_dir(), plugin)
+        # 生产表逐文件对齐.
+        for relative, expected in onevoke.CLAUDE_PLUGIN_HASHES.items():
+            digest = hashlib.sha256((plugin / relative).read_bytes()).hexdigest()
+            self.assertEqual(expected, digest, relative)
 
         settings = self.home / ".claude" / "settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)
@@ -1086,15 +1073,17 @@ class OnevokeCommandTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        for script in (plugin / "hooks").glob("*.sh"):
+            script.chmod(script.stat().st_mode | 0o111)
 
         with mock.patch.object(Path, "home", return_value=self.home):
-            with mock.patch.object(onevoke, "CLAUDE_PLUGIN_HASHES", hashes):
-                self.assertTrue(onevoke.claude_memsearch_ready())
-                # 真实表上任一摘要不一致必须拒绝.
-                broken = dict(hashes)
-                broken["README.md"] = "0" * 64
-                with mock.patch.object(onevoke, "CLAUDE_PLUGIN_HASHES", broken):
-                    self.assertFalse(onevoke.claude_memsearch_ready())
+            self.assertTrue(onevoke.claude_memsearch_ready())
+            readme = plugin / "README.md"
+            original = readme.read_bytes()
+            readme.write_bytes(original + b"\n")
+            self.assertFalse(onevoke.claude_memsearch_ready())
+            readme.write_bytes(original)
+            self.assertTrue(onevoke.claude_memsearch_ready())
 
     def test_welcome_ctrl_c_exits_without_traceback_or_config(self) -> None:
         self.install_fake_environment(tmux=False)

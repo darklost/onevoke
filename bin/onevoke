@@ -127,6 +127,31 @@ def find_agents() -> dict[str, dict[str, str | bool | None]]:
     return agents
 
 
+def _strip_comments_and_fences(text: str) -> str:
+    """去掉 HTML 注释和 fenced code, 避免注释/示例里的标记造成假接入."""
+    without_comments = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    lines: list[str] = []
+    fence: str | None = None
+    fence_len = 0
+    for raw in without_comments.splitlines():
+        stripped = raw.lstrip()
+        if fence is None:
+            for marker in ("```", "~~~"):
+                if stripped.startswith(marker):
+                    fence = marker[0]
+                    fence_len = len(stripped) - len(stripped.lstrip(marker[0]))
+                    break
+            else:
+                lines.append(raw)
+            continue
+        if stripped.startswith(fence * 3):
+            closing = len(stripped) - len(stripped.lstrip(fence))
+            if closing >= fence_len:
+                fence = None
+                fence_len = 0
+    return "\n".join(lines)
+
+
 def _claude_rules_import_present(text: str, entry: Path) -> bool:
     """Claude 只认独立行的 @ 导入, 拒绝注释/否定/占位中的路径残片."""
     candidates: set[str] = {"~/.agents/ONEVOKE-AGENTS.md"}
@@ -137,9 +162,9 @@ def _claude_rules_import_present(text: str, entry: Path) -> bool:
         candidates.add(str(resolved).replace(str(Path.home()), "~", 1))
     except OSError:
         candidates.add(str(entry))
-    for raw in text.splitlines():
+    for raw in _strip_comments_and_fences(text).splitlines():
         line = raw.strip()
-        if not line or line.startswith("<!--") or line.startswith("#"):
+        if not line or line.startswith("#"):
             continue
         match = re.fullmatch(r"@([^\s]+)", line)
         if not match:
@@ -159,14 +184,14 @@ def _merged_rules_present(text: str) -> bool:
     """Codex/Grok 合并文件须有完整入口标题行, 以及非否定语境的分册引用."""
     has_heading = False
     has_base = False
-    for raw in text.splitlines():
+    for raw in _strip_comments_and_fences(text).splitlines():
         line = raw.strip()
         if line == "# Onevoke 全局工作流规则":
             has_heading = True
             continue
         if "BASE-RULES.md" not in line:
             continue
-        if line.startswith("<!--") or "TODO" in line or "占位" in line:
+        if "TODO" in line or "占位" in line:
             continue
         if re.search(r"(不|勿|别|没有|未|禁止|跳过).{0,16}BASE-RULES\.md", line):
             continue

@@ -230,6 +230,8 @@ class MergeTest(unittest.TestCase):
         self.assertFalse((self.target_memory / "a.md").exists())
 
     def test_cleans_invalid_utf8_after_merge(self) -> None:
+        # 写入路径会先清新条目; 这里预置脏目标文件, 覆盖 clean_directory 路径.
+        (self.target_memory / "a.md").write_bytes(b"### 08:00\n- old \xff dirty\n")
         self.write_source("a.md", b"### 09:30\n- dirty \xff byte\n")
 
         result = self.run_merger()
@@ -365,12 +367,29 @@ class MergeTest(unittest.TestCase):
         try:
             with mock.patch.object(Path, "read_bytes", flaky_read):
                 with self.assertRaises(SystemExit) as raised:
-                    merger.read_stable_source_files([source_file])
+                    merger.read_stable_source_files(self.source_memory)
         finally:
             merger.SOURCE_STABLE_ATTEMPTS = original_attempts
             merger.SOURCE_STABLE_DELAY_SECONDS = original_delay
 
         self.assertEqual(1, raised.exception.code)
+
+    def test_new_source_file_after_merge_fails(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- first\n")
+        original_assert = merger.assert_source_unchanged
+
+        def add_file_then_assert(source_memory: Path, snapshots: dict[Path, bytes]) -> None:
+            (source_memory / "b.md").write_bytes(b"### 09:40\n- late file\n")
+            original_assert(source_memory, snapshots)
+
+        with mock.patch.object(
+            merger, "assert_source_unchanged", side_effect=add_file_then_assert
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                merger.merge(str(self.source), str(self.target), dry_run=False)
+
+        self.assertEqual(1, raised.exception.code)
+        self.assertTrue((self.source_memory / "b.md").exists())
 
     def test_source_late_append_during_stable_read_fails(self) -> None:
         source_file = self.write_source("a.md", b"### 09:30\n- first\n")
@@ -404,9 +423,11 @@ class MergeTest(unittest.TestCase):
         source_file = self.write_source("a.md", b"### 09:30\n- first\n")
         original_assert = merger.assert_source_unchanged
 
-        def mutate_then_assert(snapshots: dict[Path, bytes]) -> None:
+        def mutate_then_assert(
+            source_memory: Path, snapshots: dict[Path, bytes]
+        ) -> None:
             source_file.write_bytes(b"### 09:30\n- first\n### 09:40\n- late\n")
-            original_assert(snapshots)
+            original_assert(source_memory, snapshots)
 
         with mock.patch.object(
             merger, "assert_source_unchanged", side_effect=mutate_then_assert
