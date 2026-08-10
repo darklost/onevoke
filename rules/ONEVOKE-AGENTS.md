@@ -19,18 +19,18 @@
 ## 优先级
 
 - 高到低: 当前任务明确用户指令 > 离目标文件最近项目级 `AGENTS.md` 或 `CLAUDE.md` > Onevoke 本机配置与本文件「默认取值」 > 上表各分册.
-- 分册定机制, 本文件定取值. 只有「默认取值」里写到的条目高于分册; 其余一切以分册为准, 本文件不复述分册内容.
-- 项目要覆盖分支、Reviewer 或看板完成时机, 写进项目级 `AGENTS.md` 或 `CLAUDE.md`, 不改本文件和本机配置.
+- 分册定机制, 本文件定取值. 只有「默认取值」里写到的条目高于分册; 其余一切以分册为准, 本文件不复述分册内容. 分支模型是固定机制, 不属于可覆盖取值.
+- 项目要覆盖 Reviewer 或看板完成时机, 写进项目级 `AGENTS.md` 或 `CLAUDE.md`, 不改本文件和本机配置. 分支模型固定为 `main` + `develop`, 不提供项目级选项.
 - 同目录 `AGENTS.md` 与 `CLAUDE.md` 冲突且用户指令未消解时, 停止受影响操作, 问用户.
 
 ## 默认取值
 
 ### 分支
 
-- 仓库默认两条长期分支: `main` 稳定分支, `develop` 集成分支.
-- 默认集成分支是 `develop`. 任务分支从最新 `origin/develop` 切, 完成后合回 `develop`.
+- 仓库固定两条长期分支: `main` 稳定分支, `develop` 集成分支. 不使用其他长期分支模型.
+- 唯一集成分支是 `develop`. 任务分支从最新 `origin/develop` 切, 完成后合回 `develop`.
 - `main` 只从 `develop` 前进, 且必须用户明确确认. Agent 不自动推 `main`.
-- 仓库实际没有 `develop` 时, 回落到 `refs/remotes/origin/HEAD` 指向的分支, 并在交付说明里写明实际用了哪条.
+- 仓库有 `main` 但没有 `develop` 时, Agent 按 `~/.agents/GIT-RULES.md` 从最新 `main` 自动初始化 `develop`, 不询问分支选择, 不回落到其他分支. 没有 `main` 时停止并报告.
 
 ### Reviewer
 

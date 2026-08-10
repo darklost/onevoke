@@ -263,7 +263,7 @@ kanban start [--agent codex|claude|grok] [task-id]
 - 结果: `completed`
 - 完成时间: <YYYY-MM-DD HH:MM>
 - 任务分支: <`<任务分支>` | N/A>
-- 集成分支: <`origin/<默认集成分支>` | `<本地默认集成分支>` | N/A>
+- 集成分支: <`origin/develop` | `develop` | N/A>
 - 最终提交: <`<完整 40 位 SHA>` | N/A>
 - 看板状态: `done`
 

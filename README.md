@@ -117,13 +117,13 @@ project_doc_max_bytes = 65536
 
 Claude Code 的 `@` 导入不受这个限制.
 
-## 定制默认取值
+## 固定工作流与本机配置
 
-规则入口保留跨机器一致的分支与完成时机默认值. 本机执行和审核工具由 welcome 配置:
+规则入口固定跨机器一致的分支模型, 并保留完成时机默认值. 本机执行和审核工具由 welcome 配置:
 
 | 取值 | 默认 |
 |---|---|
-| 分支 | 长期分支 `main` + `develop`; 默认集成分支 `develop`, `main` 只在用户确认后从 `develop` 前进 |
+| 分支 | 固定长期分支 `main` + `develop`; `develop` 是唯一集成分支, 缺失时从 `main` 自动初始化; `main` 只在用户确认后从 `develop` 前进 |
 | 执行 Agent | `onevoke welcome` 选择, 未配置时回落到 Codex |
 | Reviewer | `PM` / `CSA` / `Hacker` / `QA` 分别在 welcome 中选择 Codex 或 Grok |
 | launcher | 有 tmux 时默认可选独立 window; 没有时可选当前终端前台运行 |
@@ -136,16 +136,7 @@ onevoke config
 onevoke welcome --reset
 ```
 
-只改一个项目时仍写进项目根 `AGENTS.md` 或 `CLAUDE.md`, 优先级高于本机配置和入口. 当前任务的明确用户指令优先级最高. 不要直接编辑已安装的 `ONEVOKE-AGENTS.md`, 下次安装会覆盖.
-
-例: 某项目直接在 `main` 上集成, 且看板任务审核通过就自动合回:
-
-```markdown
-## Agent 门禁
-
-- 默认集成分支是 `main`, 本仓库没有 `develop`.
-- 看板任务审核通过后自动 fast-forward 合回 `main`, 不等用户验收.
-```
+Reviewer 和看板完成时机可在项目根 `AGENTS.md` 或 `CLAUDE.md` 覆盖. 分支模型不提供项目级选项: 固定使用 `main` + `develop`, 不存在 `develop` 时由 Agent 从 `main` 自动初始化, 不回落到其他分支. 当前任务的明确用户指令优先级最高. 不要直接编辑已安装的 `ONEVOKE-AGENTS.md`, 下次安装会覆盖.
 
 ## 完整工作流
 
@@ -257,9 +248,9 @@ tmux 模式中, 协调 Agent 在 `kanban start` 成功后就结束本轮, 把执
 
 执行 Agent 先检查主工作树, 再按项目规则准备工作区:
 
-- 纯 Markdown 小改, 且默认分支干净并已同步 upstream 时, 可直接修改默认分支.
+- 纯 Markdown 小改, 且 `develop` 干净并已同步 upstream 时, 可直接修改 `develop`.
 - 其他改文件任务使用独立任务分支和 `<仓库根>/worktrees/<task-name>/`.
-- 有 `origin` 时先 fetch, 从最新远端默认分支建任务分支; 无 `origin` 时明确走本地集成路径.
+- 有 `origin` 时先 fetch, 从最新 `origin/develop` 建任务分支; 无 `origin` 时从本地 `develop` 建任务分支并明确走本地集成路径.
 - 主 worktree 的 `kanban/` 是唯一看板. 任务 worktree 不复制、不链接、不提交它.
 
 Agent 在任务 worktree 里先找既有实现和调用链, 再做最小正确改动. 改代码前读取 `CODE-RULES.md`; 不扩写无关重构, 不覆盖用户已有修改. 验证以能直接证明本次行为的最小命令开始, 风险或影响面较大时再扩大测试范围.
@@ -270,11 +261,11 @@ Agent 在任务 worktree 里先找既有实现和调用链, 再做最小正确�
 
 一个独立关注点一个 commit, subject 使用简短中文动宾短语. 有可写 `origin` 时推任务分支; 无远端时保留本地提交并明确报告, 不把 "未 push" 说成 "已完成远端交付".
 
-push 被 non-fast-forward 拒绝时先 fetch、rebase、重新验证. 只允许对任务分支使用 `--force-with-lease`; 默认集成分支永不 force-push.
+push 被 non-fast-forward 拒绝时先 fetch、rebase、重新验证. 只允许对任务分支使用 `--force-with-lease`; `main` 和 `develop` 永不 force-push.
 
 ### 8. 走审核闭环
 
-代码和验证完成后, 基于同一个集成分支 commit 作为审核 base, 按顺序运行:
+代码和验证完成后, 基于同一个 `develop` commit 作为审核 base, 按顺序运行:
 
 ```text
 PM -> CSA/Hacker (按风险触发) -> QA
@@ -325,14 +316,14 @@ onevoke welcome --reset
 
 审核通过不等于任务完成. 入口的默认取值要求**所有**看板任务在合回前先报告并等人确认, 不只是 Bug 修复; 未确认时不 push 集成分支、不清理 worktree, 卡片继续留在 `working`. 某个项目要审核通过就自动合回, 在该项目的 `AGENTS.md` 里改这项取值.
 
-验收后, Agent 将任务分支 rebase 到最新集成分支并重新验证. 若无实质冲突, 沿用已完成的审核门; 有本人手工解决的代码冲突时重新审核. 集成只允许 fast-forward 或项目规定的 PR 流程, 不产生 merge commit.
+验收后, Agent 将任务分支 rebase 到最新 `develop` 并重新验证. 若无实质冲突, 沿用已完成的审核门; 有本人手工解决的代码冲突时重新审核. 集成只允许 fast-forward 或项目规定的 PR 流程, 不产生 merge commit.
 
 直接远端集成的顺序是:
 
-1. 非 force push 最终任务 commit 到远端默认分支.
+1. 非 force push 最终任务 commit 到 `origin/develop`.
 2. fetch 远端状态.
 3. 主 worktree 用 `git merge --ff-only` 同步.
-4. 确认任务 commit 已进入集成分支.
+4. 确认任务 commit 已进入 `develop`.
 5. 运行 `merge-worktree-memory.py --source <worktree-path>`.
 6. 删除任务 worktree、本地任务分支和远端任务分支.
 

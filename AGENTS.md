@@ -5,6 +5,7 @@
 ## 本仓库特例
 
 - 本仓库第三阶段安全角色 `CSA` 和 `Hacker` 一律标记 N/A, 不运行; `PM` 和 `QA` 保持适用.
+- 对外发布的分支模型固定为 `main` 稳定分支加 `develop` 集成分支, 不提供其他长期分支或集成分支选项; 缺少 `develop` 时从 `main` 自动初始化.
 
 ## Project Structure & Module Organization
 
