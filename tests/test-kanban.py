@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import io
 import json
 import os
 import re
@@ -116,14 +117,16 @@ printf '%s\\n' '@9'
         self.env["KANBAN_TMUX_LOG"] = str(self.root / "tmux.log")
         return fake_bin
 
-    def write_onevoke_config(self, agent: str, launcher: str) -> None:
+    def write_onevoke_config(
+        self, agent: str, launcher: str, *, welcome_complete: bool = True
+    ) -> None:
         config = self.home / ".config" / "onevoke" / "config.json"
         config.parent.mkdir(parents=True)
         config.write_text(
             json.dumps(
                 {
                     "schema_version": 1,
-                    "welcome_complete": True,
+                    "welcome_complete": welcome_complete,
                     "kanban_agent": agent,
                     "launcher": launcher,
                     "reviewers": {
@@ -466,6 +469,17 @@ printf '%s\\n' '@9'
         self.assertIn(str(fake_bin / "grok"), command)
         self.assertIn("--permission-mode bypassPermissions", command)
 
+    def test_start_ignores_unfinished_welcome_selections(self) -> None:
+        task_id, _ = self.make_todo("unfinished-config")
+        fake_bin = self.install_fake_launchers()
+        self.write_onevoke_config("grok", "foreground", welcome_complete=False)
+
+        result = self.run_command("start", task_id)
+
+        self.assertIn("agent=codex", result.stdout)
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn(str(fake_bin / "codex"), command)
+
     def test_foreground_launcher_rejects_a_noninteractive_terminal(self) -> None:
         task_id, task = self.make_todo("foreground-no-tty")
         self.install_fake_launchers()
@@ -493,7 +507,7 @@ printf '%s\\n' '@9'
             kanban = runpy.run_path(str(COMMAND), run_name="kanban_foreground_test")
         finally:
             sys.path.pop(0)
-        args = argparse.Namespace(task=task_id, agent=None)
+        args = argparse.Namespace(task=task_id, agent=None, launcher=None)
 
         with mock.patch.dict(os.environ, self.env, clear=True):
             with mock.patch.object(kanban["sys"].stdin, "isatty", return_value=True):
@@ -507,6 +521,68 @@ printf '%s\\n' '@9'
         self.assertTrue(started.exists())
         self.assertIn("- 负责人: claude", started.read_text(encoding="utf-8"))
         self.assertEqual(str(self.root.parent), foreground_log.read_text().strip())
+
+    def test_start_launcher_option_overrides_machine_config(self) -> None:
+        task_id, task = self.make_todo("launcher-override")
+        fake_bin = self.install_fake_launchers()
+        foreground_log = self.root / "override.log"
+        (fake_bin / "codex").write_text(
+            "#!/bin/sh\npwd > \"$KANBAN_FOREGROUND_LOG\"\n", encoding="utf-8"
+        )
+        (fake_bin / "codex").chmod(0o755)
+        self.env["KANBAN_FOREGROUND_LOG"] = str(foreground_log)
+        self.write_onevoke_config("codex", "tmux")
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_launcher_override_test")
+        finally:
+            sys.path.pop(0)
+        args = argparse.Namespace(task=task_id, agent=None, launcher="foreground")
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban["sys"].stdin, "isatty", return_value=True):
+                with mock.patch.object(kanban["sys"].stdout, "isatty", return_value=True):
+                    with mock.patch.object(
+                        kanban["sys"].stderr, "isatty", return_value=True
+                    ):
+                        kanban["command_start"](args, self.root)
+
+        self.assertTrue((self.root / "working" / task.name).exists())
+        self.assertEqual(str(self.root.parent), foreground_log.read_text().strip())
+
+    def test_foreground_spawn_failure_rolls_back_before_started_output(self) -> None:
+        task_id, task = self.make_todo("spawn-failure")
+        self.install_fake_launchers()
+        self.write_onevoke_config("codex", "foreground")
+        original = task.read_text(encoding="utf-8")
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_spawn_failure_test")
+        finally:
+            sys.path.pop(0)
+        args = argparse.Namespace(task=task_id, agent=None, launcher=None)
+        output = io.StringIO()
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban["sys"].stdin, "isatty", return_value=True):
+                with mock.patch.object(kanban["sys"], "stdout", output):
+                    with mock.patch.object(output, "isatty", return_value=True):
+                        with mock.patch.object(
+                            kanban["sys"].stderr, "isatty", return_value=True
+                        ):
+                            with mock.patch.object(
+                                kanban["subprocess"],
+                                "Popen",
+                                side_effect=OSError("Exec format error"),
+                            ):
+                                with self.assertRaisesRegex(
+                                    kanban["KanbanError"], "启动 Agent 失败"
+                                ):
+                                    kanban["command_start"](args, self.root)
+
+        self.assertEqual("", output.getvalue())
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
 
     def test_start_uses_high_effort_for_large_tasks(self) -> None:
         self.install_fake_launchers()
@@ -757,6 +833,31 @@ printf '%s\\n' '@9'
         )
         self.assertEqual(0, output.returncode, output.stderr)
         self.assertEqual(RULES.read_text(encoding="utf-8"), output.stdout)
+
+    def test_installer_skips_non_file_rule_matches(self) -> None:
+        project = self.root / "installer-project"
+        (project / "bin").mkdir(parents=True)
+        (project / "rules" / "ignored.md").mkdir(parents=True)
+        (project / "install.sh").write_bytes(INSTALLER.read_bytes())
+        (project / "bin" / "onevoke").write_text(
+            "#!/bin/sh\nexit 0\n", encoding="utf-8"
+        )
+        (project / "bin" / "onevoke").chmod(0o755)
+        (project / "rules" / "REAL.md").write_text("# real\n", encoding="utf-8")
+        install_home = self.root / "non-file-rule-home"
+
+        result = subprocess.run(
+            ["sh", str(project / "install.sh")],
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, "HOME": str(install_home)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue((install_home / ".agents" / "REAL.md").is_file())
+        self.assertFalse((install_home / ".agents" / "ignored.md").exists())
 
     def test_installer_never_touches_the_users_own_agent_rules(self) -> None:
         install_home = self.root / "user-home"

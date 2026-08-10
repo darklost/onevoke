@@ -99,6 +99,14 @@ def load_config(*, missing_ok: bool = True) -> dict[str, Any]:
     return validate_config(raw)
 
 
+def effective_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return runtime values; unfinished welcome selections are not active."""
+    loaded = load_config() if config is None else validate_config(config)
+    if loaded["welcome_complete"]:
+        return loaded
+    return default_config()
+
+
 def save_config(config: dict[str, Any]) -> Path:
     validated = validate_config(config)
     path = config_path()

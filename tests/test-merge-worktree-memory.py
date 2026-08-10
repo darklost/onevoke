@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import fcntl
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -149,6 +151,54 @@ class MergeTest(unittest.TestCase):
         merged = (self.target_memory / "a.md").read_bytes()
         for entry_hash in GOLDEN_HASHES:
             self.assertEqual(1, merged.count(entry_hash.encode()))
+
+    def test_merge_waits_for_the_target_lock(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- serialized\n")
+        lock_path = self.target / ".memsearch" / ".merge-worktree-memory.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            process = subprocess.Popen(
+                [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            time.sleep(0.2)
+            self.assertIsNone(process.poll(), "merger ignored the held target lock")
+            self.assertFalse((self.target_memory / "a.md").exists())
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            stdout, stderr = process.communicate(timeout=10)
+
+        self.assertEqual(0, process.returncode, stderr)
+        self.assertIn("merged=1", stdout)
+
+    def test_concurrent_merges_do_not_duplicate_an_entry(self) -> None:
+        sources = []
+        for index in range(6):
+            source = self.root / f"source-{index}"
+            memory = source / ".memsearch" / "memory"
+            memory.mkdir(parents=True)
+            (memory / "a.md").write_bytes(b"### 09:30\n- concurrent\n")
+            subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+            sources.append(source)
+
+        processes = [
+            subprocess.Popen(
+                [str(MERGER), "--source", str(source), "--target", str(self.target)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for source in sources
+        ]
+        results = [process.communicate(timeout=10) for process in processes]
+
+        for process, (_, stderr) in zip(processes, results):
+            self.assertEqual(0, process.returncode, stderr)
+        merged = (self.target_memory / "a.md").read_bytes()
+        entry_hash = merger.normalized_hash(b"### 09:30\n- concurrent\n")
+        self.assertEqual(1, merged.count(entry_hash.encode()))
 
     def test_dedupes_against_unmarked_target_content(self) -> None:
         self.write_source("a.md", b"### 09:30\n- one\n")

@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-from onevoke_config import ConfigError, load_config
+from onevoke_config import ConfigError, effective_config, load_config
 
 
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
@@ -639,9 +639,9 @@ def agent_command(agent: str, binary: str, effort: str) -> list[str]:
 
 def command_start(args: argparse.Namespace, root: Path) -> None:
     entry = select_todo(load_board(root), args.task)
-    config = load_config()
+    config = effective_config(load_config())
     agent_name = args.agent or config["kanban_agent"]
-    launcher = config["launcher"]
+    launcher = args.launcher or config["launcher"]
     agent = shutil.which(agent_name)
     if not agent:
         raise KanbanError(f"Agent 不在 PATH: {agent_name}")
@@ -694,12 +694,8 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 raise KanbanError(f"tmux new-window 失败: {detail}")
             window = result.stdout.strip() or "unknown"
         else:
-            print(
-                f"started: {entry.task_id}\tagent={agent_name}\tlauncher=foreground",
-                flush=True,
-            )
             try:
-                result = subprocess.run(agent_argv, cwd=root.parent, check=False)
+                process = subprocess.Popen(agent_argv, cwd=root.parent)
             except OSError as error:
                 raise KanbanError(f"启动 Agent 失败: {error}") from error
     except (KanbanError, OSError, UnicodeError) as error:
@@ -712,9 +708,14 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             ) from error
         raise
     if launcher == "foreground":
-        if result.returncode != 0:
+        print(
+            f"started: {entry.task_id}\tagent={agent_name}\tlauncher=foreground",
+            flush=True,
+        )
+        returncode = process.wait()
+        if returncode != 0:
             raise KanbanError(
-                f"Agent 已启动但以非零状态退出: {result.returncode}; "
+                f"Agent 已启动但以非零状态退出: {returncode}; "
                 "卡片保留在 working"
             )
         return
@@ -761,6 +762,9 @@ def parser() -> argparse.ArgumentParser:
     start_parser = commands.add_parser("start", help="领取任务并按 Onevoke 配置启动 Agent")
     start_parser.add_argument("task", nargs="?")
     start_parser.add_argument("--agent", choices=AGENT_NAMES, help="覆盖配置中的默认 Agent")
+    start_parser.add_argument(
+        "--launcher", choices=("tmux", "foreground"), help="覆盖配置中的启动方式"
+    )
 
     commands.add_parser("check", help="检查看板不变量")
     return result

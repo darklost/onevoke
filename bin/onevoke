@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,6 +21,7 @@ from onevoke_config import (
     ConfigError,
     config_path,
     default_config,
+    effective_config,
     load_config,
     save_config,
 )
@@ -34,6 +37,11 @@ COMMANDS = (
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
 MEMSEARCH_VERSION = "0.4.15"
 MEMSEARCH_COMMIT = "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8"
+MEMSEARCH_HOOKS = {
+    "SessionStart": "session-start.sh",
+    "UserPromptSubmit": "user-prompt-submit.sh",
+    "Stop": "stop.sh",
+}
 
 
 class OnevokeError(Exception):
@@ -115,25 +123,130 @@ def rules_integration(agent: str) -> tuple[bool, str]:
     return False, f"{target} 未导入或合并 ONEVOKE-AGENTS.md"
 
 
-def memsearch_state() -> dict[str, bool]:
-    cli = shutil.which("memsearch") is not None
+def read_json_file(path: Path) -> object | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def memsearch_cli_state() -> tuple[str | None, str | None, bool]:
+    command = shutil.which("memsearch")
+    if not command:
+        return None, None, False
+    try:
+        result = subprocess.run(
+            [command, "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return command, None, False
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    match = re.search(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)", output)
+    version = match.group(1) if result.returncode == 0 and match else None
+    return command, version, version == MEMSEARCH_VERSION
+
+
+def resolve_hook_script(command: object, expected: str, root: Path | None) -> Path | None:
+    if not isinstance(command, str):
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    for token in tokens:
+        if root is not None:
+            token = token.replace("${CLAUDE_PLUGIN_ROOT}", str(root))
+        if "$" in token:
+            continue
+        candidate = Path(token).expanduser()
+        if (
+            candidate.is_absolute()
+            and candidate.name == expected
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ):
+            return candidate.resolve()
+    return None
+
+
+def hooks_ready(raw: object, root: Path | None = None) -> bool:
+    if not isinstance(raw, dict) or not isinstance(raw.get("hooks"), dict):
+        return False
+    resolved: list[Path] = []
+    hook_events = raw["hooks"]
+    for event, expected in MEMSEARCH_HOOKS.items():
+        registrations = hook_events.get(event)
+        if not isinstance(registrations, list):
+            return False
+        script = None
+        for registration in registrations:
+            if not isinstance(registration, dict):
+                continue
+            commands = registration.get("hooks")
+            if not isinstance(commands, list):
+                continue
+            for hook in commands:
+                if not isinstance(hook, dict) or hook.get("type") != "command":
+                    continue
+                script = resolve_hook_script(hook.get("command"), expected, root)
+                if script:
+                    break
+            if script:
+                break
+        if not script:
+            return False
+        resolved.append(script)
+    return len({script.parent for script in resolved}) == 1
+
+
+def codex_memsearch_ready() -> bool:
     hooks_file = Path.home() / ".codex" / "hooks.json"
-    codex_plugin = False
-    if hooks_file.is_file():
-        try:
-            hooks = json.loads(hooks_file.read_text(encoding="utf-8"))
-            text = json.dumps(hooks, ensure_ascii=False)
-            codex_plugin = all(
-                marker in text
-                for marker in ("session-start.sh", "user-prompt-submit.sh", "stop.sh")
-            ) and "memsearch" in text
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            pass
-    claude_plugin = (Path.home() / ".claude" / "plugins").exists() and any(
-        path.name == "memsearch" or "memsearch" in path.name
-        for path in (Path.home() / ".claude" / "plugins").glob("**/*")
-    )
-    return {"cli": cli, "codex_plugin": codex_plugin, "claude_plugin": claude_plugin}
+    return hooks_ready(read_json_file(hooks_file))
+
+
+def claude_memsearch_ready() -> bool:
+    claude = Path.home() / ".claude"
+    settings = read_json_file(claude / "settings.json")
+    if not isinstance(settings, dict):
+        return False
+    enabled = settings.get("enabledPlugins")
+    if not isinstance(enabled, dict) or enabled.get("memsearch@memsearch-plugins") is not True:
+        return False
+
+    installed = read_json_file(claude / "plugins" / "installed_plugins.json")
+    if not isinstance(installed, dict) or not isinstance(installed.get("plugins"), dict):
+        return False
+    records = installed["plugins"].get("memsearch@memsearch-plugins")
+    if not isinstance(records, list):
+        return False
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("installPath"), str):
+            continue
+        root = Path(record["installPath"]).expanduser()
+        manifest = read_json_file(root / ".claude-plugin" / "plugin.json")
+        if not isinstance(manifest, dict) or manifest.get("name") != "memsearch":
+            continue
+        if hooks_ready(read_json_file(root / "hooks" / "hooks.json"), root):
+            return True
+    return False
+
+
+def memsearch_state() -> dict[str, str | bool | None]:
+    cli_path, cli_version, cli_ready = memsearch_cli_state()
+    return {
+        "cli": cli_path is not None,
+        "cli_path": cli_path,
+        "cli_version": cli_version,
+        "cli_ready": cli_ready,
+        "codex_plugin": codex_memsearch_ready(),
+        "claude_plugin": claude_memsearch_ready(),
+    }
 
 
 def print_doctor() -> bool:
@@ -166,10 +279,25 @@ def print_doctor() -> bool:
             )
         else:
             print(f"[-] {AGENT_LABELS[name]}: 未安装", file=sys.stderr)
+    if not any(state["path"] for state in agents.values()):
+        healthy = False
+        warning("没有发现可执行 Agent; kanban 无法启动任务.")
+    if not any(agents[name]["path"] for name in REVIEW_AGENTS):
+        healthy = False
+        warning("没有发现 Reviewer; 审核流程无法运行.")
 
     memory = memsearch_state()
     print("\nMemSearch:", file=sys.stderr)
-    print(f"  CLI: {'已安装' if memory['cli'] else '未安装'}", file=sys.stderr)
+    if memory["cli_ready"]:
+        print(f"  CLI: {memory['cli_version']} (已支持)", file=sys.stderr)
+    elif memory["cli"]:
+        healthy = False
+        warning(
+            f"MemSearch CLI 版本不受支持: {memory['cli_version'] or '无法识别'}; "
+            f"需要 {MEMSEARCH_VERSION}"
+        )
+    else:
+        print("  CLI: 未安装", file=sys.stderr)
     print(
         f"  Codex 插件: {'已接入' if memory['codex_plugin'] else '未接入'}",
         file=sys.stderr,
@@ -186,6 +314,17 @@ def print_doctor() -> bool:
     else:
         if config["welcome_complete"]:
             success(f"配置: {config_path()}")
+            selected_agent = effective_config(config)["kanban_agent"]
+            memory_enabled = bool(
+                memory["cli_ready"]
+                and memory.get(f"{selected_agent}_plugin", False)
+            )
+            if config["memsearch"]["enabled"] and not memory_enabled:
+                healthy = False
+                warning(
+                    "配置启用了 MemSearch, 但当前执行 Agent 的 CLI 或插件未就绪; "
+                    "请重新运行 onevoke welcome --reset."
+                )
         else:
             print(f"[-] 配置: 尚未完成 ({config_path()})", file=sys.stderr)
     return healthy
@@ -232,6 +371,25 @@ def verify_memsearch_source(source: Path) -> bool:
             f"实际 {revision or '无法读取'}"
         )
         return False
+    tag = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "rev-parse",
+            f"refs/tags/v{MEMSEARCH_VERSION}^{{commit}}",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    tag_revision = tag.stdout.strip()
+    if tag.returncode != 0 or tag_revision != MEMSEARCH_COMMIT:
+        warning(
+            f"MemSearch tag 校验失败: v{MEMSEARCH_VERSION} 应指向 "
+            f"{MEMSEARCH_COMMIT}, 实际 {tag_revision or '无法读取'}"
+        )
+        return False
     status = subprocess.run(
         [
             "git",
@@ -253,8 +411,14 @@ def verify_memsearch_source(source: Path) -> bool:
 
 
 def install_memsearch_cli() -> bool:
-    if shutil.which("memsearch"):
+    command, version, ready = memsearch_cli_state()
+    if ready:
         return True
+    if command:
+        warning(
+            f"现有 MemSearch CLI 版本为 {version or '无法识别'}, "
+            f"将更新为固定版本 {MEMSEARCH_VERSION}."
+        )
     if not shutil.which("uv"):
         warning("未找到 uv, 无法自动安装 MemSearch.")
         print("请先安装 uv, 再重新运行 onevoke welcome.", file=sys.stderr)
@@ -265,8 +429,12 @@ def install_memsearch_cli() -> bool:
         file=sys.stderr,
     )
     result = subprocess.run(["uv", "tool", "install", "-U", package], check=False)
-    if result.returncode != 0 or not shutil.which("memsearch"):
-        warning("MemSearch CLI 安装失败或安装后仍不在 PATH.")
+    _, installed_version, installed_ready = memsearch_cli_state()
+    if result.returncode != 0 or not installed_ready:
+        warning(
+            "MemSearch CLI 安装失败或版本校验未通过: "
+            f"预期 {MEMSEARCH_VERSION}, 实际 {installed_version or '无法读取'}."
+        )
         return False
     return True
 
@@ -328,6 +496,10 @@ def install_memsearch_for(agent: str) -> bool:
             "再运行 /plugin install memsearch.",
             file=sys.stderr,
         )
+        return False
+    state = memsearch_state()
+    if not state["cli_ready"] or not state.get(f"{agent}_plugin", False):
+        warning(f"MemSearch {AGENT_LABELS[agent]} 插件安装后校验未通过.")
         return False
     return True
 
@@ -415,27 +587,15 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         print("请按 README 的接入章节配置, welcome 不会覆盖你的全局规则文件.", file=sys.stderr)
 
     memory = memsearch_state()
-    supported_memory_agents = [
-        name for name in ("codex", "claude") if agents[name]["path"]
-    ]
-    ready_memory_agents = [
-        name for name in supported_memory_agents if memory.get(f"{name}_plugin", False)
-    ]
-    memory_agent = None
-    if selected_agent in ready_memory_agents:
-        memory_agent = selected_agent
-    elif ready_memory_agents:
-        memory_agent = ready_memory_agents[0]
-    elif selected_agent in supported_memory_agents:
-        memory_agent = selected_agent
-    elif supported_memory_agents:
-        memory_agent = supported_memory_agents[0]
-    memory_ready = memory["cli"] and bool(ready_memory_agents)
+    memory_agent = selected_agent if selected_agent in ("codex", "claude") else None
+    memory_ready = bool(
+        memory_agent
+        and memory["cli_ready"]
+        and memory.get(f"{memory_agent}_plugin", False)
+    )
     if memory_ready:
         config["memsearch"]["enabled"] = True
-        success(
-            f"MemSearch CLI 和 {AGENT_LABELS[memory_agent]} 插件均可用."
-        )
+        success(f"MemSearch CLI 和 {AGENT_LABELS[memory_agent]} 插件均可用.")
     elif memory_agent:
         if ask_yes_no("MemSearch 未完整安装, 是否现在安装或显示接入步骤?", default=False):
             config["memsearch"]["enabled"] = install_memsearch_for(memory_agent)
@@ -506,13 +666,24 @@ def command_review(arguments: list[str]) -> NoReturn:
     normalized = aliases.get(role.lower())
     if not normalized:
         raise OnevokeError(f"不支持的 Reviewer 角色: {role}")
-    config = load_config()
+    config = effective_config(load_config())
     reviewer = config["reviewers"][normalized]
     wrapper = shutil.which(f"{reviewer}-review.sh")
     if not wrapper:
         raise OnevokeError(f"Reviewer wrapper 不在 PATH: {reviewer}-review.sh")
     arguments[3] = normalized
     os.execv(wrapper, [wrapper, *arguments])
+
+
+def print_config(config: dict[str, Any]) -> None:
+    effective = effective_config(config)
+    status = "已完成" if config["welcome_complete"] else "未完成"
+    print(f"welcome: {status}")
+    print(f"kanban agent: {effective['kanban_agent']}")
+    print(f"launcher: {effective['launcher']}")
+    for role in REVIEW_ROLES:
+        print(f"{role}: {effective['reviewers'][role]}")
+    print(f"MemSearch: {'启用' if effective['memsearch']['enabled'] else '未启用'}")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -537,11 +708,17 @@ def main() -> int:
             return 0 if print_doctor() else 1
         if args.command == "config":
             config = load_config()
-            print(json.dumps(config, ensure_ascii=False, indent=2))
+            if args.json:
+                print(json.dumps(config, ensure_ascii=False, indent=2))
+            else:
+                print_config(config)
             return 0
         if args.command == "review":
             command_review(args.arguments)
         return 0
+    except KeyboardInterrupt:
+        print("\nonevoke: 用户取消, 配置未更改", file=sys.stderr)
+        return 130
     except (OnevokeError, ConfigError, OSError, UnicodeError) as error:
         print(f"onevoke: {error}", file=sys.stderr)
         return 1

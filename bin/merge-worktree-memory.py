@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import os
 import re
@@ -259,25 +260,13 @@ def format_entry(marker_hash: str, kind: str, source_root: str, name: str,
     )
 
 
-def merge(source_root: str, target_root: str, dry_run: bool) -> None:
-    source_memory = Path(source_root) / ".memsearch" / "memory"
+def merge_files(
+    source_root: str,
+    target_root: str,
+    source_files: list[Path],
+    dry_run: bool,
+) -> None:
     target_memory = Path(target_root) / ".memsearch" / "memory"
-
-    # git 返回物理路径而 --target 可能是逻辑路径, 同一目录的两种写法要判等.
-    if os.path.realpath(source_root) == os.path.realpath(target_root):
-        print("Source is the main worktree; no memory merge needed.")
-        return
-
-    # 未安装 memsearch 时 worktree 里根本没有这个目录: 属于正常情况, 空操作返回.
-    if not source_memory.is_dir():
-        print(f"Nothing to merge: {source_memory} does not exist")
-        return
-
-    source_files = sorted(source_memory.glob("*.md"))
-    if not source_files:
-        print(f"Nothing to merge: no memory files in {source_memory}")
-        return
-
     if not dry_run:
         target_memory.mkdir(parents=True, exist_ok=True)
 
@@ -330,6 +319,36 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
     elif target_memory.is_dir():
         scanned, changed = clean_directory(target_memory)
         print(f"scanned {scanned} markdown file(s), cleaned {changed} file(s)")
+
+
+def merge(source_root: str, target_root: str, dry_run: bool) -> None:
+    source_memory = Path(source_root) / ".memsearch" / "memory"
+
+    # git 返回物理路径而 --target 可能是逻辑路径, 同一目录的两种写法要判等.
+    if os.path.realpath(source_root) == os.path.realpath(target_root):
+        print("Source is the main worktree; no memory merge needed.")
+        return
+
+    # 未安装 memsearch 时 worktree 里根本没有这个目录: 属于正常情况, 空操作返回.
+    if not source_memory.is_dir():
+        print(f"Nothing to merge: {source_memory} does not exist")
+        return
+
+    source_files = sorted(source_memory.glob("*.md"))
+    if not source_files:
+        print(f"Nothing to merge: no memory files in {source_memory}")
+        return
+
+    if dry_run:
+        merge_files(source_root, target_root, source_files, True)
+        return
+
+    state_dir = Path(target_root) / ".memsearch"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = state_dir / ".merge-worktree-memory.lock"
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        merge_files(source_root, target_root, source_files, False)
 
 
 def main() -> int:

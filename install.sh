@@ -23,6 +23,7 @@ for command in "$project_dir"/bin/*; do
   fi
 done
 for rule in "$project_dir"/rules/*.md; do
+  [ -f "$rule" ] || continue
   target="$agents_dir/$(basename "$rule")"
   if [ -d "$target" ]; then
     printf '%s\n' "错误: 安装目标是目录: $target" >&2
@@ -40,6 +41,7 @@ for command in "$project_dir"/bin/*; do
 done
 
 for rule in "$project_dir"/rules/*.md; do
+  [ -f "$rule" ] || continue
   install -m 0644 "$rule" "$agents_dir/$(basename "$rule")"
 done
 

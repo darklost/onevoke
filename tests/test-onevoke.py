@@ -3,6 +3,7 @@
 import json
 import os
 import pty
+import signal
 import subprocess
 import sys
 import tempfile
@@ -58,31 +59,51 @@ class OnevokeCommandTest(unittest.TestCase):
         if tmux:
             self.fake_command("tmux")
         if memsearch:
-            self.fake_command("memsearch")
-            hooks = self.home / ".codex" / "hooks.json"
-            hooks.parent.mkdir(parents=True)
-            hooks.write_text(
-                json.dumps(
-                    {
-                        "hooks": [
-                            "memsearch/session-start.sh",
-                            "memsearch/user-prompt-submit.sh",
-                            "memsearch/stop.sh",
-                        ]
-                    }
-                ),
-                encoding="utf-8",
+            self.fake_command(
+                "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
             )
+            self.install_fake_codex_memsearch_hooks()
+
+    def install_fake_codex_memsearch_hooks(self) -> Path:
+        hooks_dir = self.root / "codex-memsearch-hooks"
+        hooks_dir.mkdir(exist_ok=True)
+        events = {
+            "SessionStart": "session-start.sh",
+            "UserPromptSubmit": "user-prompt-submit.sh",
+            "Stop": "stop.sh",
+        }
+        hooks: dict[str, list[dict[str, object]]] = {}
+        for event, name in events.items():
+            script = hooks_dir / name
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+            hooks[event] = [
+                {"hooks": [{"type": "command", "command": f"bash {script}"}]}
+            ]
+        hooks_file = self.home / ".codex" / "hooks.json"
+        hooks_file.parent.mkdir(parents=True, exist_ok=True)
+        hooks_file.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+        return hooks_file
 
     def install_fake_memsearch_tools(
-        self, revision: str, source_status: str = ""
+        self,
+        revision: str,
+        source_status: str = "",
+        *,
+        tag_revision: str | None = None,
+        install_hooks: bool = True,
     ) -> tuple[Path, Path, Path]:
         uv_log = self.root / "uv.log"
         git_log = self.root / "git.log"
         bash_log = self.root / "bash.log"
         memsearch_template = self.root / "memsearch-template"
-        memsearch_template.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        memsearch_template.write_text(
+            "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n",
+            encoding="utf-8",
+        )
         memsearch_template.chmod(0o755)
+        hooks_template = self.install_fake_codex_memsearch_hooks()
+        hooks_template.unlink()
         self.env.update(
             {
                 "UV_LOG": str(uv_log),
@@ -91,9 +112,36 @@ class OnevokeCommandTest(unittest.TestCase):
                 "FAKE_BIN": str(self.fake_bin),
                 "MEMSEARCH_TEMPLATE": str(memsearch_template),
                 "MEMSEARCH_REVISION": revision,
+                "MEMSEARCH_TAG_REVISION": tag_revision or revision,
                 "MEMSEARCH_SOURCE_STATUS": source_status,
                 "ONEVOKE_MEMSEARCH_SOURCE": str(self.root / "memsearch-source"),
+                "MEMSEARCH_HOOKS_TEMPLATE": str(self.root / "hooks-template.json"),
             }
+        )
+        hooks_template_source = Path(self.env["MEMSEARCH_HOOKS_TEMPLATE"])
+        hooks_template_source.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        event: [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f"bash {self.root / 'codex-memsearch-hooks' / name}",
+                                    }
+                                ]
+                            }
+                        ]
+                        for event, name in {
+                            "SessionStart": "session-start.sh",
+                            "UserPromptSubmit": "user-prompt-submit.sh",
+                            "Stop": "stop.sh",
+                        }.items()
+                    }
+                }
+            ),
+            encoding="utf-8",
         )
         self.fake_command(
             "uv",
@@ -106,7 +154,11 @@ class OnevokeCommandTest(unittest.TestCase):
             "#!/bin/sh\n"
             "if [ \"$1\" = '-C' ]; then\n"
             "  if [ \"$3\" = 'rev-parse' ]; then\n"
-            "    printf '%s\\n' \"$MEMSEARCH_REVISION\"\n"
+            "    if [ \"${4:-}\" = 'HEAD' ]; then\n"
+            "      printf '%s\\n' \"$MEMSEARCH_REVISION\"\n"
+            "    else\n"
+            "      printf '%s\\n' \"$MEMSEARCH_TAG_REVISION\"\n"
+            "    fi\n"
             "  elif [ \"$3\" = 'status' ] && "
             "[ -n \"$MEMSEARCH_SOURCE_STATUS\" ]; then\n"
             "    printf '%s\\n' \"$MEMSEARCH_SOURCE_STATUS\"\n"
@@ -119,10 +171,13 @@ class OnevokeCommandTest(unittest.TestCase):
             "printf '%s\\n' '#!/bin/sh' > "
             "\"$destination/plugins/codex/scripts/install.sh\"\n",
         )
-        self.fake_command(
-            "bash",
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$BASH_LOG\"\n",
-        )
+        bash_body = "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$BASH_LOG\"\n"
+        if install_hooks:
+            bash_body += (
+                "/bin/mkdir -p \"$HOME/.codex\"\n"
+                "/bin/cp \"$MEMSEARCH_HOOKS_TEMPLATE\" \"$HOME/.codex/hooks.json\"\n"
+            )
+        self.fake_command("bash", bash_body)
         return uv_log, git_log, bash_log
 
     def run_command(self, *args: str) -> subprocess.CompletedProcess:
@@ -262,6 +317,126 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual({role: "grok" for role in ROLES}, config["reviewers"])
         self.assertFalse(config["memsearch"]["enabled"])
 
+    def test_doctor_rejects_stale_memsearch_artifacts(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
+        )
+        codex_hooks = self.home / ".codex" / "hooks.json"
+        codex_hooks.parent.mkdir(parents=True)
+        codex_hooks.write_text(
+            json.dumps(
+                {
+                    "note": (
+                        "memsearch session-start.sh user-prompt-submit.sh stop.sh"
+                    )
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.home / ".claude" / "plugins" / "memsearch-empty").mkdir(parents=True)
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Codex 插件: 未接入", result.stderr)
+        self.assertIn("Claude 插件: 未接入", result.stderr)
+
+    def test_doctor_accepts_enabled_claude_plugin_with_valid_hooks(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
+        )
+        plugin = self.root / "claude-memsearch"
+        (plugin / ".claude-plugin").mkdir(parents=True)
+        (plugin / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "memsearch", "version": "0.4.15"}),
+            encoding="utf-8",
+        )
+        hooks = {}
+        (plugin / "hooks").mkdir()
+        for event, name in {
+            "SessionStart": "session-start.sh",
+            "UserPromptSubmit": "user-prompt-submit.sh",
+            "Stop": "stop.sh",
+        }.items():
+            script = plugin / "hooks" / name
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+            hooks[event] = [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"bash ${{CLAUDE_PLUGIN_ROOT}}/hooks/{name}",
+                        }
+                    ]
+                }
+            ]
+        (plugin / "hooks" / "hooks.json").write_text(
+            json.dumps({"hooks": hooks}), encoding="utf-8"
+        )
+        settings = self.home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            json.dumps({"enabledPlugins": {"memsearch@memsearch-plugins": True}}),
+            encoding="utf-8",
+        )
+        installed = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        installed.parent.mkdir(parents=True)
+        installed.write_text(
+            json.dumps(
+                {
+                    "plugins": {
+                        "memsearch@memsearch-plugins": [{"installPath": str(plugin)}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_command("doctor")
+
+        self.assertIn("Claude 插件: 已接入", result.stderr)
+
+    def test_doctor_fails_without_any_agent_or_reviewer(self) -> None:
+        for name in (
+            "onevoke",
+            "kanban",
+            "codex-review.sh",
+            "grok-review.sh",
+            "merge-worktree-memory.py",
+        ):
+            self.fake_command(name)
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("没有发现可执行 Agent", result.stderr)
+        self.assertIn("没有发现 Reviewer", result.stderr)
+
+    def test_doctor_rejects_enabled_memsearch_when_cli_version_drifted(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 9.9.9'\n"
+        )
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": True},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("CLI 版本不受支持: 9.9.9", result.stderr)
+        self.assertIn("配置启用了 MemSearch", result.stderr)
+
     def test_invalid_config_is_reported_without_fallback(self) -> None:
         self.config.parent.mkdir(parents=True)
         self.config.write_text("not json\n", encoding="utf-8")
@@ -270,6 +445,15 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(1, result.returncode)
         self.assertIn("读取配置失败", result.stderr)
+
+    def test_config_defaults_to_human_output_and_json_is_explicit(self) -> None:
+        human = self.run_command("config")
+        machine = self.run_command("config", "--json")
+
+        self.assertIn("welcome: 未完成", human.stdout)
+        self.assertIn("kanban agent: codex", human.stdout)
+        self.assertFalse(human.stdout.lstrip().startswith("{"))
+        self.assertFalse(json.loads(machine.stdout)["welcome_complete"])
 
     def test_welcome_installs_pinned_memsearch_and_codex_plugin(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
@@ -295,6 +479,58 @@ class OnevokeCommandTest(unittest.TestCase):
         )
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_welcome_rejects_plugin_installer_that_does_not_install_hooks(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_memsearch_tools(
+            "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8",
+            install_hooks=False,
+        )
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("安装后校验未通过", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_updates_an_existing_wrong_memsearch_version(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 9.9.9'\n"
+        )
+        uv_log, _, _ = self.install_fake_memsearch_tools(
+            "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8"
+        )
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("现有 MemSearch CLI 版本为 9.9.9", output)
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_welcome_rejects_wrong_memsearch_tag_target(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        _, _, bash_log = self.install_fake_memsearch_tools(
+            "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8",
+            tag_revision="unexpected-tag-revision",
+        )
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch tag 校验失败", output)
+        self.assertFalse(bash_log.exists())
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
 
     def test_welcome_rejects_unexpected_memsearch_source_revision(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
@@ -406,6 +642,67 @@ class OnevokeCommandTest(unittest.TestCase):
             ["/worktree", "base", "commit", "QA", "目标"],
             log.read_text(encoding="utf-8").splitlines(),
         )
+
+    def test_review_ignores_unfinished_welcome_selections(self) -> None:
+        log = self.root / "review.log"
+        self.fake_command(
+            "codex-review.sh",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$REVIEW_LOG\"\n",
+        )
+        self.fake_command("grok-review.sh", "#!/bin/sh\nexit 99\n")
+        self.env["REVIEW_LOG"] = str(log)
+        config = {
+            "schema_version": 1,
+            "welcome_complete": False,
+            "kanban_agent": "grok",
+            "launcher": "foreground",
+            "reviewers": {role: "grok" for role in ROLES},
+            "memsearch": {"enabled": True},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command(
+            "review", "/worktree", "base", "commit", "QA", "目标"
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(log.exists())
+
+    def test_welcome_ctrl_c_exits_without_traceback_or_config(self) -> None:
+        self.install_fake_environment(tmux=False)
+        master, slave = pty.openpty()
+        process = subprocess.Popen(
+            [sys.executable, str(ONEVOKE), "welcome"],
+            env=self.env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+        output = bytearray()
+        try:
+            while "请选择".encode("utf-8") not in output:
+                output.extend(os.read(master, 4096))
+            process.send_signal(signal.SIGINT)
+            returncode = process.wait(timeout=10)
+            while True:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError:
+                    break
+        finally:
+            os.close(master)
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+        decoded = output.decode("utf-8", "replace")
+        self.assertEqual(130, returncode, decoded)
+        self.assertIn("用户取消, 配置未更改", decoded)
+        self.assertNotIn("Traceback", decoded)
+        self.assertFalse(self.config.exists())
 
 
 if __name__ == "__main__":
