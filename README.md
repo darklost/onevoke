@@ -25,8 +25,9 @@ Onevoke - One person. Many agents.
 - Codex、Claude 或 Grok 至少一个, 用于执行看板任务
 - Codex CLI (`codex`) 或 Grok CLI (`grok`) 至少一个, 用于审核
 - tmux 可选; 不安装时 `kanban start` 可在当前终端前台运行
+- uv 可选; 仅 Onevoke 自动安装或修正 MemSearch CLI 版本时需要
 
-memsearch 是可选依赖. welcome 检查 CLI 和可用 Agent 的插件, 缺失时询问是否安装. 没装时 `BASE-RULES.md` 的「记忆管理」不适用, 记忆合并命令仍以成功空操作退出.
+memsearch 是可选依赖. welcome 要求 CLI 版本正好为 `0.4.15`, 并验证当前执行 Agent 的真实插件或 hooks, 缺失时询问是否安装. CLI 或当前 Agent 插件任一未就绪时, `BASE-RULES.md` 的「记忆管理」不适用; 记忆合并命令仍以成功空操作退出.
 
 ## 安装
 
@@ -45,11 +46,10 @@ memsearch 是可选依赖. welcome 检查 CLI 和可用 Agent 的插件, 缺失�
 - 选择 `kanban` 默认执行 Agent.
 - 分别选择 `PM`、`CSA`、`Hacker`、`QA` 的 Reviewer.
 - 选择 tmux window 或当前终端前台 launcher; tmux 缺失时询问安装, 拒绝后写入前台模式.
-- 检查 MemSearch CLI 和 Agent 插件, 缺失时询问安装.
+- 检查 MemSearch CLI 版本和当前执行 Agent 的有效插件, 缺失或版本不符时询问安装.
 - 检查所选 Agent 是否已经接入 Onevoke 规则, 但不覆盖用户的 Agent 全局配置.
 
-Codex 的 MemSearch 自动安装固定 PyPI 版本和上游 commit, 只执行 commit 匹配且工作树
-clean 的插件源码; 既有缓存被修改或出现未跟踪文件时会拒绝执行.
+Codex 的 MemSearch 自动安装固定 PyPI 版本、上游 tag 和 commit, 只执行 tag、commit 均匹配且工作树 clean 的插件源码; 安装器返回后重新验证 CLI 和三个 hooks, 未实际接入时不标记启用. 既有缓存被修改或出现未跟踪文件时会拒绝执行.
 
 welcome 只在 stdin 和 stderr 都是 tty 时提问. CI、管道或 hook 中仍完成文件安装, 输出诊断并提示之后在终端运行:
 
@@ -57,7 +57,7 @@ welcome 只在 stdin 和 stderr 都是 tty 时提问. CI、管道或 hook 中仍
 onevoke welcome
 ```
 
-配置完成后可用 `onevoke doctor` 重新诊断, `onevoke config` 查看配置, `onevoke welcome --reset` 重新选择. welcome 遵守 `NO_COLOR`, Ctrl-D 或 Ctrl-C 时不写半套配置.
+配置完成后可用 `onevoke doctor` 重新诊断, `onevoke config` 查看生效配置, `onevoke config --json` 输出原始 JSON, `onevoke welcome --reset` 重新选择. welcome 未完成时, 看板和审核只使用 Codex 等安全默认值, 不使用尚未确认的选择. welcome 遵守 `NO_COLOR`, Ctrl-D 或 Ctrl-C 时不写半套配置; Ctrl-C 以 130 退出且不打印 traceback.
 
 安装器不删除旧文件. 从早期版本升级时, `SOLO-AGENTS.md`、`CODEX-REVIEW-RULES.md` 和 `GROK-REVIEW-RULES.md` 仍需用户确认接入路径后手动清理.
 
@@ -65,7 +65,7 @@ onevoke welcome
 
 ## 接入
 
-安装器不写任何 Agent 的配置目录. 两边机制不同, 分开说.
+安装器不写任何 Agent 的配置目录. 各 Agent 的接入机制不同, 分开说.
 
 ### Claude Code
 
@@ -213,13 +213,15 @@ kanban start 20260802-login-retry-task
 kanban start --agent claude 20260802-login-retry-task
 # 或
 kanban start --agent grok 20260802-login-retry-task
+# 项目规则需要前台模式时
+kanban start --launcher foreground 20260802-login-retry-task
 ```
 
 `pick` 会执行带完整性校验的 `backlog -> todo`. 不传任务 ID 时, 它只列 `backlog` 任务供人选择. 卡片仍有缺失或 `<填写>` 时会拒绝, 此时回需求会话补清楚, 不绕过门禁.
 
 不传任务 ID 时, `kanban start` 只列 `todo` 任务供人选择, 不猜优先级. 启动时会依次完成:
 
-1. 读取 Onevoke 配置, 校验 launcher、TTY、Agent 命令和任务状态.
+1. 读取 Onevoke 生效配置及本次 `--agent` / `--launcher` 覆盖, 校验 launcher、TTY、Agent 命令和任务状态.
 2. 用原子重命名领取卡片, 执行 `todo -> working`.
 3. 写入负责人和开始时间.
 4. tmux 模式在当前 session 新建 `kb-<任务标题>` window; foreground 模式在当前终端运行并等待退出. 两者 cwd 都是项目根.

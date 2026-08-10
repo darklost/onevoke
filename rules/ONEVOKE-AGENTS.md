@@ -35,7 +35,7 @@
 ### Reviewer
 
 - `PM`, `CSA`, `Hacker`, `QA` 分别取 Onevoke 配置中的 reviewer, 未完成 welcome 时四者都回落到 Codex.
-- 未被当前任务或项目规则覆盖时, 审核一律通过 `onevoke review` 分发. 同一角色的一轮审核中不得换 Agent; 不同角色可以按配置使用不同 Agent.
+- 未被当前任务、项目规则或用户自己的全局规则覆盖时, 审核一律通过 `onevoke review` 分发. 同一角色的一轮审核中不得换 Agent; 不同角色可以按配置使用不同 Agent.
 
 ### 看板任务完成
 

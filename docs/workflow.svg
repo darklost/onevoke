@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960" role="img" aria-labelledby="title description">
   <title id="title">Onevoke 工作流</title>
-  <desc id="description">需求会话讨论并创建任务卡, 任务终端领取、执行、审核、验收和集成任务, 需求会话同时继续讨论下一项.</desc>
+  <desc id="description">tmux launcher 下, 需求会话讨论并创建任务卡, 独立窗口领取、执行、审核、验收和集成任务; foreground launcher 则在当前终端等待任务结束.</desc>
   <defs>
     <style>
       .sans { font-family: -apple-system, BlinkMacSystemFont, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; }
@@ -28,7 +28,7 @@
 
   <rect width="1600" height="960" fill="#f7f8fa"/>
   <text x="72" y="69" class="sans title">Onevoke 工作流</text>
-  <text x="72" y="108" class="sans subtitle">计划会话持续决策, 独立任务窗口持续交付</text>
+  <text x="72" y="108" class="sans subtitle">tmux: 计划会话持续决策, 独立任务窗口持续交付</text>
   <line x1="72" y1="134" x2="1528" y2="134" stroke="#dfe3e8" stroke-width="2"/>
 
   <rect x="64" y="164" width="680" height="732" rx="8" fill="#f1f8f3" stroke="#a9cfb4" stroke-width="2"/>
@@ -82,8 +82,8 @@
 
   <path d="M404 725 V754" class="arrow"/>
   <rect x="96" y="768" width="616" height="92" rx="8" fill="#fff9ea" stroke="#d8ae47" stroke-width="2"/>
-  <text x="404" y="806" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#443818">任务启动后立即回到需求会话</text>
-  <text x="404" y="839" text-anchor="middle" class="mono command">/new  ->  Plan mode  ->  讨论下一项</text>
+  <text x="404" y="806" text-anchor="middle" class="sans" font-size="22" font-weight="700" fill="#443818">tmux 启动后回需求会话</text>
+  <text x="404" y="839" text-anchor="middle" class="mono command">foreground: 当前终端等待 Agent</text>
 
   <rect x="888" y="278" width="616" height="144" rx="8" fill="#ffffff" stroke="#9dbfdd" stroke-width="2" filter="url(#shadow)"/>
   <rect x="888" y="278" width="6" height="144" rx="3" fill="#3476aa"/>

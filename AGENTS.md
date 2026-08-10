@@ -4,7 +4,7 @@
 
 ## 本仓库特例
 
-- 本仓库第三阶段安全角色 `CSA` 和 `Hacker` 一律标记 N/A, 不运行; `PM` 和 `QA` 保持适用.
+- 本仓库第二阶段安全角色 `CSA` 和 `Hacker` 一律标记 N/A, 不运行; `PM` 和 `QA` 保持适用.
 - 对外发布的分支模型固定为 `main` 稳定分支加 `develop` 集成分支, 不提供其他长期分支或集成分支选项; 缺少 `develop` 时从 `main` 自动初始化.
 
 ## Project Structure & Module Organization
@@ -12,8 +12,8 @@
 - `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 只放分册索引, 优先级和默认行为. 其余分册由它的分册表按需引用: `BASE-RULES.md` 跨项目通用条款, `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约, `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
 - `install.sh` 遍历 `bin/*` 和 `rules/*.md`, 把全部普通文件直接覆盖到 `~/.local/bin/` 与 `~/.agents/`, 包括 `ONEVOKE-AGENTS.md`. 唯一稳定 stdout 是 `Onevoke installed`; 最后必须用绝对路径运行 `onevoke welcome`. 同名目标是目录时须在写任何文件前拒绝, 防止 `install` 把源文件塞进错误目录.
 - `bin/onevoke_config.py` 是 `onevoke` 与 `kanban` 共用的配置边界, 配置默认在 `~/.config/onevoke/config.json`, 测试用 `ONEVOKE_CONFIG` 隔离. 配置写入必须校验 schema, 用同目录临时文件加 `os.replace()` 原子替换, 权限为 `0600`.
-- `bin/onevoke` 提供 `welcome`, `doctor`, `config`, `review`. welcome 只在 tty 中提问, 无 tty 时诊断后正常提示重跑; 依赖安装必须经用户明确选择. MemSearch Codex 插件的 tag 与 commit 必须同时固定, 只执行 commit 匹配且工作树 clean 的源码. `review` 按角色配置分发到 Codex 或 Grok wrapper, 当前任务或项目明确覆盖时可直接调用对应 wrapper.
-- `bin/kanban` 的 `start` 未传 `--agent` 时读取 `kanban_agent`; `--agent` 始终优先. launcher 为 `tmux` 时沿用独立 window, 为 `foreground` 时必须有交互 tty 并在当前终端等待 Agent 退出.
+- `bin/onevoke` 提供 `welcome`, `doctor`, `config`, `review`. welcome 只在 tty 中提问, 无 tty 时诊断后正常提示重跑; 依赖安装必须经用户明确选择. MemSearch Codex 插件的 tag 与 commit 必须同时固定, 只执行两者均匹配且工作树 clean 的源码. `review` 按角色配置分发到 Codex 或 Grok wrapper, 当前任务或项目明确覆盖时可直接调用对应 wrapper.
+- `bin/kanban` 的 `start` 未传 `--agent` 时读取生效的 `kanban_agent`; `--agent` 始终优先. `--launcher` 可覆盖本次启动且不改机器配置; launcher 为 `tmux` 时沿用独立 window, 为 `foreground` 时必须有交互 tty 并在当前终端等待 Agent 退出.
 - 新增分册时把它加进 `ONEVOKE-AGENTS.md` 的分册表即可; `install.sh` 和安装测试都遍历 `rules/*.md`, 不必改.
 - 本仓库根目录的 `AGENTS.md` 是本仓库自己的开发规则, 与 `rules/` 下的发布物是两回事, 不要混改.
 - `bin/kanban` 是 Python 3 CLI 的唯一实现, 包含看板定位、任务校验、状态迁移和命令解析. `bin/onevoke` 负责首次引导、环境诊断、配置展示和 Reviewer 分发.
