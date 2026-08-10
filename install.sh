@@ -11,7 +11,8 @@ fi
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 # 入口 ONEVOKE-AGENTS.md 装的是用户可改的默认取值, 缺失时种一份, 已存在就绝不静默覆盖:
-# 与模板有差异时只在 tty 里问一次, 用户回 1 才覆盖, 其余情况一律保留 (见下面 entry_action).
+# 与模板有差异时只在 tty 里先给说明, 再循环问 1 覆盖 / 2 看 diff / 3 不覆盖, 只有明确回 1
+# 才覆盖, 无 tty, EOF 和一直答不出来都按保留处理 (见下面 entry_action).
 # 存在却读不到 (悬空软链, 目录, 权限不足) 说明这台机器没有可加载的入口, 是要人工处理的坏
 # 现场: 装任何东西之前先停, 免得留下半套状态又谎报安装成功.
 entry_rule='ONEVOKE-AGENTS.md'
@@ -43,7 +44,36 @@ entry_action="$entry_state"
 entry_scan=0
 entry_prompted=0
 
-# 入口已存在时不闷头跳过: 先摆出它与本版模板的差异, 再让用户决定覆盖还是保留. 无 tty
+# 差异按需展示: 入口通常几十行, 一上来就刷屏反而盖掉前面的说明, 想看的人选 2 再看.
+show_entry_diff() {
+  # 先接住 diff 的退出码再输出: 直接管到着色器会把状态换成 sed 的.
+  diff_status=0
+  diff_text=$(diff -u "$entry_path" "$entry_template") || diff_status=$?
+  if [ "$diff_status" -gt 1 ]; then
+    printf '%s\n' '警告: 两个文件比不出差异, 请自行对照.' >&2
+    return 0
+  fi
+
+  printf '%s\n' '' >&2
+  if [ -n "${NO_COLOR:-}" ]; then
+    printf '%s\n' "$diff_text" >&2
+    return 0
+  fi
+
+  # diff -u 本身不着色. 文件头只认前两行的行号, 不能按 ^---/^+++ 认: 规则文件里
+  # 一条 `---` 分隔线被删掉后, 内容行就是 `----`, 按前缀会被误判成文件头. 头部先
+  # 着色, 在行首插入转义序列, 后面的 /^-/ 和 /^+/ 就不会再吃掉这两行.
+  esc=$(printf '\033')
+  printf '%s\n' "$diff_text" | sed \
+    -e "1s/.*/${esc}[1m&${esc}[0m/" \
+    -e "2s/.*/${esc}[1m&${esc}[0m/" \
+    -e "/^@@/s/.*/${esc}[36m&${esc}[0m/" \
+    -e "/^-/s/.*/${esc}[31m&${esc}[0m/" \
+    -e "/^+/s/.*/${esc}[32m&${esc}[0m/" >&2
+  return 0
+}
+
+# 入口已存在时不闷头跳过: 先说清这是什么文件, 再让用户决定覆盖, 看差异还是保留. 无 tty
 # 时 (CI, 管道, hook) 不能卡住安装, 一律保留, 由末尾的提示交代.
 if [ "$entry_state" = 'kept' ]; then
   # 入口已确认是可读普通文件, grep 只该返回 0 或 1; 真出现别的状态就照实说读不出来,
@@ -58,51 +88,46 @@ if [ "$entry_state" = 'kept' ]; then
       printf '%s\n' ''
       if [ "$entry_scan" -eq 1 ]; then
         printf '%s\n' "$entry_path 是拆分前的旧入口."
-        printf '%s\n' '通用条款已经拆到 ~/.agents/BASE-RULES.md, 入口现在只放分册索引, 优先级和'
-        printf '%s\n' '默认取值. 这种情况建议覆盖, 之后再把你自己的改动加回去.'
+        printf '%s\n' '通用条款已经拆到 ~/.agents/BASE-RULES.md, 入口现在只放分册索引, 优先级'
+        printf '%s\n' '和默认取值. 这种情况建议覆盖, 之后再把你自己的改动加回去.'
       else
         printf '%s\n' "$entry_path 与本版模板不一致."
-        printf '%s\n' '它装的是你自己的默认取值, 不会被静默覆盖.'
+        printf '%s\n' '入口装的是你自己的默认取值 (分支, Reviewer, 看板任务完成), 不会被静默'
+        printf '%s\n' '覆盖. 覆盖会用模板换掉整个文件, 你改过的取值要重新填一遍.'
       fi
-      printf '%s\n' ''
+      printf '%s\n' "模板: $entry_template"
     } >&2
 
-    # 先接住 diff 的退出码再输出: 直接管到着色器会把状态换成 sed 的.
-    entry_diff=0
-    entry_diff_text=$(diff -u "$entry_path" "$entry_template") || entry_diff=$?
-    if [ "$entry_diff" -gt 1 ]; then
-      printf '%s\n' '警告: 两个文件比不出差异, 请自行对照.' >&2
-    elif [ -n "${NO_COLOR:-}" ]; then
-      printf '%s\n' "$entry_diff_text" >&2
-    else
-      # diff -u 本身不着色. 文件头只认前两行的行号, 不能按 ^---/^+++ 认: 规则文件里
-      # 一条 `---` 分隔线被删掉后, 内容行就是 `----`, 按前缀会被误判成文件头. 头部先
-      # 着色, 在行首插入转义序列, 后面的 /^-/ 和 /^+/ 就不会再吃掉这两行.
-      esc=$(printf '\033')
-      printf '%s\n' "$entry_diff_text" | sed \
-        -e "1s/.*/${esc}[1m&${esc}[0m/" \
-        -e "2s/.*/${esc}[1m&${esc}[0m/" \
-        -e "/^@@/s/.*/${esc}[36m&${esc}[0m/" \
-        -e "/^-/s/.*/${esc}[31m&${esc}[0m/" \
-        -e "/^+/s/.*/${esc}[32m&${esc}[0m/" >&2
-    fi
-
-    {
-      printf '%s\n' ''
-      printf '%s\n' '  1. 用模板覆盖 (你自己的改动会丢失)'
-      printf '%s\n' '  2. 保留当前文件'
-      printf '%s' '请选择 [1/2]: '
-    } >&2
-    entry_reply=''
-    read -r entry_reply || entry_reply=''
-    case "$entry_reply" in
-    1) entry_action='replace' ;;
-    2) entry_action='keep' ;;
-    *)
-      entry_action='keep'
-      printf '%s\n' '不是 1 或 2, 保留当前文件.' >&2
-      ;;
-    esac
+    # 选 2 只看差异, 不算答复, 回来接着问; 读到 EOF 就当不覆盖, 免得在这里空转.
+    entry_answered=0
+    while [ "$entry_answered" -eq 0 ]; do
+      {
+        printf '%s\n' ''
+        printf '%s\n' '  1. 直接覆盖 (你自己的改动会丢失)'
+        printf '%s\n' '  2. 先查看 diff'
+        printf '%s\n' '  3. 不要覆盖'
+        printf '%s' '请选择 [1/2/3]: '
+      } >&2
+      entry_reply=''
+      if read -r entry_reply; then
+        case "$entry_reply" in
+        1)
+          entry_action='replace'
+          entry_answered=1
+          ;;
+        2) show_entry_diff ;;
+        3)
+          entry_action='keep'
+          entry_answered=1
+          ;;
+        *) printf '%s\n' '不是 1, 2 或 3, 请重新选.' >&2 ;;
+        esac
+      else
+        printf '%s\n' '' >&2
+        entry_action='keep'
+        entry_answered=1
+      fi
+    done
   else
     entry_action='keep'
   fi

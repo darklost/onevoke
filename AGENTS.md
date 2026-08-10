@@ -9,7 +9,7 @@
 ## Project Structure & Module Organization
 
 - `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 只放分册索引, 优先级和三项默认取值 (分支, Reviewer, 看板任务完成). 其余分册由它的分册表按需引用: `BASE-RULES.md` 跨项目通用条款, `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约 (Codex 与 Grok 共用), `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
-- 入口装的是用户可改的默认取值, 分册仍每次覆盖. `install.sh` 按 `entry_action` 四态处理入口: `seed` 缺失时种一份, `same` 与模板一致时静默跳过, `replace` 用户在提示里选了覆盖, `keep` 保留. 有 tty 时先打 `diff -u` 再让用户选, 只有明确回 `1` 才是 `replace`; 无 tty 一律 `keep` 并在 stderr 说明. 交互分支只能用伪终端测, 见 `tests/test-kanban.py` 的 `run_installer_on_a_tty`.
+- 入口装的是用户可改的默认取值, 分册仍每次覆盖. `install.sh` 按 `entry_action` 四态处理入口: `seed` 缺失时种一份, `same` 与模板一致时静默跳过, `replace` 用户在提示里选了覆盖, `keep` 保留. 有 tty 时先给一段说明, 再循环问 `1. 直接覆盖 / 2. 先查看 diff / 3. 不要覆盖`: 选 `2` 打差异后回到同一组选项, 无法识别的答复重新问, 读到 EOF 按 `keep` 收尾 (否则会空转). 只有明确回 `1` 才是 `replace`; 无 tty 一律 `keep` 并在 stderr 说明. 交互分支只能用伪终端测, 见 `tests/test-kanban.py` 的 `run_installer_on_a_tty`.
 - `install.sh` 面向用户的输出一律中文; 唯一例外是 stdout 的 `Onevoke installed`, 它是测试和用户脚本都依赖的稳定契约, 不翻译也不加行. diff 用 sed 着色并跟随 `NO_COLOR`: 文件头只按 diff 的第 1, 2 行定位 (`1s` / `2s`), 其余行再按 `@@`, `-`, `+` 的行首着色. 不许改回 `^---` / `^+++` 前缀匹配 —— 规则文件里一条 `---` 被删掉后 diff 行是 `----`, 按前缀会被误判成文件头.
 - 安装测试的 `subprocess.run` 一律显式传 `stdin=subprocess.DEVNULL`, 否则从终端跑测试时会落进交互分支卡住. 入口的三项取值高于分册, 分册在对应条款里显式让位; 改取值语义时必须同步对应分册的让位措辞.
 - 过期入口的判据是正文不引用 `BASE-RULES.md`. 改入口模板时保留这个引用, 否则老用户拿不到升级提示.

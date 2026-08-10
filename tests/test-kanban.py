@@ -784,8 +784,24 @@ printf '%s\\n' '@9'
 
         self.assertEqual(0, returncode, tty)
         self.assertEqual("Onevoke installed\n", stdout)
-        # 覆盖前必须先把差异摆出来, 否则用户是在盲选.
+        # 选之前先说清这是什么文件, 覆盖会失去什么.
         self.assertIn("与本版模板不一致", tty)
+        self.assertIn(str(AGENT_RULES), tty)
+        self.assertIn("请选择 [1/2/3]", tty)
+        # 没要求看 diff 就不刷屏.
+        self.assertNotIn("@@", tty)
+        self.assertIn("已用本版模板覆盖", tty)
+        self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
+
+    def test_installer_shows_the_diff_then_asks_again(self) -> None:
+        install_home, entry = self.seed_customized_entry("prompt-diff-home")
+
+        # 2 只看差异, 不算答复; 看完回到同一组选项再选 1.
+        returncode, stdout, tty = self.run_installer_on_a_tty(install_home, "2\n1\n")
+
+        self.assertEqual(0, returncode, tty)
+        self.assertEqual("Onevoke installed\n", stdout)
+        self.assertEqual(2, tty.count("请选择 [1/2/3]"))
         # 删除行标红, 新增行标绿, 位置行标青, 文件头加粗.
         self.assertIn("\033[31m-# 我的定制\033[0m", tty)
         self.assertIn("\033[32m+", tty)
@@ -794,8 +810,6 @@ printf '%s\\n' '@9'
         self.assertIn("\033[1m+++ ", tty)
         # 内容行 `---` 是删除行, 该标红, 不该被当成文件头加粗.
         self.assertIn("\033[31m----\033[0m", tty)
-        self.assertIn("请选择 [1/2]", tty)
-        self.assertIn("已用本版模板覆盖", tty)
         self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
 
     def test_installer_honours_no_color_for_the_diff(self) -> None:
@@ -803,7 +817,7 @@ printf '%s\\n' '@9'
         before = entry.read_text(encoding="utf-8")
 
         returncode, _, tty = self.run_installer_on_a_tty(
-            install_home, "2\n", no_color=True
+            install_home, "2\n3\n", no_color=True
         )
 
         self.assertEqual(0, returncode, tty)
@@ -818,24 +832,30 @@ printf '%s\\n' '@9'
         install_home, entry = self.seed_customized_entry("prompt-keep-home")
         before = entry.read_text(encoding="utf-8")
 
-        returncode, stdout, tty = self.run_installer_on_a_tty(install_home, "2\n")
+        returncode, stdout, tty = self.run_installer_on_a_tty(install_home, "3\n")
 
         self.assertEqual(0, returncode, tty)
         self.assertEqual("Onevoke installed\n", stdout)
-        self.assertIn("请选择 [1/2]", tty)
+        self.assertIn("请选择 [1/2/3]", tty)
         self.assertIn("保持原样", tty)
         self.assertEqual(before, entry.read_text(encoding="utf-8"))
 
-    def test_installer_treats_an_unrecognised_answer_as_keep(self) -> None:
+    def test_installer_reasks_on_an_unrecognised_answer_and_keeps_on_eof(self) -> None:
         install_home, entry = self.seed_customized_entry("prompt-junk-home")
         before = entry.read_text(encoding="utf-8")
 
-        # 回车, 乱敲, 直接 EOF (Ctrl-D) 都不能被当成同意覆盖.
-        for answer in ("\n", "y\n", "\x04"):
-            with self.subTest(answer=answer):
+        # 回车和乱敲都不算答复, 重新问一遍; 直接 EOF (Ctrl-D) 按不覆盖收尾.
+        cases = {
+            "空行后 EOF": ("\n\x04", 2),
+            "乱敲后 EOF": ("y\n\x04", 2),
+            "直接 EOF": ("\x04", 1),
+        }
+        for name, (answer, prompts) in cases.items():
+            with self.subTest(name):
                 returncode, _, tty = self.run_installer_on_a_tty(install_home, answer)
 
                 self.assertEqual(0, returncode, tty)
+                self.assertEqual(prompts, tty.count("请选择 [1/2/3]"), tty)
                 self.assertEqual(before, entry.read_text(encoding="utf-8"))
                 self.assertNotIn("已用本版模板覆盖", tty)
 
