@@ -63,10 +63,20 @@ class OnevokeCommandTest(unittest.TestCase):
                 "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
             )
             self.install_fake_codex_memsearch_hooks()
+            self.fake_command(
+                "git",
+                "#!/bin/sh\n"
+                "if [ \"$1\" = '-C' ] && [ \"$3\" = 'rev-parse' ]; then\n"
+                "  printf '%s\\n' '177d23b0e76f4a3a4a8bb920bd1bed421bb664d8'\n"
+                "fi\n",
+            )
 
     def install_fake_codex_memsearch_hooks(self) -> Path:
-        hooks_dir = self.root / "codex-memsearch-hooks"
-        hooks_dir.mkdir(exist_ok=True)
+        hooks_dir = (
+            self.root / "verified-memsearch-source" / "plugins" / "codex" / "hooks"
+        )
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        (hooks_dir / "common.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         events = {
             "SessionStart": "session-start.sh",
             "UserPromptSubmit": "user-prompt-submit.sh",
@@ -85,6 +95,58 @@ class OnevokeCommandTest(unittest.TestCase):
         hooks_file.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
         return hooks_file
 
+    def install_fake_claude_memsearch_plugin(self, version: str) -> Path:
+        plugin = self.root / f"claude-memsearch-{version}"
+        (plugin / ".claude-plugin").mkdir(parents=True)
+        (plugin / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "memsearch", "version": version}),
+            encoding="utf-8",
+        )
+        hooks_dir = plugin / "hooks"
+        hooks_dir.mkdir()
+        (hooks_dir / "common.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        hooks = {}
+        for event, name in {
+            "SessionStart": "session-start.sh",
+            "UserPromptSubmit": "user-prompt-submit.sh",
+            "Stop": "stop.sh",
+        }.items():
+            script = hooks_dir / name
+            script.write_text(f"#!/bin/sh\n# {event} hook:\n", encoding="utf-8")
+            script.chmod(0o755)
+            hooks[event] = [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"bash ${{CLAUDE_PLUGIN_ROOT}}/hooks/{name}",
+                        }
+                    ]
+                }
+            ]
+        (hooks_dir / "hooks.json").write_text(
+            json.dumps({"hooks": hooks}), encoding="utf-8"
+        )
+        settings = self.home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(
+            json.dumps({"enabledPlugins": {"memsearch@memsearch-plugins": True}}),
+            encoding="utf-8",
+        )
+        installed = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_text(
+            json.dumps(
+                {
+                    "plugins": {
+                        "memsearch@memsearch-plugins": [{"installPath": str(plugin)}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return plugin
+
     def install_fake_memsearch_tools(
         self,
         revision: str,
@@ -102,8 +164,6 @@ class OnevokeCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
         memsearch_template.chmod(0o755)
-        hooks_template = self.install_fake_codex_memsearch_hooks()
-        hooks_template.unlink()
         self.env.update(
             {
                 "UV_LOG": str(uv_log),
@@ -128,7 +188,9 @@ class OnevokeCommandTest(unittest.TestCase):
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": f"bash {self.root / 'codex-memsearch-hooks' / name}",
+                                        "command": (
+                                            f"bash {self.root / 'memsearch-source' / 'plugins' / 'codex' / 'hooks' / name}"
+                                        ),
                                     }
                                 ]
                             }
@@ -167,9 +229,19 @@ class OnevokeCommandTest(unittest.TestCase):
             "fi\n"
             "printf '%s\\n' \"$*\" > \"$GIT_LOG\"\n"
             "for destination in \"$@\"; do :; done\n"
-            "/bin/mkdir -p \"$destination/plugins/codex/scripts\"\n"
+            "/bin/mkdir -p \"$destination/plugins/codex/scripts\" "
+            "\"$destination/plugins/codex/hooks\"\n"
             "printf '%s\\n' '#!/bin/sh' > "
-            "\"$destination/plugins/codex/scripts/install.sh\"\n",
+            "\"$destination/plugins/codex/scripts/install.sh\"\n"
+            "printf '%s\\n' '#!/bin/sh' > "
+            "\"$destination/plugins/codex/hooks/common.sh\"\n"
+            "printf '%s\\n' '#!/bin/sh' '# SessionStart hook:' > "
+            "\"$destination/plugins/codex/hooks/session-start.sh\"\n"
+            "printf '%s\\n' '#!/bin/sh' '# UserPromptSubmit hook:' > "
+            "\"$destination/plugins/codex/hooks/user-prompt-submit.sh\"\n"
+            "printf '%s\\n' '#!/bin/sh' '# Stop hook:' > "
+            "\"$destination/plugins/codex/hooks/stop.sh\"\n"
+            "/bin/chmod +x \"$destination/plugins/codex/hooks/\"*.sh\n",
         )
         bash_body = "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$BASH_LOG\"\n"
         if install_hooks:
@@ -317,6 +389,48 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual({role: "grok" for role in ROLES}, config["reviewers"])
         self.assertFalse(config["memsearch"]["enabled"])
 
+    def test_welcome_repairs_wrong_memsearch_version_with_only_grok(self) -> None:
+        for name in (
+            "onevoke",
+            "kanban",
+            "codex-review.sh",
+            "grok-review.sh",
+            "merge-worktree-memory.py",
+            "grok",
+        ):
+            self.fake_command(name)
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 9.9.9'\n"
+        )
+        uv_log = self.root / "uv.log"
+        template = self.root / "memsearch-template"
+        template.write_text(
+            "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n",
+            encoding="utf-8",
+        )
+        template.chmod(0o755)
+        self.env.update({"UV_LOG": str(uv_log), "MEMSEARCH_TEMPLATE": str(template)})
+        self.fake_command(
+            "uv",
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" > \"$UV_LOG\"\n"
+            "/bin/cp \"$MEMSEARCH_TEMPLATE\" \"$PATH/memsearch\"\n",
+        )
+
+        # Grok 执行和四个 Reviewer; 拒绝 tmux; 修正 CLI; 保存.
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n2\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch CLI 版本不受支持, 是否修正为 0.4.15?", output)
+        self.assertEqual(
+            "tool install -U memsearch[onnx]==0.4.15",
+            uv_log.read_text(encoding="utf-8").strip(),
+        )
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
+
     def test_doctor_rejects_stale_memsearch_artifacts(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
         self.fake_command(
@@ -347,57 +461,49 @@ class OnevokeCommandTest(unittest.TestCase):
         self.fake_command(
             "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
         )
-        plugin = self.root / "claude-memsearch"
-        (plugin / ".claude-plugin").mkdir(parents=True)
-        (plugin / ".claude-plugin" / "plugin.json").write_text(
-            json.dumps({"name": "memsearch", "version": "0.4.15"}),
-            encoding="utf-8",
+        self.install_fake_claude_memsearch_plugin("0.4.15")
+
+        result = self.run_command("doctor")
+
+        self.assertIn("Claude 插件: 已接入", result.stderr)
+
+    def test_doctor_rejects_old_claude_plugin_version(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
         )
+        self.install_fake_claude_memsearch_plugin("0.4.14")
+
+        result = self.run_command("doctor")
+
+        self.assertIn("Claude 插件: 未接入", result.stderr)
+
+    def test_doctor_rejects_unverified_same_name_codex_hooks(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
+        )
+        hooks_dir = self.root / "unrelated-hooks"
+        hooks_dir.mkdir()
         hooks = {}
-        (plugin / "hooks").mkdir()
         for event, name in {
             "SessionStart": "session-start.sh",
             "UserPromptSubmit": "user-prompt-submit.sh",
             "Stop": "stop.sh",
         }.items():
-            script = plugin / "hooks" / name
+            script = hooks_dir / name
             script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             script.chmod(0o755)
             hooks[event] = [
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": f"bash ${{CLAUDE_PLUGIN_ROOT}}/hooks/{name}",
-                        }
-                    ]
-                }
+                {"hooks": [{"type": "command", "command": f"bash {script}"}]}
             ]
-        (plugin / "hooks" / "hooks.json").write_text(
-            json.dumps({"hooks": hooks}), encoding="utf-8"
-        )
-        settings = self.home / ".claude" / "settings.json"
-        settings.parent.mkdir(parents=True)
-        settings.write_text(
-            json.dumps({"enabledPlugins": {"memsearch@memsearch-plugins": True}}),
-            encoding="utf-8",
-        )
-        installed = self.home / ".claude" / "plugins" / "installed_plugins.json"
-        installed.parent.mkdir(parents=True)
-        installed.write_text(
-            json.dumps(
-                {
-                    "plugins": {
-                        "memsearch@memsearch-plugins": [{"installPath": str(plugin)}]
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
+        hooks_file = self.home / ".codex" / "hooks.json"
+        hooks_file.parent.mkdir(parents=True)
+        hooks_file.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
 
         result = self.run_command("doctor")
 
-        self.assertIn("Claude 插件: 已接入", result.stderr)
+        self.assertIn("Codex 插件: 未接入", result.stderr)
 
     def test_doctor_fails_without_any_agent_or_reviewer(self) -> None:
         for name in (

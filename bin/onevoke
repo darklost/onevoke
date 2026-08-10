@@ -42,6 +42,11 @@ MEMSEARCH_HOOKS = {
     "UserPromptSubmit": "user-prompt-submit.sh",
     "Stop": "stop.sh",
 }
+MEMSEARCH_HOOK_MARKERS = {
+    "session-start.sh": "# SessionStart hook:",
+    "user-prompt-submit.sh": "# UserPromptSubmit hook:",
+    "stop.sh": "# Stop hook:",
+}
 
 
 class OnevokeError(Exception):
@@ -175,15 +180,15 @@ def resolve_hook_script(command: object, expected: str, root: Path | None) -> Pa
     return None
 
 
-def hooks_ready(raw: object, root: Path | None = None) -> bool:
+def hooks_directory(raw: object, root: Path | None = None) -> Path | None:
     if not isinstance(raw, dict) or not isinstance(raw.get("hooks"), dict):
-        return False
+        return None
     resolved: list[Path] = []
     hook_events = raw["hooks"]
     for event, expected in MEMSEARCH_HOOKS.items():
         registrations = hook_events.get(event)
         if not isinstance(registrations, list):
-            return False
+            return None
         script = None
         for registration in registrations:
             if not isinstance(registration, dict):
@@ -200,14 +205,36 @@ def hooks_ready(raw: object, root: Path | None = None) -> bool:
             if script:
                 break
         if not script:
-            return False
+            return None
         resolved.append(script)
-    return len({script.parent for script in resolved}) == 1
+    directories = {script.parent for script in resolved}
+    return resolved[0].parent if len(directories) == 1 else None
+
+
+def hook_scripts_identified(hooks_dir: Path) -> bool:
+    if not (hooks_dir / "common.sh").is_file():
+        return False
+    for name, marker in MEMSEARCH_HOOK_MARKERS.items():
+        try:
+            if marker not in (hooks_dir / name).read_text(encoding="utf-8"):
+                return False
+        except (OSError, UnicodeError):
+            return False
+    return True
 
 
 def codex_memsearch_ready() -> bool:
     hooks_file = Path.home() / ".codex" / "hooks.json"
-    return hooks_ready(read_json_file(hooks_file))
+    hooks_dir = hooks_directory(read_json_file(hooks_file))
+    if (
+        hooks_dir is None
+        or hooks_dir.name != "hooks"
+        or hooks_dir.parent.name != "codex"
+        or hooks_dir.parent.parent.name != "plugins"
+    ):
+        return False
+    source = hooks_dir.parent.parent.parent
+    return verify_memsearch_source(source, quiet=True)
 
 
 def claude_memsearch_ready() -> bool:
@@ -230,9 +257,17 @@ def claude_memsearch_ready() -> bool:
             continue
         root = Path(record["installPath"]).expanduser()
         manifest = read_json_file(root / ".claude-plugin" / "plugin.json")
-        if not isinstance(manifest, dict) or manifest.get("name") != "memsearch":
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("name") != "memsearch"
+            or manifest.get("version") != MEMSEARCH_VERSION
+        ):
             continue
-        if hooks_ready(read_json_file(root / "hooks" / "hooks.json"), root):
+        hooks_dir = hooks_directory(read_json_file(root / "hooks" / "hooks.json"), root)
+        if (
+            hooks_dir == (root / "hooks").resolve()
+            and hook_scripts_identified(hooks_dir)
+        ):
             return True
     return False
 
@@ -354,10 +389,14 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
     return selected == "yes"
 
 
-def verify_memsearch_source(source: Path) -> bool:
-    if not shutil.which("git"):
-        warning("未找到 git, 无法校验 MemSearch 源码版本.")
+def verify_memsearch_source(source: Path, *, quiet: bool = False) -> bool:
+    def reject(message: str) -> bool:
+        if not quiet:
+            warning(message)
         return False
+
+    if not shutil.which("git"):
+        return reject("未找到 git, 无法校验 MemSearch 源码版本.")
     result = subprocess.run(
         ["git", "-C", str(source), "rev-parse", "HEAD"],
         text=True,
@@ -366,11 +405,10 @@ def verify_memsearch_source(source: Path) -> bool:
     )
     revision = result.stdout.strip()
     if result.returncode != 0 or revision != MEMSEARCH_COMMIT:
-        warning(
+        return reject(
             f"MemSearch 源码校验失败: 预期 {MEMSEARCH_COMMIT}, "
             f"实际 {revision or '无法读取'}"
         )
-        return False
     tag = subprocess.run(
         [
             "git",
@@ -385,11 +423,10 @@ def verify_memsearch_source(source: Path) -> bool:
     )
     tag_revision = tag.stdout.strip()
     if tag.returncode != 0 or tag_revision != MEMSEARCH_COMMIT:
-        warning(
+        return reject(
             f"MemSearch tag 校验失败: v{MEMSEARCH_VERSION} 应指向 "
             f"{MEMSEARCH_COMMIT}, 实际 {tag_revision or '无法读取'}"
         )
-        return False
     status = subprocess.run(
         [
             "git",
@@ -405,8 +442,7 @@ def verify_memsearch_source(source: Path) -> bool:
         check=False,
     )
     if status.returncode != 0 or status.stdout:
-        warning("MemSearch 源码工作树不干净, 拒绝执行插件安装器.")
-        return False
+        return reject("MemSearch 源码工作树不干净, 拒绝执行插件安装器.")
     return True
 
 
@@ -603,9 +639,12 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
             config["memsearch"]["enabled"] = False
     else:
         warning("当前可用 Agent 没有 Onevoke 支持的 MemSearch 插件.")
-        if not memory["cli"] and ask_yes_no(
-            "MemSearch CLI 未安装, 是否仍然只安装 CLI?", default=False
-        ):
+        cli_prompt = (
+            "MemSearch CLI 未安装, 是否仍然只安装 CLI?"
+            if not memory["cli"]
+            else f"MemSearch CLI 版本不受支持, 是否修正为 {MEMSEARCH_VERSION}?"
+        )
+        if not memory["cli_ready"] and ask_yes_no(cli_prompt, default=False):
             if install_memsearch_cli():
                 success("MemSearch CLI 已安装, 但当前 Agent 没有对应插件.")
         config["memsearch"]["enabled"] = False
