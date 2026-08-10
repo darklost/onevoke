@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -404,29 +405,85 @@ def completion_metadata(text: str) -> str:
     )
 
 
-def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -> None:
-    if entry is not None:
-        ensure_no_symlinks_under_board(board_root_from_entry(entry), entry.path)
-        ensure_no_symlinks_under_board(board_root_from_entry(entry), path)
-    elif path.is_symlink():
-        raise KanbanError(f"任务文档不得是符号链接: {path}")
-    if path.exists() and path.is_symlink():
-        raise KanbanError(f"任务文档不得是符号链接: {path}")
-    handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    temp_path = Path(temp_name)
+def open_dir_nofollow(root: Path, directory: Path) -> int:
+    """打开目录 fd, 路径上每一级都不跟随软链."""
+    ensure_no_symlinks_under_board(root, directory)
+    root_resolved = root.resolve(strict=False)
+    relative = os.path.relpath(str(directory), str(root_resolved))
+    parts = [] if relative in ("", ".") else list(Path(relative).parts)
+    dir_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as file:
-            file.write(text)
-        if path.exists() and not path.is_symlink():
-            os.chmod(temp_path, path.stat().st_mode)
-        if path.parent.is_symlink():
-            raise KanbanError(f"路径分量不得是符号链接: {path.parent}")
-        os.replace(temp_path, path)
-        if path.is_symlink():
-            raise KanbanError(f"写入后任务文档变成符号链接: {path}")
+        for part in parts:
+            next_fd = openat_nofollow(
+                dir_fd, part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            os.close(dir_fd)
+            dir_fd = next_fd
+        return dir_fd
     except BaseException:
-        temp_path.unlink(missing_ok=True)
+        os.close(dir_fd)
         raise
+
+
+def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -> None:
+    """通过父目录 fd 创建临时文件并 replace, 避免校验后父路径被换成软链."""
+    if entry is None:
+        if path.is_symlink():
+            raise KanbanError(f"任务文档不得是符号链接: {path}")
+        handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as file:
+                file.write(text)
+            if path.exists() and not path.is_symlink():
+                os.chmod(temp_path, path.stat().st_mode)
+            os.replace(temp_path, path)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+        return
+
+    root = board_root_from_entry(entry)
+    parent_fd = open_dir_nofollow(root, path.parent)
+    temp_name = f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    temp_fd = None
+    try:
+        temp_fd = openat_nofollow(
+            parent_fd, temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        )
+        with os.fdopen(temp_fd, "w", encoding="utf-8", newline="\n") as file:
+            temp_fd = None
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        # 若目标已存在, 先用 O_NOFOLLOW 确认仍是普通文件再替换.
+        try:
+            existing = openat_nofollow(parent_fd, path.name, os.O_RDONLY)
+        except KanbanError:
+            existing = None
+        except OSError as error:
+            if error.errno != getattr(os, "ENOENT", 2):
+                raise KanbanError(f"无法打开任务文档: {path}: {error}") from error
+            existing = None
+        if existing is not None:
+            try:
+                info = os.fstat(existing)
+                if not stat.S_ISREG(info.st_mode):
+                    raise KanbanError(f"任务文档必须是普通文件: {path}")
+                os.chmod(path.name, stat.S_IMODE(info.st_mode), dir_fd=parent_fd)
+            finally:
+                os.close(existing)
+        os.replace(temp_name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except BaseException:
+        if temp_fd is not None:
+            os.close(temp_fd)
+        try:
+            os.unlink(temp_name, dir_fd=parent_fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(parent_fd)
 
 
 def validate_ready(entry: Entry, text: str) -> None:

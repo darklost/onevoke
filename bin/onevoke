@@ -180,29 +180,13 @@ def _claude_rules_import_present(text: str, entry: Path) -> bool:
     return False
 
 
-def _merged_rules_present(text: str) -> bool:
-    """Codex/Grok 合并文件须包含当前入口的关键章节, 拒绝两行残片假接入."""
-    body = _strip_comments_and_fences(text)
-    required = (
-        "# Onevoke 全局工作流规则",
-        "默认取值",
-        "BASE-RULES.md",
-        "GIT-RULES.md",
-        "看板任务完成",
-    )
-    if any(marker not in body for marker in required):
+def _merged_rules_present(text: str, entry: Path) -> bool:
+    """Codex/Grok 合并文件必须包含当前安装入口的完整正文, 拒绝旧版/残片."""
+    try:
+        expected = entry.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
         return False
-    base_negated = re.compile(
-        r"(?:"
-        r"(不|勿|别|没有|未|禁止|跳过).{0,16}BASE-RULES\.md"
-        r"|BASE-RULES\.md.{0,16}(不|勿|别|没有|未|禁止|跳过|禁用|停用|废弃)"
-        r")"
-    )
-    # 若唯一出现的 BASE-RULES 引用都是否定句, 仍判未接入.
-    base_lines = [line for line in body.splitlines() if "BASE-RULES.md" in line]
-    if not base_lines:
-        return False
-    if all(base_negated.search(line.strip()) for line in base_lines):
+    if not expected or expected not in _strip_comments_and_fences(text):
         return False
     return True
 
@@ -226,7 +210,7 @@ def rules_integration(agent: str) -> tuple[bool, str]:
     if agent == "claude":
         integrated = _claude_rules_import_present(text, entry)
     else:
-        integrated = _merged_rules_present(text)
+        integrated = _merged_rules_present(text, entry)
     if integrated:
         return True, str(target)
     return False, f"{target} 未导入或合并 ONEVOKE-AGENTS.md"

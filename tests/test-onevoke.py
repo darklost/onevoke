@@ -869,7 +869,16 @@ class OnevokeCommandTest(unittest.TestCase):
         onevoke = load_onevoke_module()
         entry = self.home / ".agents" / "ONEVOKE-AGENTS.md"
         entry.parent.mkdir(parents=True)
-        entry.write_text("# Onevoke 全局工作流规则\n", encoding="utf-8")
+        current_entry = (
+            "# Onevoke 全局工作流规则\n\n"
+            "## 默认取值\n\n"
+            "| 分册 | 说明 |\n"
+            "| `BASE-RULES.md` | 通用条款 |\n"
+            "| `GIT-RULES.md` | Git 工作流 |\n\n"
+            "### 看板任务完成\n\n"
+            "- 先报告并等确认, 确认后才合回 `develop`.\n"
+        )
+        entry.write_text(current_entry, encoding="utf-8")
 
         cases = {
             "codex": (
@@ -880,16 +889,11 @@ class OnevokeCommandTest(unittest.TestCase):
                     "不要使用 BASE-RULES.md\n"
                     "TODO 占位 BASE-RULES.md\n"
                     "```md\n# Onevoke 全局工作流规则\n`BASE-RULES.md`\n```\n"
-                ),
-                (
                     "# Onevoke 全局工作流规则\n"
                     "## 默认取值\n"
-                    "| 分册 | 说明 |\n"
-                    "| `BASE-RULES.md` | 通用条款 |\n"
-                    "| `GIT-RULES.md` | Git 工作流 |\n"
-                    "### 看板任务完成\n"
-                    "- 先报告再合回 develop\n"
+                    "合回初始分支\n"
                 ),
+                current_entry + "\n## 我自己的规则\n",
             ),
             "claude": (
                 self.home / ".claude" / "CLAUDE.md",
@@ -909,13 +913,7 @@ class OnevokeCommandTest(unittest.TestCase):
                     "BASE-RULES.md 已禁用\n"
                     "残留 BASE-RULES.md 但没有入口标题\n"
                 ),
-                (
-                    "# Onevoke 全局工作流规则\n"
-                    "## 默认取值\n"
-                    "分册见 ~/.agents/BASE-RULES.md 与 GIT-RULES.md\n"
-                    "### 看板任务完成\n"
-                    "- 先报告\n"
-                ),
+                current_entry,
             ),
         }
 

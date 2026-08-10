@@ -38,6 +38,8 @@ ENTRY_MARKER = re.compile(
 )
 SOURCE_MARKER = re.compile(rb"^<!-- merged-worktree-memory source:.* -->$")
 # Stop hook 可能在合并窗口内继续追加; 两次读取一致才视为来源稳定.
+# 注意: 进程成功返回之后的写入需要 MemSearch Stop hook 与清理流程的协作封口
+# 协议才能绝对消除, 本脚本只能 fail-closed 本进程可观测窗口; 见任务范围.
 SOURCE_STABLE_ATTEMPTS = 5
 SOURCE_STABLE_DELAY_SECONDS = 0.1
 
