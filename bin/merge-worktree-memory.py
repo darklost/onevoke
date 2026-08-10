@@ -191,7 +191,21 @@ def scan_dirty_files(directory: Path) -> tuple[int, int]:
     return scanned, dirty
 
 
+def source_memory_identity(source_memory: Path) -> tuple[int, int]:
+    """返回来源 memory 目录的 (dev, ino); 缺失/软链/非常规路径直接失败."""
+    if source_memory.is_symlink():
+        die(f"source memory must not be a symlink: {source_memory}")
+    try:
+        info = source_memory.stat()
+    except OSError as error:
+        die(f"source memory disappeared or unreadable: {source_memory}: {error}")
+    if not source_memory.is_dir():
+        die(f"source memory is not a directory: {source_memory}")
+    return info.st_dev, info.st_ino
+
+
 def list_source_memory_files(source_memory: Path) -> list[Path]:
+    source_memory_identity(source_memory)
     return sorted(
         path
         for path in source_memory.glob("*.md")
@@ -200,10 +214,15 @@ def list_source_memory_files(source_memory: Path) -> list[Path]:
 
 
 def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
-    """目录成员与文件内容均须连续两次一致; 新增/删除/改名/改写都视为不稳定."""
+    """目录身份、成员与文件内容均须连续两次一致."""
     last_error = "source memory files were unstable"
+    expected_identity = source_memory_identity(source_memory)
     for attempt in range(1, SOURCE_STABLE_ATTEMPTS + 1):
         try:
+            if source_memory_identity(source_memory) != expected_identity:
+                die(
+                    f"source memory directory was replaced: {source_memory}"
+                )
             names_first = [path.name for path in list_source_memory_files(source_memory)]
             first: dict[Path, bytes] = {}
             for path in list_source_memory_files(source_memory):
@@ -216,6 +235,10 @@ def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
                 time.sleep(SOURCE_STABLE_DELAY_SECONDS)
                 continue
             time.sleep(SOURCE_STABLE_DELAY_SECONDS)
+            if source_memory_identity(source_memory) != expected_identity:
+                die(
+                    f"source memory directory was replaced while reading: {source_memory}"
+                )
             names_second = [path.name for path in list_source_memory_files(source_memory)]
             if names_second != names_first:
                 last_error = (
@@ -243,9 +266,18 @@ def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
     die(last_error)
 
 
-def assert_source_unchanged(source_memory: Path, snapshots: dict[Path, bytes]) -> None:
-    """合并后再核对目录成员与内容; 任一变化都失败, 阻止清理 worktree."""
+def assert_source_unchanged(
+    source_memory: Path,
+    snapshots: dict[Path, bytes],
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
+    """合并后再核对目录身份、成员与内容; 任一变化都失败, 阻止清理 worktree."""
     try:
+        identity = source_memory_identity(source_memory)
+        if expected_identity is not None and identity != expected_identity:
+            die(
+                f"source memory directory was replaced after merge: {source_memory}"
+            )
         current_names = {path.name for path in list_source_memory_files(source_memory)}
     except OSError as error:
         die(f"source memory unreadable after merge: {error}")
@@ -326,6 +358,7 @@ def merge_files(
     source_memory: Path,
     snapshots: dict[Path, bytes],
     dry_run: bool,
+    source_identity: tuple[int, int] | None = None,
 ) -> None:
     target_memory = Path(target_root) / ".memsearch" / "memory"
     if not dry_run:
@@ -390,7 +423,7 @@ def merge_files(
         )
 
     if not dry_run:
-        assert_source_unchanged(source_memory, snapshots)
+        assert_source_unchanged(source_memory, snapshots, source_identity)
 
 
 def merge(source_root: str, target_root: str, dry_run: bool) -> None:
@@ -403,10 +436,13 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
 
     # 源 worktree 没有 .memsearch/memory 时是正常空操作: 常见于未装 memsearch,
     # 或已装但本 worktree 尚未产生记忆. 不创建任何目录, 以 0 退出.
-    if not source_memory.is_dir():
+    if not source_memory.is_dir() or source_memory.is_symlink():
+        if source_memory.is_symlink():
+            die(f"source memory must not be a symlink: {source_memory}")
         print(f"Nothing to merge: {source_memory} does not exist")
         return
 
+    source_identity = source_memory_identity(source_memory)
     # 目录已存在时即使当前为空也要做稳定快照: 避免 Stop hook 稍后才创建首个文件
     # 时被误判为空操作成功, 随后 worktree 被清理导致首条记录丢失.
     snapshots = read_stable_source_files(source_memory)
@@ -415,12 +451,14 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         if dry_run:
             print(f"Nothing to merge: no memory files in {source_memory}")
             return
-        assert_source_unchanged(source_memory, snapshots)
+        assert_source_unchanged(source_memory, snapshots, source_identity)
         print(f"Nothing to merge: no memory files in {source_memory}")
         return
 
     if dry_run:
-        merge_files(source_root, target_root, source_memory, snapshots, True)
+        merge_files(
+            source_root, target_root, source_memory, snapshots, True, source_identity
+        )
         return
 
     state_dir = Path(target_root) / ".memsearch"
@@ -429,12 +467,15 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # 持锁后再采一次稳定快照, 避免等待锁期间 Stop hook 已写入新条目或新文件.
+        source_identity = source_memory_identity(source_memory)
         snapshots = read_stable_source_files(source_memory)
         if not snapshots:
-            assert_source_unchanged(source_memory, snapshots)
+            assert_source_unchanged(source_memory, snapshots, source_identity)
             print(f"Nothing to merge: no memory files in {source_memory}")
             return
-        merge_files(source_root, target_root, source_memory, snapshots, False)
+        merge_files(
+            source_root, target_root, source_memory, snapshots, False, source_identity
+        )
 
 
 def main() -> int:

@@ -3,6 +3,7 @@
 import importlib.util
 import fcntl
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -347,12 +348,25 @@ class MergeTest(unittest.TestCase):
         self.assertIn("Nothing to merge", result.stdout)
         self.assertEqual(b"### 09:30\n- kept\n", (self.target_memory / "keep.md").read_bytes())
 
+    def test_source_memory_disappearance_fails_closed(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- first\n")
+        shutil.rmtree(self.source_memory)
+
+        with self.assertRaises(SystemExit) as raised:
+            merger.read_stable_source_files(self.source_memory)
+
+        self.assertEqual(1, raised.exception.code)
+
     def test_empty_source_dir_that_gains_a_file_during_check_fails(self) -> None:
         original_assert = merger.assert_source_unchanged
 
-        def create_then_assert(source_memory: Path, snapshots: dict[Path, bytes]) -> None:
+        def create_then_assert(
+            source_memory: Path,
+            snapshots: dict[Path, bytes],
+            expected_identity: tuple[int, int] | None = None,
+        ) -> None:
             (source_memory / "late.md").write_bytes(b"### 09:30\n- late first file\n")
-            original_assert(source_memory, snapshots)
+            original_assert(source_memory, snapshots, expected_identity)
 
         with mock.patch.object(
             merger, "assert_source_unchanged", side_effect=create_then_assert
@@ -394,9 +408,13 @@ class MergeTest(unittest.TestCase):
         self.write_source("a.md", b"### 09:30\n- first\n")
         original_assert = merger.assert_source_unchanged
 
-        def add_file_then_assert(source_memory: Path, snapshots: dict[Path, bytes]) -> None:
+        def add_file_then_assert(
+            source_memory: Path,
+            snapshots: dict[Path, bytes],
+            expected_identity: tuple[int, int] | None = None,
+        ) -> None:
             (source_memory / "b.md").write_bytes(b"### 09:40\n- late file\n")
-            original_assert(source_memory, snapshots)
+            original_assert(source_memory, snapshots, expected_identity)
 
         with mock.patch.object(
             merger, "assert_source_unchanged", side_effect=add_file_then_assert
@@ -440,10 +458,12 @@ class MergeTest(unittest.TestCase):
         original_assert = merger.assert_source_unchanged
 
         def mutate_then_assert(
-            source_memory: Path, snapshots: dict[Path, bytes]
+            source_memory: Path,
+            snapshots: dict[Path, bytes],
+            expected_identity: tuple[int, int] | None = None,
         ) -> None:
             source_file.write_bytes(b"### 09:30\n- first\n### 09:40\n- late\n")
-            original_assert(source_memory, snapshots)
+            original_assert(source_memory, snapshots, expected_identity)
 
         with mock.patch.object(
             merger, "assert_source_unchanged", side_effect=mutate_then_assert

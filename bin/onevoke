@@ -157,7 +157,8 @@ def _strip_comments_and_fences(text: str) -> str:
 
 
 _NEGATION_RE = re.compile(
-    r"(禁用|废弃|停用|不要遵守|勿遵守|不再生效|已失效|请忽略|do not follow)",
+    r"(禁用|废弃|停用|不要遵守|勿遵守|不要使用|未导入|尚未导入|"
+    r"不再生效|已失效|请忽略|do not follow|do not use)",
     flags=re.IGNORECASE,
 )
 
