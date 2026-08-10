@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, NoReturn
+
+from onevoke_config import (
+    EXECUTION_AGENTS,
+    REVIEW_AGENTS,
+    REVIEW_ROLES,
+    ConfigError,
+    config_path,
+    default_config,
+    load_config,
+    save_config,
+)
+
+
+COMMANDS = (
+    "onevoke",
+    "kanban",
+    "codex-review.sh",
+    "grok-review.sh",
+    "merge-worktree-memory.py",
+)
+AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
+MEMSEARCH_VERSION = "0.4.15"
+MEMSEARCH_COMMIT = "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8"
+
+
+class OnevokeError(Exception):
+    pass
+
+
+def color(code: str, text: str) -> str:
+    if os.environ.get("NO_COLOR") or not sys.stderr.isatty():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def warning(text: str) -> None:
+    print(color("1;31", f"[!] {text}"), file=sys.stderr)
+
+
+def success(text: str) -> None:
+    print(color("1;32", f"[OK] {text}"), file=sys.stderr)
+
+
+def find_commands() -> dict[str, str | None]:
+    return {name: shutil.which(name) for name in COMMANDS}
+
+
+def agent_version(command: str) -> str:
+    try:
+        result = subprocess.run(
+            [command, "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "版本检查失败"
+    output = (result.stdout or result.stderr).strip().splitlines()
+    return output[0] if result.returncode == 0 and output else "版本检查失败"
+
+
+def find_agents() -> dict[str, dict[str, str | bool | None]]:
+    agents: dict[str, dict[str, str | bool | None]] = {}
+    for name in EXECUTION_AGENTS:
+        command = shutil.which(name)
+        agents[name] = {
+            "path": command,
+            "version": agent_version(command) if command else None,
+            "execution": True,
+            "review": name in REVIEW_AGENTS,
+            "memsearch": name in ("codex", "claude"),
+        }
+    return agents
+
+
+def rules_integration(agent: str) -> tuple[bool, str]:
+    entry = Path.home() / ".agents" / "ONEVOKE-AGENTS.md"
+    if agent == "codex":
+        target = Path.home() / ".codex" / "AGENTS.md"
+    elif agent == "claude":
+        target = Path.home() / ".claude" / "CLAUDE.md"
+    else:
+        target = Path.home() / ".grok" / "AGENTS.md"
+    if not target.exists() and not target.is_symlink():
+        return False, f"未发现 {target}"
+    try:
+        if target.is_symlink() and target.resolve() == entry.resolve():
+            return True, str(target)
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False, f"无法读取 {target}"
+    if agent == "claude":
+        markers = (str(entry), "~/.agents/ONEVOKE-AGENTS.md")
+        integrated = any(marker in text for marker in markers)
+    else:
+        integrated = (
+            "# Onevoke 全局工作流规则" in text and "BASE-RULES.md" in text
+        )
+    if integrated:
+        return True, str(target)
+    return False, f"{target} 未导入或合并 ONEVOKE-AGENTS.md"
+
+
+def memsearch_state() -> dict[str, bool]:
+    cli = shutil.which("memsearch") is not None
+    hooks_file = Path.home() / ".codex" / "hooks.json"
+    codex_plugin = False
+    if hooks_file.is_file():
+        try:
+            hooks = json.loads(hooks_file.read_text(encoding="utf-8"))
+            text = json.dumps(hooks, ensure_ascii=False)
+            codex_plugin = all(
+                marker in text
+                for marker in ("session-start.sh", "user-prompt-submit.sh", "stop.sh")
+            ) and "memsearch" in text
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+    claude_plugin = (Path.home() / ".claude" / "plugins").exists() and any(
+        path.name == "memsearch" or "memsearch" in path.name
+        for path in (Path.home() / ".claude" / "plugins").glob("**/*")
+    )
+    return {"cli": cli, "codex_plugin": codex_plugin, "claude_plugin": claude_plugin}
+
+
+def print_doctor() -> bool:
+    healthy = True
+    print("Onevoke 环境检查", file=sys.stderr)
+    for name, path in find_commands().items():
+        if path:
+            success(f"{name}: {path}")
+        else:
+            healthy = False
+            warning(f"{name} 不在 PATH. 请把 ~/.local/bin 加入 PATH 后重新打开 shell.")
+    tmux = shutil.which("tmux")
+    if tmux:
+        success(f"tmux: {tmux}")
+    else:
+        print("[-] tmux: 未安装; 可在 welcome 中选择前台启动模式", file=sys.stderr)
+
+    agents = find_agents()
+    print("\nAgent 能力:", file=sys.stderr)
+    for name, state in agents.items():
+        if state["path"]:
+            capabilities = ["执行"]
+            if state["review"]:
+                capabilities.append("审核")
+            if state["memsearch"]:
+                capabilities.append("MemSearch")
+            success(
+                f"{AGENT_LABELS[name]}: {state['version']} "
+                f"({', '.join(capabilities)}; 认证未验证)"
+            )
+        else:
+            print(f"[-] {AGENT_LABELS[name]}: 未安装", file=sys.stderr)
+
+    memory = memsearch_state()
+    print("\nMemSearch:", file=sys.stderr)
+    print(f"  CLI: {'已安装' if memory['cli'] else '未安装'}", file=sys.stderr)
+    print(
+        f"  Codex 插件: {'已接入' if memory['codex_plugin'] else '未接入'}",
+        file=sys.stderr,
+    )
+    print(
+        f"  Claude 插件: {'已接入' if memory['claude_plugin'] else '未接入'}",
+        file=sys.stderr,
+    )
+    try:
+        config = load_config()
+    except ConfigError as error:
+        warning(str(error))
+        healthy = False
+    else:
+        if config["welcome_complete"]:
+            success(f"配置: {config_path()}")
+        else:
+            print(f"[-] 配置: 尚未完成 ({config_path()})", file=sys.stderr)
+    return healthy
+
+
+def ask_choice(prompt: str, choices: list[tuple[str, str]], default: str | None = None) -> str:
+    if not choices:
+        raise OnevokeError(f"没有可选项: {prompt}")
+    while True:
+        print(f"\n{prompt}", file=sys.stderr)
+        for index, (_, label) in enumerate(choices, 1):
+            suffix = " (当前)" if choices[index - 1][0] == default else ""
+            print(f"  {index}. {label}{suffix}", file=sys.stderr)
+        print(f"请选择 [1-{len(choices)}]: ", end="", file=sys.stderr, flush=True)
+        answer = sys.stdin.readline()
+        if not answer:
+            raise OnevokeError("输入已结束, 配置未更改")
+        answer = answer.strip()
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1][0]
+        print("输入无效, 请重新选择.", file=sys.stderr)
+
+
+def ask_yes_no(prompt: str, default: bool = False) -> bool:
+    choices = [("yes", "是"), ("no", "否")]
+    selected = ask_choice(prompt, choices, "yes" if default else "no")
+    return selected == "yes"
+
+
+def verify_memsearch_source(source: Path) -> bool:
+    if not shutil.which("git"):
+        warning("未找到 git, 无法校验 MemSearch 源码版本.")
+        return False
+    result = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    revision = result.stdout.strip()
+    if result.returncode != 0 or revision != MEMSEARCH_COMMIT:
+        warning(
+            f"MemSearch 源码校验失败: 预期 {MEMSEARCH_COMMIT}, "
+            f"实际 {revision or '无法读取'}"
+        )
+        return False
+    return True
+
+
+def install_memsearch_cli() -> bool:
+    if shutil.which("memsearch"):
+        return True
+    if not shutil.which("uv"):
+        warning("未找到 uv, 无法自动安装 MemSearch.")
+        print("请先安装 uv, 再重新运行 onevoke welcome.", file=sys.stderr)
+        return False
+    package = f"memsearch[onnx]=={MEMSEARCH_VERSION}"
+    print(
+        f"即将通过 PyPI 安装 {package}, 首次使用会下载 ONNX 模型.",
+        file=sys.stderr,
+    )
+    result = subprocess.run(["uv", "tool", "install", "-U", package], check=False)
+    if result.returncode != 0 or not shutil.which("memsearch"):
+        warning("MemSearch CLI 安装失败或安装后仍不在 PATH.")
+        return False
+    return True
+
+
+def install_memsearch_for(agent: str) -> bool:
+    if not install_memsearch_cli():
+        return False
+    if agent == "codex":
+        source = Path(
+            os.environ.get(
+                "ONEVOKE_MEMSEARCH_SOURCE",
+                Path.home() / ".local" / "share" / "onevoke" / "memsearch",
+            )
+        ).expanduser()
+        installer = source / "plugins" / "codex" / "scripts" / "install.sh"
+        if not source.exists():
+            if not shutil.which("git"):
+                warning("未找到 git, 无法安装 MemSearch Codex 插件.")
+                return False
+            source.parent.mkdir(parents=True, exist_ok=True)
+            print(f"正在把 MemSearch v{MEMSEARCH_VERSION} 安装到 {source}.", file=sys.stderr)
+            with tempfile.TemporaryDirectory(
+                prefix="memsearch.", dir=source.parent
+            ) as temporary_root:
+                temporary_source = Path(temporary_root) / "source"
+                result = subprocess.run(
+                    [
+                        "git",
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--branch",
+                        f"v{MEMSEARCH_VERSION}",
+                        "https://github.com/zilliztech/memsearch.git",
+                        str(temporary_source),
+                    ],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    warning("MemSearch 源码下载失败.")
+                    return False
+                if not verify_memsearch_source(temporary_source):
+                    return False
+                os.replace(temporary_source, source)
+        elif not verify_memsearch_source(source):
+            return False
+        if not installer.is_file():
+            warning(f"找不到 MemSearch Codex 安装器: {installer}")
+            return False
+        print("Codex 插件会修改 ~/.codex 配置并替换 MemSearch skills.", file=sys.stderr)
+        result = subprocess.run(["bash", str(installer)], check=False)
+        if result.returncode != 0:
+            warning("MemSearch Codex 插件安装失败.")
+            return False
+    elif agent == "claude":
+        warning("Claude 的 MemSearch 插件需要在 Claude Code 内通过 marketplace 安装.")
+        print(
+            "运行 /plugin marketplace add zilliztech/memsearch, "
+            "再运行 /plugin install memsearch.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def install_tmux() -> bool:
+    managers = (
+        ("brew", ["brew", "install", "tmux"]),
+        ("apt-get", ["apt-get", "install", "-y", "tmux"]),
+        ("dnf", ["dnf", "install", "-y", "tmux"]),
+        ("pacman", ["pacman", "-S", "--needed", "--noconfirm", "tmux"]),
+        ("apk", ["apk", "add", "tmux"]),
+    )
+    selected = next((command for name, command in managers if shutil.which(name)), None)
+    if selected is None:
+        warning("没有找到受支持的包管理器, 请手动安装 tmux.")
+        return False
+    if selected[0] != "brew" and hasattr(os, "geteuid") and os.geteuid() != 0:
+        sudo = shutil.which("sudo")
+        if not sudo:
+            warning(f"安装 tmux 需要管理员权限: {' '.join(selected)}")
+            return False
+        selected = [sudo, *selected]
+    print(f"即将运行: {' '.join(selected)}", file=sys.stderr)
+    result = subprocess.run(selected, check=False)
+    if result.returncode != 0 or not shutil.which("tmux"):
+        warning("tmux 安装失败或安装后仍不在 PATH.")
+        return False
+    success("tmux 已安装.")
+    return True
+
+
+def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
+    agents = find_agents()
+    execution_choices = [
+        (name, f"{AGENT_LABELS[name]} ({state['version']})")
+        for name, state in agents.items()
+        if state["path"]
+    ]
+    if not execution_choices:
+        raise OnevokeError("没有发现可执行的 Agent. 请先安装 Codex、Claude 或 Grok.")
+
+    config = default_config()
+    config["kanban_agent"] = ask_choice(
+        "kanban 默认用哪个 Agent 执行任务?",
+        execution_choices,
+        existing["kanban_agent"],
+    )
+
+    review_choices = [
+        (name, f"{AGENT_LABELS[name]} ({agents[name]['version']})")
+        for name in REVIEW_AGENTS
+        if agents[name]["path"]
+    ]
+    if not review_choices:
+        raise OnevokeError("没有发现可用 Reviewer. 请安装 Codex 或 Grok.")
+    for role in REVIEW_ROLES:
+        config["reviewers"][role] = ask_choice(
+            f"{role} 使用哪个 Reviewer?", review_choices, existing["reviewers"][role]
+        )
+
+    if shutil.which("tmux"):
+        launcher_choices = [("tmux", "tmux 新窗口"), ("foreground", "当前终端前台运行")]
+        config["launcher"] = ask_choice(
+            "kanban start 使用哪种启动方式?", launcher_choices, existing["launcher"]
+        )
+    else:
+        warning("未安装 tmux.")
+        if ask_yes_no("是否现在安装 tmux?", default=False):
+            if install_tmux():
+                config["launcher"] = "tmux"
+            elif ask_yes_no("tmux 未安装成功, 是否改用当前终端前台模式?", default=True):
+                config["launcher"] = "foreground"
+            else:
+                raise OnevokeError("没有可用启动方式, 配置未更改")
+        else:
+            config["launcher"] = "foreground"
+            print("已选择当前终端前台运行模式.", file=sys.stderr)
+
+    selected_agent = config["kanban_agent"]
+    integrated, detail = rules_integration(selected_agent)
+    if integrated:
+        success(f"{AGENT_LABELS[selected_agent]} 已接入 Onevoke 规则: {detail}")
+    else:
+        warning(f"{AGENT_LABELS[selected_agent]} 尚未接入 Onevoke 规则: {detail}")
+        print("请按 README 的接入章节配置, welcome 不会覆盖你的全局规则文件.", file=sys.stderr)
+
+    memory = memsearch_state()
+    supported_memory_agents = [
+        name for name in ("codex", "claude") if agents[name]["path"]
+    ]
+    ready_memory_agents = [
+        name for name in supported_memory_agents if memory.get(f"{name}_plugin", False)
+    ]
+    memory_agent = None
+    if selected_agent in ready_memory_agents:
+        memory_agent = selected_agent
+    elif ready_memory_agents:
+        memory_agent = ready_memory_agents[0]
+    elif selected_agent in supported_memory_agents:
+        memory_agent = selected_agent
+    elif supported_memory_agents:
+        memory_agent = supported_memory_agents[0]
+    memory_ready = memory["cli"] and bool(ready_memory_agents)
+    if memory_ready:
+        config["memsearch"]["enabled"] = True
+        success(
+            f"MemSearch CLI 和 {AGENT_LABELS[memory_agent]} 插件均可用."
+        )
+    elif memory_agent:
+        if ask_yes_no("MemSearch 未完整安装, 是否现在安装或显示接入步骤?", default=False):
+            config["memsearch"]["enabled"] = install_memsearch_for(memory_agent)
+        else:
+            config["memsearch"]["enabled"] = False
+    else:
+        warning("当前可用 Agent 没有 Onevoke 支持的 MemSearch 插件.")
+        if not memory["cli"] and ask_yes_no(
+            "MemSearch CLI 未安装, 是否仍然只安装 CLI?", default=False
+        ):
+            if install_memsearch_cli():
+                success("MemSearch CLI 已安装, 但当前 Agent 没有对应插件.")
+        config["memsearch"]["enabled"] = False
+
+    print("\n配置摘要:", file=sys.stderr)
+    print(f"  执行 Agent: {config['kanban_agent']}", file=sys.stderr)
+    print(f"  启动方式: {config['launcher']}", file=sys.stderr)
+    for role in REVIEW_ROLES:
+        print(f"  {role}: {config['reviewers'][role]}", file=sys.stderr)
+    print(f"  MemSearch: {'启用' if config['memsearch']['enabled'] else '未启用'}", file=sys.stderr)
+    print(
+        color("1;33", "注意: kanban start 会使用 Agent 的免确认模式执行已确认任务."),
+        file=sys.stderr,
+    )
+    if not ask_yes_no("保存以上配置?", default=True):
+        raise OnevokeError("用户取消, 配置未更改")
+    config["welcome_complete"] = True
+    return config
+
+
+def command_welcome(reset: bool) -> int:
+    print_doctor()
+    try:
+        existing = load_config()
+    except ConfigError as error:
+        warning(str(error))
+        if not reset:
+            print("使用 onevoke welcome --reset 重新创建配置.", file=sys.stderr)
+            return 1
+        existing = default_config()
+
+    if existing["welcome_complete"] and not reset:
+        success(f"welcome 已完成: {config_path()}")
+        print("如需重新选择, 运行 onevoke welcome --reset.", file=sys.stderr)
+        return 0
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        warning("当前没有交互终端, welcome 未完成.")
+        print("请在终端运行 onevoke welcome.", file=sys.stderr)
+        return 0
+    try:
+        configured = configure_welcome(existing)
+        path = save_config(configured)
+    except (OnevokeError, ConfigError, OSError, UnicodeError) as error:
+        warning(str(error))
+        return 1
+    success(f"配置已保存: {path}")
+    return 0
+
+
+def command_review(arguments: list[str]) -> NoReturn:
+    if len(arguments) < 5 or len(arguments) > 6:
+        raise OnevokeError(
+            "用法: onevoke review <worktree> <base> <commit> <role> <task> [context]"
+        )
+    role = arguments[3]
+    aliases = {name.lower(): name for name in REVIEW_ROLES}
+    aliases["codesecurityanalyst"] = "CSA"
+    normalized = aliases.get(role.lower())
+    if not normalized:
+        raise OnevokeError(f"不支持的 Reviewer 角色: {role}")
+    config = load_config()
+    reviewer = config["reviewers"][normalized]
+    wrapper = shutil.which(f"{reviewer}-review.sh")
+    if not wrapper:
+        raise OnevokeError(f"Reviewer wrapper 不在 PATH: {reviewer}-review.sh")
+    arguments[3] = normalized
+    os.execv(wrapper, [wrapper, *arguments])
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="onevoke", description="Onevoke 配置与诊断")
+    commands = result.add_subparsers(dest="command", required=True)
+    welcome = commands.add_parser("welcome", help="检查环境并完成首次配置")
+    welcome.add_argument("--reset", action="store_true", help="重新执行配置向导")
+    commands.add_parser("doctor", help="检查 Onevoke 环境")
+    config = commands.add_parser("config", help="输出当前配置")
+    config.add_argument("--json", action="store_true", help="以 JSON 输出")
+    review = commands.add_parser("review", help="按配置选择 Reviewer wrapper")
+    review.add_argument("arguments", nargs=argparse.REMAINDER)
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        if args.command == "welcome":
+            return command_welcome(args.reset)
+        if args.command == "doctor":
+            return 0 if print_doctor() else 1
+        if args.command == "config":
+            config = load_config()
+            print(json.dumps(config, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "review":
+            command_review(args.arguments)
+        return 0
+    except (OnevokeError, ConfigError, OSError, UnicodeError) as error:
+        print(f"onevoke: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

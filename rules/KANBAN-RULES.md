@@ -48,10 +48,10 @@ kanban check
 - `new` 默认在 `backlog/` 建小任务; `--large` 建带 `spec.md` 的大任务目录.
 - `move` 只走本文件定义的正向迁移, 校验目标不存在及迁移后状态.
 - `pick` 将 `backlog` 卡片移入 `todo`, 沿用 `todo` 完整性校验; 不指定任务就列 `backlog` 让用户按编号选.
-- `start` 默认起 `codex`; `--agent claude` 换 Claude, `--agent grok` 换 Grok. 指定任务只收 `todo` 卡片; 不指定就列 `todo` 让用户按编号选.
+- `start` 未传 `--agent` 时读取 Onevoke 配置的 `kanban_agent`, 配置不存在时回落到 Codex; `--agent codex|claude|grok` 可覆盖本次选择. 指定任务只收 `todo` 卡片; 不指定就列 `todo` 让用户按编号选.
 - `start` 按任务规模设置 Agent: 大任务用 `codex gpt-5.6-sol/high` 或 `claude opus/high`; 小任务对应使用 `medium`. Grok 既不锁模型也不接受推理强度, 一律跟随其 CLI 默认.
 - `start` 默认用 YOLO 模式启动 Agent: Codex 绕过 approval 和 sandbox, Claude 跳过权限确认, Grok 用 `bypassPermissions`.
-- `start` 只在当前 tmux session 新建并切 window, 不建 session. 新 window cwd 是项目根, 名 `kb-<任务标题>`: 标题里的空白折叠为 `-`, 全名截断到 50 字符; 卡片无标题时回退 `kb-<slug>`.
+- `start` 按 Onevoke 配置的 launcher 启动. `tmux` 模式只在当前 session 新建并切 window, 不建 session; window cwd 是项目根, 名 `kb-<任务标题>`. `foreground` 模式要求 stdin/stdout/stderr 都是 tty, 在当前终端前台运行并等待 Agent 退出.
 - 进 `todo/` 前校验: 任务目标, 预期成果, 验收条件, 不在本轮范围都填了.
 - 进 `done/` 前校验 `结果: completed`; 小任务还要 `完成总结`, 大任务还要 `report.md`.
 - 进 `archived/` 或 `trash/` 前, 先按规则填 `结果` 和原因.
@@ -226,10 +226,10 @@ kanban start [--agent codex|claude|grok] [task-id]
 
 - 只有命令迁移成功的人拿到任务. 失败, 源文件没了, 目标已存在 → 立刻停手重查; 不建替代卡片.
 - 领到手立刻在小任务文件或大任务 `spec.md` 填负责人和开始时间, 再按项目规则备工作区, 然后填任务分支; 没分支写 N/A.
-- `start` 起 Agent 前原子迁移卡片并填负责人和开始时间. tmux 或 Agent binary 前置校验失败就不领; `tmux new-window` 同步失败就还原并挪回 `todo`.
+- `start` 起 Agent 前原子迁移卡片并填负责人和开始时间. launcher、tty 或 Agent binary 前置校验失败就不领; tmux 建窗或前台进程创建失败就还原并挪回 `todo`.
 - `start` 给 Agent 的初始 prompt 只含校验过的任务 ID 和固定执行要求. 不把卡片正文拼进 shell command. Agent 起来先读本规则和卡片, 再补任务分支干活.
-- tmux window 建成功就算启动成功. Agent 之后退出, 认证失败, 中断 → 卡片留 `working/`, 走异常恢复规则, 不自动退回 `todo/`.
-- 启动后不监控: `start` 成功就结束本轮, 把执行交给任务 Agent. 不轮询 tmux, 不抓窗口输出, 不查任务 worktree 进度, 不给任务 Agent 注入指令. 只有用户之后明确要求时才查状态或干预.
+- tmux window 建成功或前台 Agent 进程创建成功就算启动成功. Agent 之后退出, 认证失败, 中断 → 卡片留 `working/`, 走异常恢复规则, 不自动退回 `todo/`.
+- tmux 模式启动后不监控: `start` 成功就结束本轮, 把执行交给任务 Agent. foreground 模式等待 Agent 退出后返回, 但同样不自动迁移卡片或处理任务结果.
 - 同文件系统里的移动就是领取原语. 初始方案不加 lock 服务, 守护进程, 数据库, ID 分配器.
 - 领了之后只有负责人能改入口内文档. 别的 Agent 能读, 不许并发写或移动.
 

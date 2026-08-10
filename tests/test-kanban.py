@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
+import argparse
+import json
 import os
-import pty
 import re
 import runpy
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -116,6 +116,28 @@ printf '%s\\n' '@9'
         self.env["KANBAN_TMUX_LOG"] = str(self.root / "tmux.log")
         return fake_bin
 
+    def write_onevoke_config(self, agent: str, launcher: str) -> None:
+        config = self.home / ".config" / "onevoke" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": agent,
+                    "launcher": launcher,
+                    "reviewers": {
+                        "PM": "codex",
+                        "CSA": "codex",
+                        "Hacker": "codex",
+                        "QA": "codex",
+                    },
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_small_and_large_lifecycle(self) -> None:
         today = datetime.now().strftime("%Y%m%d")
         small_id = f"{today}-small-fix-task"
@@ -218,7 +240,11 @@ printf '%s\\n' '@9'
         task = self.root / "working" / task.name
         self.complete(task)
         original = task.read_text(encoding="utf-8")
-        kanban = runpy.run_path(str(COMMAND), run_name="kanban_test")
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_test")
+        finally:
+            sys.path.pop(0)
         entry = kanban["Entry"](task_id, "working", task, task, "small")
 
         with mock.patch.object(kanban["os"], "replace", side_effect=PermissionError("denied")):
@@ -427,6 +453,60 @@ printf '%s\\n' '@9'
         large_command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertNotIn("effort", large_command)
         self.assertIn("--permission-mode bypassPermissions", large_command)
+
+    def test_start_uses_the_configured_default_agent(self) -> None:
+        task_id, _ = self.make_todo("configured-agent")
+        fake_bin = self.install_fake_launchers()
+        self.write_onevoke_config("grok", "tmux")
+
+        result = self.run_command("start", task_id)
+
+        self.assertIn("agent=grok", result.stdout)
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn(str(fake_bin / "grok"), command)
+        self.assertIn("--permission-mode bypassPermissions", command)
+
+    def test_foreground_launcher_rejects_a_noninteractive_terminal(self) -> None:
+        task_id, task = self.make_todo("foreground-no-tty")
+        self.install_fake_launchers()
+        self.write_onevoke_config("codex", "foreground")
+
+        result = self.run_command("start", task_id, succeeds=False)
+
+        self.assertIn("前台启动模式需要交互终端", result.stderr)
+        self.assertTrue(task.exists())
+        self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_foreground_launcher_runs_the_agent_in_the_project(self) -> None:
+        task_id, task = self.make_todo("foreground")
+        fake_bin = self.install_fake_launchers()
+        foreground_log = self.root / "foreground.log"
+        (fake_bin / "claude").write_text(
+            "#!/bin/sh\npwd > \"$KANBAN_FOREGROUND_LOG\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "claude").chmod(0o755)
+        self.env["KANBAN_FOREGROUND_LOG"] = str(foreground_log)
+        self.write_onevoke_config("claude", "foreground")
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_foreground_test")
+        finally:
+            sys.path.pop(0)
+        args = argparse.Namespace(task=task_id, agent=None)
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban["sys"].stdin, "isatty", return_value=True):
+                with mock.patch.object(kanban["sys"].stdout, "isatty", return_value=True):
+                    with mock.patch.object(
+                        kanban["sys"].stderr, "isatty", return_value=True
+                    ):
+                        kanban["command_start"](args, self.root)
+
+        started = self.root / "working" / task.name
+        self.assertTrue(started.exists())
+        self.assertIn("- 负责人: claude", started.read_text(encoding="utf-8"))
+        self.assertEqual(str(self.root.parent), foreground_log.read_text().strip())
 
     def test_start_uses_high_effort_for_large_tasks(self) -> None:
         self.install_fake_launchers()
@@ -651,13 +731,15 @@ printf '%s\\n' '@9'
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("Onevoke installed\n", result.stdout)
-        # 干净的 ~/.agents/ 没有旧规则文件, 不该出现任何警告.
-        self.assertEqual("", result.stderr)
+        self.assertIn("onevoke 不在 PATH", result.stderr)
+        self.assertIn("请在终端运行 onevoke welcome", result.stderr)
 
         command = install_home / ".local" / "bin" / "kanban"
-        self.assertTrue(os.access(command, os.X_OK))
-        for name in ("codex-review.sh", "grok-review.sh", "merge-worktree-memory.py"):
-            self.assertTrue(os.access(install_home / ".local" / "bin" / name, os.X_OK))
+        for source in sorted((PROJECT_ROOT / "bin").iterdir()):
+            if source.is_file():
+                installed = install_home / ".local" / "bin" / source.name
+                self.assertEqual(source.read_bytes(), installed.read_bytes(), source.name)
+                self.assertTrue(os.access(installed, os.X_OK), source.name)
         # rules/ 下每份规则都必须被安装; 新增规则文件时无需改测试.
         for source in sorted(RULES_DIR.glob("*.md")):
             self.assertEqual(
@@ -695,7 +777,6 @@ printf '%s\\n' '@9'
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("本机自定规则\n", own_rules.read_text(encoding="utf-8"))
-            # 旧规则提示按名字扫 ~/.agents/, 绝不能把用户自己的 AGENTS.md 点进去.
             self.assertNotIn(str(own_rules), result.stderr)
 
         self.assertEqual(
@@ -703,371 +784,62 @@ printf '%s\\n' '@9'
             (install_home / ".agents" / "ONEVOKE-AGENTS.md").read_bytes(),
         )
 
-    def seed_customized_entry(self, home_name: str) -> tuple[Path, Path]:
-        """先装一份, 再改掉入口, 模拟"用户已经定制过默认取值"的现场."""
-        install_home = self.root / home_name
-        env = os.environ.copy()
-        env["HOME"] = str(install_home)
-        subprocess.run(
+    def test_installer_reports_welcome_failure_without_undoing_install(self) -> None:
+        install_home = self.root / "welcome-failure-home"
+        config = install_home / ".config" / "onevoke" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("not json\n", encoding="utf-8")
+
+        result = subprocess.run(
             ["sh", str(INSTALLER)],
             stdin=subprocess.DEVNULL,
-            env=env,
+            env={**os.environ, "HOME": str(install_home)},
             text=True,
             capture_output=True,
-            check=True,
+            check=False,
         )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertIn("welcome 未完成", result.stderr)
+        self.assertTrue((install_home / ".local" / "bin" / "onevoke").exists())
+
+    def test_installer_always_overwrites_the_entry_rule(self) -> None:
+        install_home = self.root / "overwrite-home"
         entry = install_home / ".agents" / "ONEVOKE-AGENTS.md"
-        # 改一行再追加一行, 让 diff 里同时有删除行和新增行.
-        customized = entry.read_text(encoding="utf-8").replace(
-            "默认集成分支是 `develop`", "默认集成分支是 `trunk`"
-        )
-        self.assertNotEqual(entry.read_text(encoding="utf-8"), customized)
-        # `---` 是 Markdown 里的常见内容; 删掉它的 diff 行是 `----`, 按前缀会被误认成文件头.
-        entry.write_text(customized + "\n---\n\n# 我的定制\n", encoding="utf-8")
-        return install_home, entry
+        entry.parent.mkdir(parents=True)
+        entry.write_text("用户旧配置\n", encoding="utf-8")
 
-    def run_installer_on_a_tty(
-        self, home: Path, answer: str, no_color: bool = False
-    ) -> tuple[int, str, str]:
-        """在伪终端里跑安装器并喂一个答案, 返回 (退出码, stdout, 终端上看到的内容).
-
-        交互分支只在 stdin 和 stderr 都是 tty 时才走, 用管道测不到.
-        """
-        env = os.environ.copy()
-        env["HOME"] = str(home)
-        # 着色跟随 NO_COLOR, 不能让开发机上已有的取值决定测试结果.
-        env.pop("NO_COLOR", None)
-        if no_color:
-            env["NO_COLOR"] = "1"
-        master, slave = pty.openpty()
-        process = subprocess.Popen(
+        result = subprocess.run(
             ["sh", str(INSTALLER)],
-            stdin=slave,
-            stdout=subprocess.PIPE,
-            stderr=slave,
-            env=env,
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, "HOME": str(install_home)},
             text=True,
-            close_fds=True,
-        )
-        os.close(slave)
-        seen: list[bytes] = []
-
-        # diff 可能撑满 pty 缓冲区, 不同步读走就会双向阻塞.
-        def drain() -> None:
-            while True:
-                try:
-                    data = os.read(master, 4096)
-                except OSError:
-                    break
-                if not data:
-                    break
-                seen.append(data)
-
-        reader = threading.Thread(target=drain)
-        reader.start()
-        try:
-            os.write(master, answer.encode("utf-8"))
-            stdout, _ = process.communicate(timeout=60)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
-            raise
-        finally:
-            os.close(master)
-            reader.join(timeout=5)
-        return process.returncode, stdout, b"".join(seen).decode("utf-8", "replace")
-
-    def test_installer_overwrites_the_entry_rule_when_the_user_agrees(self) -> None:
-        install_home, entry = self.seed_customized_entry("prompt-overwrite-home")
-
-        returncode, stdout, tty = self.run_installer_on_a_tty(install_home, "1\n")
-
-        self.assertEqual(0, returncode, tty)
-        self.assertEqual("Onevoke installed\n", stdout)
-        # 选之前先说清这是什么文件, 覆盖会失去什么.
-        self.assertIn("与本版模板不一致", tty)
-        self.assertIn(str(AGENT_RULES), tty)
-        self.assertIn("请选择 [1/2/3]", tty)
-        # 没要求看 diff 就不刷屏.
-        self.assertNotIn("@@", tty)
-        self.assertIn("已用本版模板覆盖", tty)
-        self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
-
-    def test_installer_shows_the_diff_then_asks_again(self) -> None:
-        install_home, entry = self.seed_customized_entry("prompt-diff-home")
-
-        # 2 只看差异, 不算答复; 看完回到同一组选项再选 1.
-        returncode, stdout, tty = self.run_installer_on_a_tty(install_home, "2\n1\n")
-
-        self.assertEqual(0, returncode, tty)
-        self.assertEqual("Onevoke installed\n", stdout)
-        self.assertEqual(2, tty.count("请选择 [1/2/3]"))
-        # 删除行标红, 新增行标绿, 位置行标青, 文件头加粗.
-        self.assertIn("\033[31m-# 我的定制\033[0m", tty)
-        self.assertIn("\033[32m+", tty)
-        self.assertIn("\033[36m@@", tty)
-        self.assertIn("\033[1m--- ", tty)
-        self.assertIn("\033[1m+++ ", tty)
-        # 内容行 `---` 是删除行, 该标红, 不该被当成文件头加粗.
-        self.assertIn("\033[31m----\033[0m", tty)
-        self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
-
-    def test_installer_honours_no_color_for_the_diff(self) -> None:
-        install_home, entry = self.seed_customized_entry("prompt-nocolor-home")
-        before = entry.read_text(encoding="utf-8")
-
-        returncode, _, tty = self.run_installer_on_a_tty(
-            install_home, "2\n3\n", no_color=True
+            capture_output=True,
+            check=False,
         )
 
-        self.assertEqual(0, returncode, tty)
-        # 差异照常打印, 只是不着色.
-        self.assertIn("-# 我的定制", tty)
-        self.assertNotIn("\033[31m", tty)
-        self.assertNotIn("\033[32m", tty)
-        self.assertNotIn("\033[36m", tty)
-        self.assertEqual(before, entry.read_text(encoding="utf-8"))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
 
-    def test_installer_keeps_the_entry_rule_when_the_user_declines(self) -> None:
-        install_home, entry = self.seed_customized_entry("prompt-keep-home")
-        before = entry.read_text(encoding="utf-8")
-
-        returncode, stdout, tty = self.run_installer_on_a_tty(install_home, "3\n")
-
-        self.assertEqual(0, returncode, tty)
-        self.assertEqual("Onevoke installed\n", stdout)
-        self.assertIn("请选择 [1/2/3]", tty)
-        self.assertIn("保持原样", tty)
-        self.assertEqual(before, entry.read_text(encoding="utf-8"))
-
-    def test_installer_reasks_on_an_unrecognised_answer_and_keeps_on_eof(self) -> None:
-        install_home, entry = self.seed_customized_entry("prompt-junk-home")
-        before = entry.read_text(encoding="utf-8")
-
-        # 回车和乱敲都不算答复, 重新问一遍; 直接 EOF (Ctrl-D) 按不覆盖收尾.
-        cases = {
-            "空行后 EOF": ("\n\x04", 2),
-            "乱敲后 EOF": ("y\n\x04", 2),
-            "直接 EOF": ("\x04", 1),
-        }
-        for name, (answer, prompts) in cases.items():
-            with self.subTest(name):
-                returncode, _, tty = self.run_installer_on_a_tty(install_home, answer)
-
-                self.assertEqual(0, returncode, tty)
-                self.assertEqual(prompts, tty.count("请选择 [1/2/3]"), tty)
-                self.assertEqual(before, entry.read_text(encoding="utf-8"))
-                self.assertNotIn("已用本版模板覆盖", tty)
-
-    def test_installer_stays_quiet_when_the_entry_rule_matches_the_template(
-        self,
-    ) -> None:
-        install_home = self.root / "same-entry-home"
-        env = os.environ.copy()
-        env["HOME"] = str(install_home)
-
-        for _ in range(2):
-            result = subprocess.run(
-                ["sh", str(INSTALLER)],
-                stdin=subprocess.DEVNULL,
-                env=env,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("Onevoke installed\n", result.stdout)
-            # 入口和模板一字不差就没什么可选的, 不该提示, 也不该问.
-            self.assertEqual("", result.stderr)
-
-    def test_installer_seeds_the_entry_rule_and_keeps_it_without_a_tty(self) -> None:
-        install_home = self.root / "entry-home"
-        env = os.environ.copy()
-        env["HOME"] = str(install_home)
+    def test_installer_rejects_a_directory_at_a_file_target(self) -> None:
+        install_home = self.root / "bad-target-home"
         entry = install_home / ".agents" / "ONEVOKE-AGENTS.md"
-        booklet = install_home / ".agents" / "BASE-RULES.md"
-
-        first = subprocess.run(
-            ["sh", str(INSTALLER)],
-            stdin=subprocess.DEVNULL,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(0, first.returncode, first.stderr)
-        # 入口缺失时照常种一份, 没有可保留的定制就不该提示.
-        self.assertEqual("", first.stderr)
-        self.assertEqual(AGENT_RULES.read_bytes(), entry.read_bytes())
-
-        # 用户改了入口的默认取值, 又把分册改坏; 再装必须只覆盖分册.
-        customized = entry.read_text(encoding="utf-8").replace(
-            "默认集成分支是 `develop`", "默认集成分支是 `trunk`"
-        )
-        self.assertNotEqual(entry.read_text(encoding="utf-8"), customized)
-        entry.write_text(customized, encoding="utf-8")
-        booklet.write_text("被改坏的分册\n", encoding="utf-8")
-
-        second = subprocess.run(
-            ["sh", str(INSTALLER)],
-            stdin=subprocess.DEVNULL,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(0, second.returncode, second.stderr)
-        self.assertEqual("Onevoke installed\n", second.stdout)
-        self.assertEqual(customized, entry.read_text(encoding="utf-8"))
-        self.assertIn("保持原样", second.stderr)
-        self.assertIn("rules/ONEVOKE-AGENTS.md", second.stderr)
-        for source in sorted(RULES_DIR.glob("*.md")):
-            if source.name == AGENT_RULES.name:
-                continue
-            self.assertEqual(
-                source.read_bytes(),
-                (install_home / ".agents" / source.name).read_bytes(),
-                source.name,
-            )
-
-    def test_installer_stops_when_the_entry_rule_cannot_be_read(self) -> None:
-        # 入口存在却读不出来时不能当成"已保留": 那台机器根本没有可加载的入口,
-        # 报成拆分前入口会让用户照错误的迁移指引处理文件.
-        broken = {
-            # dotfiles 仓库管着入口, 源文件已删, 只剩悬空软链.
-            "dangling-home": lambda path: path.symlink_to(
-                self.root / "gone" / "ONEVOKE-AGENTS.md"
-            ),
-            # 手滑把入口建成了目录.
-            "directory-home": lambda path: path.mkdir(),
-        }
-
-        for home_name, make_broken in broken.items():
-            with self.subTest(home_name):
-                install_home = self.root / home_name
-                env = os.environ.copy()
-                env["HOME"] = str(install_home)
-                agents_dir = install_home / ".agents"
-                agents_dir.mkdir(parents=True)
-                entry = agents_dir / "ONEVOKE-AGENTS.md"
-                make_broken(entry)
-
-                result = subprocess.run(
-                    ["sh", str(INSTALLER)],
-                    stdin=subprocess.DEVNULL,
-                    env=env,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-
-                self.assertEqual(1, result.returncode, result.stderr)
-                # 半套状态比不装更难查: 报错时命令和分册都不该落地.
-                self.assertEqual("", result.stdout)
-                self.assertIn("读不出来", result.stderr)
-                self.assertIn("什么都没装", result.stderr)
-                self.assertNotIn("拆分前的旧入口", result.stderr)
-                self.assertFalse((agents_dir / "BASE-RULES.md").exists())
-                self.assertFalse((install_home / ".local" / "bin").exists())
-                # 坏现场要原样留给用户处理, 安装器不代为删改.
-                self.assertTrue(entry.is_symlink() or entry.is_dir())
-
-    def test_installer_flags_an_entry_rule_from_before_the_split(self) -> None:
-        install_home = self.root / "presplit-home"
-        env = os.environ.copy()
-        env["HOME"] = str(install_home)
-        agents_dir = install_home / ".agents"
-        agents_dir.mkdir(parents=True)
-        legacy = agents_dir / "ONEVOKE-AGENTS.md"
-        # 拆分前的入口装的是全量通用条款, 判据是它不引用拆出去的 BASE-RULES.md.
-        legacy_text = "# Onevoke 全局工作流规则\n\n拆分前的全量通用条款.\n"
-        legacy.write_text(legacy_text, encoding="utf-8")
+        entry.mkdir(parents=True)
 
         result = subprocess.run(
             ["sh", str(INSTALLER)],
             stdin=subprocess.DEVNULL,
-            env=env,
+            env={**os.environ, "HOME": str(install_home)},
             text=True,
             capture_output=True,
             check=False,
         )
 
-        # 内容过期不是失败: 安装照常完成, 保留原文件, 只在 stderr 点名.
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("Onevoke installed\n", result.stdout)
-        self.assertIn("拆分前的旧入口", result.stderr)
-        self.assertIn("BASE-RULES.md", result.stderr)
-        self.assertEqual(legacy_text, legacy.read_text(encoding="utf-8"))
-        self.assertEqual(
-            (RULES_DIR / "BASE-RULES.md").read_bytes(),
-            (agents_dir / "BASE-RULES.md").read_bytes(),
-        )
-
-    def test_installer_reports_but_keeps_stale_rule_files(self) -> None:
-        install_home = self.root / "stale-home"
-        env = os.environ.copy()
-        env["HOME"] = str(install_home)
-        agents_dir = install_home / ".agents"
-        agents_dir.mkdir(parents=True)
-        stale_names = (
-            "SOLO-AGENTS.md",
-            "CODEX-REVIEW-RULES.md",
-            "GROK-REVIEW-RULES.md",
-        )
-        for name in stale_names:
-            (agents_dir / name).write_text(f"旧版 {name}\n", encoding="utf-8")
-
-        result = subprocess.run(
-            ["sh", str(INSTALLER)],
-            stdin=subprocess.DEVNULL,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-        # 检测到旧文件不是失败: 安装照常完成, 警告只走 stderr.
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("Onevoke installed\n", result.stdout)
-        self.assertIn("早期 Onevoke 版本的规则文件", result.stderr)
-        # 提示必须逐个点名, 且明确说明安装器不会代为删除.
-        for name in stale_names:
-            self.assertIn(str(agents_dir / name), result.stderr)
-            self.assertEqual(
-                f"旧版 {name}\n",
-                (agents_dir / name).read_text(encoding="utf-8"),
-                name,
-            )
-        self.assertIn("从不删除文件", result.stderr)
-
-    def test_installer_reports_only_the_stale_files_that_exist(self) -> None:
-        install_home = self.root / "partial-stale-home"
-        env = os.environ.copy()
-        env["HOME"] = str(install_home)
-        agents_dir = install_home / ".agents"
-        agents_dir.mkdir(parents=True)
-        present = agents_dir / "CODEX-REVIEW-RULES.md"
-        present.write_text("旧版审核规则\n", encoding="utf-8")
-        # 旧文件被 dotfiles 仓库软链管理, 源文件已删时只剩悬空链接, 同样要点名.
-        dangling = agents_dir / "SOLO-AGENTS.md"
-        dangling.symlink_to(self.root / "gone" / "SOLO-AGENTS.md")
-
-        result = subprocess.run(
-            ["sh", str(INSTALLER)],
-            stdin=subprocess.DEVNULL,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn(str(present), result.stderr)
-        self.assertIn(str(dangling), result.stderr)
-        # 不存在的旧文件不得出现在提示里, 否则用户会去查根本没有的路径.
-        self.assertNotIn("GROK-REVIEW-RULES.md", result.stderr)
-        self.assertTrue(dangling.is_symlink())
-        self.assertEqual("旧版审核规则\n", present.read_text(encoding="utf-8"))
+        self.assertEqual(1, result.returncode)
+        self.assertIn("安装目标是目录", result.stderr)
+        self.assertFalse((install_home / ".local" / "bin").exists())
+        self.assertTrue(entry.is_dir())
 
     def test_installer_rejects_arguments(self) -> None:
         result = subprocess.run(

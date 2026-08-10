@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960" role="img" aria-labelledby="title description">
   <title id="title">Onevoke 工作流</title>
-  <desc id="description">需求会话讨论并创建任务卡, tmux 窗口领取、执行、审核、验收和集成任务, 需求会话同时继续讨论下一项.</desc>
+  <desc id="description">需求会话讨论并创建任务卡, 任务终端领取、执行、审核、验收和集成任务, 需求会话同时继续讨论下一项.</desc>
   <defs>
     <style>
       .sans { font-family: -apple-system, BlinkMacSystemFont, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; }
@@ -45,7 +45,7 @@
   <path d="M856 242 H1536 V250 H856 Z" fill="#e5eff9"/>
   <circle cx="898" cy="207" r="19" fill="#3476aa"/>
   <text x="898" y="214" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">B</text>
-  <text x="933" y="205" class="sans lane-title">tmux 协调与任务窗口</text>
+  <text x="933" y="205" class="sans lane-title">协调与任务终端</text>
   <text x="933" y="229" class="sans lane-note">独立执行当前任务</text>
 
   <rect x="96" y="278" width="616" height="126" rx="8" fill="#ffffff" stroke="#9bc8a8" stroke-width="2" filter="url(#shadow)"/>

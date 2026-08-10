@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
+from onevoke_config import ConfigError, load_config
+
 
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
 TRANSITIONS = {
@@ -637,15 +639,24 @@ def agent_command(agent: str, binary: str, effort: str) -> list[str]:
 
 def command_start(args: argparse.Namespace, root: Path) -> None:
     entry = select_todo(load_board(root), args.task)
-    agent = shutil.which(args.agent)
-    tmux = shutil.which("tmux")
+    config = load_config()
+    agent_name = args.agent or config["kanban_agent"]
+    launcher = config["launcher"]
+    agent = shutil.which(agent_name)
     if not agent:
-        raise KanbanError(f"Agent 不在 PATH: {args.agent}")
-    if not tmux:
-        raise KanbanError("tmux 不在 PATH")
-    session = tmux_session_id(tmux)
+        raise KanbanError(f"Agent 不在 PATH: {agent_name}")
+    tmux = None
+    session = None
+    if launcher == "tmux":
+        tmux = shutil.which("tmux")
+        if not tmux:
+            raise KanbanError("tmux 不在 PATH; 运行 onevoke welcome 选择前台启动模式")
+        session = tmux_session_id(tmux)
+    elif not (sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()):
+        raise KanbanError("前台启动模式需要交互终端")
+
     original = read_document(entry)
-    updated = start_metadata(original, args.agent)
+    updated = start_metadata(original, agent_name)
     moved = move_entry(entry, root, "working")
     prompt = (
         f"执行 Kanban 任务 {entry.task_id}. 先运行 kanban rules, 再运行 "
@@ -654,31 +665,43 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     )
     name = window_name(entry, original)
     effort = "high" if entry.kind == "large" else "medium"
-    command = shlex.join([*agent_command(args.agent, agent, effort), prompt])
+    agent_argv = [*agent_command(agent_name, agent, effort), prompt]
     try:
         moved.document.write_text(updated, encoding="utf-8")
-        result = subprocess.run(
-            [
-                tmux,
-                "new-window",
-                "-P",
-                "-F",
-                "#{window_id}",
-                "-t",
-                session + ":",
-                "-c",
-                str(root.parent),
-                "-n",
-                name,
-                command,
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            detail = result.stderr.strip() or f"exit {result.returncode}"
-            raise KanbanError(f"tmux new-window 失败: {detail}")
+        if launcher == "tmux":
+            command = shlex.join(agent_argv)
+            result = subprocess.run(
+                [
+                    tmux,
+                    "new-window",
+                    "-P",
+                    "-F",
+                    "#{window_id}",
+                    "-t",
+                    session + ":",
+                    "-c",
+                    str(root.parent),
+                    "-n",
+                    name,
+                    command,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or f"exit {result.returncode}"
+                raise KanbanError(f"tmux new-window 失败: {detail}")
+            window = result.stdout.strip() or "unknown"
+        else:
+            print(
+                f"started: {entry.task_id}\tagent={agent_name}\tlauncher=foreground",
+                flush=True,
+            )
+            try:
+                result = subprocess.run(agent_argv, cwd=root.parent, check=False)
+            except OSError as error:
+                raise KanbanError(f"启动 Agent 失败: {error}") from error
     except (KanbanError, OSError, UnicodeError) as error:
         try:
             moved.document.write_text(original, encoding="utf-8")
@@ -688,8 +711,14 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 f"启动失败且回滚失败; 卡片保留在 working: {error}; {rollback_error}"
             ) from error
         raise
-    window = result.stdout.strip() or "unknown"
-    print(f"started: {entry.task_id}\tagent={args.agent}\twindow={window}")
+    if launcher == "foreground":
+        if result.returncode != 0:
+            raise KanbanError(
+                f"Agent 已启动但以非零状态退出: {result.returncode}; "
+                "卡片保留在 working"
+            )
+        return
+    print(f"started: {entry.task_id}\tagent={agent_name}\twindow={window}")
 
 
 def command_check(root: Path) -> int:
@@ -729,9 +758,9 @@ def parser() -> argparse.ArgumentParser:
     pick_parser = commands.add_parser("pick", help="将 backlog 任务移入 todo")
     pick_parser.add_argument("task", nargs="?")
 
-    start_parser = commands.add_parser("start", help="领取任务并在当前 tmux session 启动 Agent")
+    start_parser = commands.add_parser("start", help="领取任务并按 Onevoke 配置启动 Agent")
     start_parser.add_argument("task", nargs="?")
-    start_parser.add_argument("--agent", choices=AGENT_NAMES, default="codex")
+    start_parser.add_argument("--agent", choices=AGENT_NAMES, help="覆盖配置中的默认 Agent")
 
     commands.add_parser("check", help="检查看板不变量")
     return result
@@ -762,7 +791,7 @@ def main() -> int:
         elif args.command == "check":
             return command_check(root)
         return 0
-    except (KanbanError, OSError, UnicodeError) as error:
+    except (KanbanError, ConfigError, OSError, UnicodeError) as error:
         print(f"kanban: {error}", file=sys.stderr)
         return 1
 

@@ -8,23 +8,25 @@ Onevoke - One person. Many agents.
 
 | 位置 | 作用 |
 |---|---|
-| `rules/ONEVOKE-AGENTS.md` | 全局规则入口. 分册索引、优先级, 以及三项可改的默认取值 (分支、Reviewer、看板任务完成) |
+| `rules/ONEVOKE-AGENTS.md` | 全局规则入口. 分册索引、优先级和默认行为 |
 | `rules/BASE-RULES.md` | 跨项目通用条款. 交流格式、工作原则、记忆管理、探索与验证、安全 |
 | `rules/GIT-RULES.md` | Git 工作流. worktree 隔离、提交与 push 策略、集成与清理 |
 | `rules/CODE-RULES.md` | 架构与代码质量契约. 模块边界、依赖方向、抽象门槛、错误处理与测试要求 |
 | `rules/KANBAN-RULES.md` + `bin/kanban` | 文件看板. 任务卡片的状态流转、领取并发、文档完整性门禁 |
 | `rules/REVIEW-RULES.md` | 审核门禁. 三阶段规则, 四个角色 `PM` / `QA` / `CSA` / `Hacker`, Codex 与 Grok 共用 |
-| `bin/codex-review.sh` + `bin/grok-review.sh` | 两个 reviewer 的 wrapper, 只读跑上述角色, 参数一致 |
+| `bin/onevoke` | 首次引导、环境诊断、配置展示和 Reviewer 分发 |
+| `bin/codex-review.sh` + `bin/grok-review.sh` | 两个 reviewer wrapper, 只读跑上述角色, 参数一致 |
 
 `bin/merge-worktree-memory.py` 在任务集成后把 worktree 的 memsearch 记忆并回主树, 顺带清掉记忆里的非法 UTF-8 字节.
 
 ## 依赖
 
 - Python 3 (仅标准库), Git, POSIX shell
-- Codex CLI (`codex`) 或 Grok CLI (`grok`) — 审核门禁必需, 装选定的那个即可, 默认用 Codex
-- tmux — `kanban start` 启动 Agent 需要
+- Codex、Claude 或 Grok 至少一个, 用于执行看板任务
+- Codex CLI (`codex`) 或 Grok CLI (`grok`) 至少一个, 用于审核
+- tmux 可选; 不安装时 `kanban start` 可在当前终端前台运行
 
-memsearch 是**可选**的, 需要自己安装. 装了才适用 `BASE-RULES.md` 的「记忆管理」一节; 没装时该节不适用, `merge-worktree-memory.py` 报告无事可做并以 0 退出, 集成流程可以无条件调用它.
+memsearch 是可选依赖. welcome 检查 CLI 和可用 Agent 的插件, 缺失时询问是否安装. 没装时 `BASE-RULES.md` 的「记忆管理」不适用, 记忆合并命令仍以成功空操作退出.
 
 ## 安装
 
@@ -32,39 +34,31 @@ memsearch 是**可选**的, 需要自己安装. 装了才适用 `BASE-RULES.md` 
 ./install.sh
 ```
 
-命令装到 `~/.local/bin/` (`kanban`, `codex-review.sh`, `grok-review.sh`, `merge-worktree-memory.py`), `rules/` 下全部规则装到 `~/.agents/`.
+`bin/` 下全部普通文件装到 `~/.local/bin/`, `rules/` 下全部规则装到 `~/.agents/`. 所有目标每次直接覆盖, 包括 `ONEVOKE-AGENTS.md`; 本机选择保存在 `~/.config/onevoke/config.json`, 不再靠修改规则入口保存.
 
 安装器**不碰** `~/.agents/AGENTS.md` — 那是你自己的全局规则, 与本仓库无关.
 
-分册 (`BASE-RULES.md`、`GIT-RULES.md`、`REVIEW-RULES.md`、`CODE-RULES.md`、`KANBAN-RULES.md`) 由本仓库拥有, 每次安装直接覆盖. 入口 `ONEVOKE-AGENTS.md` 例外: 它装的是**你可以改的默认取值**, 不会被静默覆盖.
+文件复制完成后, 安装器用绝对路径运行 `onevoke welcome`. welcome 会:
 
-- 入口不存在 — 种一份模板, 不打扰.
-- 入口和模板一字不差 — 什么都不做, 也不提示.
-- 入口有差异, 且在终端里运行 — 先说明这是什么文件、覆盖会失去什么, 再问:
+- 检查全部 Onevoke 命令是否能从 PATH 访问, 缺失时用醒目文字提示.
+- 探测 Codex、Claude、Grok 的命令和版本, 分开展示执行、审核和 MemSearch 能力; 认证状态不冒充已验证.
+- 选择 `kanban` 默认执行 Agent.
+- 分别选择 `PM`、`CSA`、`Hacker`、`QA` 的 Reviewer.
+- 选择 tmux window 或当前终端前台 launcher; tmux 缺失时询问安装, 拒绝后写入前台模式.
+- 检查 MemSearch CLI 和 Agent 插件, 缺失时询问安装.
+- 检查所选 Agent 是否已经接入 Onevoke 规则, 但不覆盖用户的 Agent 全局配置.
 
-  ```text
-    1. 直接覆盖 (你自己的改动会丢失)
-    2. 先查看 diff
-    3. 不要覆盖
-  请选择 [1/2/3]:
-  ```
+welcome 只在 stdin 和 stderr 都是 tty 时提问. CI、管道或 hook 中仍完成文件安装, 输出诊断并提示之后在终端运行:
 
-  选 `2` 打出带颜色的 `diff -u` (删除行红、新增行绿、位置行青、文件头加粗; 设了 `NO_COLOR` 就不着色), 看完回到同一组选项接着选. 只有回 `1` 才覆盖; 回车和乱敲会重新问, Ctrl-D 按不覆盖收尾. 拆分前的旧入口会额外说明推荐覆盖.
-- 入口有差异, 但没有 tty (CI、管道、hook) — 不卡住安装, 一律保留, 在 stderr 说明保留原因和模板位置.
+```sh
+onevoke welcome
+```
 
-分册在这四种情况下都照常覆盖.
+配置完成后可用 `onevoke doctor` 重新诊断, `onevoke config` 查看配置, `onevoke welcome --reset` 重新选择. welcome 遵守 `NO_COLOR`, Ctrl-D 或 Ctrl-C 时不写半套配置.
 
-入口存在却读不出来 (悬空软链、目录、权限不足) 时安装器直接报错退出, 什么都不装 —— 那种状态下你实际没有可加载的规则入口, 装一半再报成功只会更难查. 按提示修好或删掉那个路径再装.
+安装器不删除旧文件. 从早期版本升级时, `SOLO-AGENTS.md`、`CODEX-REVIEW-RULES.md` 和 `GROK-REVIEW-RULES.md` 仍需用户确认接入路径后手动清理.
 
-安装器也**从不删除任何文件**. 早期版本的规则文件改名或合并后, 旧文件会以过期内容留在 `~/.agents/`; 安装器检测到就逐个点名警告 (走 stderr, 不影响退出码), 删不删由你决定.
-
-### 从旧版升级
-
-规则入口已由 `SOLO-AGENTS.md` 改名为 `ONEVOKE-AGENTS.md`, 两份审核规则已合并为 `REVIEW-RULES.md`. 装过旧版的话, **先按「接入」一节把 `@` 导入行或软链改指 `ONEVOKE-AGENTS.md`, 再删 `~/.agents/` 下的旧文件** — 顺序反了会留下悬空软链或失效导入, 而这两种失效都是静默的, 不报错.
-
-入口的通用条款随后又拆进了 `BASE-RULES.md`, 入口只留分册索引、优先级和默认取值. 拆分前装过 `ONEVOKE-AGENTS.md` 的话, 在终端里跑 `./install.sh` 会认出它是拆分前的入口, 说明它为什么该换, 再给出上面那三个选项 — 想先对照就选 `2` 看 diff, 看完回到选项再选 `1` 覆盖, 之后把你自己的改动重新加回来. 没有 tty 时它只在 stderr 报「是拆分前的旧入口」并原样保留. 接入方式不变, 软链和 `@` 导入都还指向同一个文件名.
-
-装完规则只是躺在 `~/.agents/`, **还不生效**. 接入是单独一步, 安装器不做 — 见下一节.
+装完规则只是躺在 `~/.agents/`, 还不生效. welcome 会检查接入状态并指向下一节, 但不会擅自改 Agent 配置.
 
 ## 接入
 
@@ -101,6 +95,11 @@ ln -s ~/.agents/ONEVOKE-AGENTS.md ~/.codex/AGENTS.md
 | 软链 `ONEVOKE-AGENTS.md`, 个人规则下沉到各项目的 `AGENTS.md` | 分册升级自动传播 | 个人偏好要在每个项目重复一遍 |
 | 保留自己的 `~/.codex/AGENTS.md`, 把 `ONEVOKE-AGENTS.md` 内容合并进去 | 一个文件管全部 | 升级不会传播, 每次都要重新合并 |
 
+### Grok
+
+Grok 的接入目标是 `~/.grok/AGENTS.md`. 可以把它软链到入口, 或把
+`~/.agents/ONEVOKE-AGENTS.md` 的内容合并进已有文件; welcome 只检查接入状态, 不会修改该文件.
+
 ### 自动载入的只有入口
 
 无论哪种接入方式, 会话启动时自动载入的都只有入口这一个文件. 分册 (含通用条款 `BASE-RULES.md`) 靠入口的分册表按需读取 — 表里写明了每份该在什么时机读, `BASE-RULES.md` 是每个任务开始时.
@@ -117,20 +116,24 @@ Claude Code 的 `@` 导入不受这个限制.
 
 ## 定制默认取值
 
-入口预设三项最常要改的取值, 其余全在分册里:
+规则入口保留跨机器一致的分支与完成时机默认值. 本机执行和审核工具由 welcome 配置:
 
 | 取值 | 默认 |
 |---|---|
 | 分支 | 长期分支 `main` + `develop`; 默认集成分支 `develop`, `main` 只在用户确认后从 `develop` 前进 |
-| Reviewer | `PM` / `CSA` / `Hacker` / `QA` 四个角色一律用 `codex-review.sh` |
+| 执行 Agent | `onevoke welcome` 选择, 未配置时回落到 Codex |
+| Reviewer | `PM` / `CSA` / `Hacker` / `QA` 分别在 welcome 中选择 Codex 或 Grok |
+| launcher | 有 tmux 时默认可选独立 window; 没有时可选当前终端前台运行 |
 | 看板任务完成 | 审核通过后先报告并等用户确认, 确认后才合回初始分支 |
 
-这三项**高于分册**: 分册定机制, 入口定取值, 分册在对应条款里显式让位. 其余一切仍以分册为准, 入口不复述分册内容.
+查看和修改本机配置:
 
-改法两种, 按影响范围挑:
+```sh
+onevoke config
+onevoke welcome --reset
+```
 
-- **改这台机器** — 直接编辑 `~/.agents/ONEVOKE-AGENTS.md`. 安装器不会静默覆盖它: 有差异时在终端里问你一次, 只有回 `1` 才覆盖, 无 tty 一律保留 (见「安装」一节).
-- **只改一个项目** — 写进该项目根的 `AGENTS.md` 或 `CLAUDE.md`, 优先级高于入口. 仓库没有 `develop`、某个项目换 reviewer、某类任务要自动合回, 都走这条.
+只改一个项目时仍写进项目根 `AGENTS.md` 或 `CLAUDE.md`, 优先级高于本机配置和入口. 当前任务的明确用户指令优先级最高. 不要直接编辑已安装的 `ONEVOKE-AGENTS.md`, 下次安装会覆盖.
 
 例: 某项目直接在 `main` 上集成, 且看板任务审核通过就自动合回:
 
@@ -143,7 +146,7 @@ Claude Code 的 `@` 导入不受这个限制.
 
 ## 完整工作流
 
-Onevoke 把需求讨论和任务执行分开. 人始终保留一个需求会话, 用高推理强度模型逐项定方案; 已定案的任务交给独立 tmux window 执行, 原会话立即进入下一轮讨论.
+Onevoke 把需求讨论和任务执行分开. 人始终保留一个需求会话, 用高推理强度模型逐项定方案; 已定案的任务交给配置的 launcher 执行.
 
 - 需求会话是决策面: 使用 Plan mode 明确需求、方案、验收条件和范围.
 - 主 worktree 是协调面: 放唯一的本机看板, 由人确认任务进入 `todo`.
@@ -199,9 +202,9 @@ kanban new feature login-retry 登录重试
 
 任务默认建成一个 Markdown 文件. 只有需要独立 `spec.md`、分阶段计划和最终报告时才用 `--large`; 行数多本身不是大任务. 能独立领取、验收或取消的工作应拆成多张卡, 同目标、同负责人、同生命周期的内容留在一张卡内.
 
-### 4. 在单独的 tmux window 启动任务
+### 4. 启动任务
 
-切换到专门用于协调任务的 tmux window. 推荐直接告诉协调 Agent:
+推荐直接告诉协调 Agent:
 
 ```text
 开始任务卡 20260802-login-retry-task
@@ -222,26 +225,26 @@ kanban start --agent grok 20260802-login-retry-task
 
 不传任务 ID 时, `kanban start` 只列 `todo` 任务供人选择, 不猜优先级. 启动时会依次完成:
 
-1. 校验 tmux、Agent 命令和任务状态.
+1. 读取 Onevoke 配置, 校验 launcher、TTY、Agent 命令和任务状态.
 2. 用原子重命名领取卡片, 执行 `todo -> working`.
 3. 写入负责人和开始时间.
-4. 在当前 tmux session 新建 `kb-<任务标题>` window, cwd 为项目根.
+4. tmux 模式在当前 session 新建 `kb-<任务标题>` window; foreground 模式在当前终端运行并等待退出. 两者 cwd 都是项目根.
 5. 要求新 Agent 先读 `kanban rules`、任务卡和项目规则, 再准备代码工作区.
 
 小任务默认使用中等推理强度, 大任务使用高推理强度. Codex 固定用 `gpt-5.6-sol`, Claude 固定用 `opus`; Grok 不锁模型也不接受推理强度, 一律跟随其 CLI 默认. `kanban start` 默认以 YOLO 模式启动, 会绕过 Agent 自身的 approval 或 permission 提示; 因此只应在可信本机和已确认范围内使用.
 
-只有 `todo` 卡能启动. tmux window 创建前失败会回滚卡片; window 已创建后 Agent 认证失败、退出或中断, 卡片继续留在 `working`, 不自动重派.
+只有 `todo` 卡能启动. launcher 创建前失败会回滚卡片; tmux window 或前台 Agent 进程已经创建后, Agent 认证失败、退出或中断时卡片继续留在 `working`, 不自动重派. foreground 必须从真实交互终端运行, 在 CI、管道或无 TTY 的 Agent 工具调用中会拒绝且不领卡.
 
 ### 5. 回到需求会话讨论下一项
 
-协调 Agent 在 `kanban start` 成功后就结束本轮, 把执行完全交给任务 Agent: 不轮询 tmux、不抓窗口输出、不检查任务 worktree 进度、不给任务 Agent 注入指令. 需要看进度时由人明确要求.
+tmux 模式中, 协调 Agent 在 `kanban start` 成功后就结束本轮, 把执行完全交给任务 Agent: 不轮询 tmux、不抓窗口输出、不检查任务 worktree 进度、不给任务 Agent 注入指令. foreground 模式会占用当前终端直到任务 Agent 退出.
 
 任务启动成功后, 不在协调 window 等它完成. 回到刚才讨论需求的会话, 执行 `/new` 创建干净上下文, 再次进入 Plan mode, 用 `gpt-5.6-xhigh` 或 `opus-xhigh` 讨论下一个需求.
 
 此时形成稳定流水线:
 
 - 需求会话串行做决策, 每次只讨论一个需求.
-- 每个已定案任务在独立 tmux window 和 worktree 中执行.
+- tmux 模式中每个已定案任务在独立 window 和 worktree 中执行; foreground 模式一次占用一个当前终端.
 - 看板显示所有任务处于 `backlog`、`todo`、`working`、`done` 中的哪个阶段.
 - 人只在方案确认、任务优先级、审核风险和最终验收处介入.
 
@@ -289,12 +292,12 @@ reviewer 的报告不是自动真理. 主代理必须回到代码、规则和可
 
 #### 指定 reviewer
 
-四个角色由 Codex 或 Grok 执行, 两者规则完全一样, 只是 wrapper 和 CLI 不同. **不指定就用 Codex.** 按下面三档指定, 优先级从高到低, 取第一个命中的:
+四个角色分别由 Codex 或 Grok 执行, 两者规则一样, 只是 wrapper 和 CLI 不同. 按下面四档逐角色确定, 优先级从高到低:
 
 **只改这一个任务** — 在任务提示里说一句就行:
 
 ```text
-这个任务用 Grok 审核
+这个任务的 QA 用 Grok, 其余角色沿用配置
 ```
 
 **改整个项目** — 在项目根的 `AGENTS.md` 或 `CLAUDE.md` 里加一节, 该项目的所有任务都生效:
@@ -302,18 +305,18 @@ reviewer 的报告不是自动真理. 主代理必须回到代码、规则和可
 ```markdown
 ## 审核
 
-本项目审核用 Grok, 按 `~/.agents/REVIEW-RULES.md` 执行.
+本项目的 PM 和 QA 用 Grok, 安全角色用 Codex, 按 `~/.agents/REVIEW-RULES.md` 执行.
 ```
 
-**改整台机器** — 写进你自己的全局规则文件, 对所有项目生效. 写哪个文件取决于你用的 Agent: Claude Code 是 `~/.claude/CLAUDE.md`, Codex 是 `~/.codex/AGENTS.md`, 都不用则写 `~/.agents/AGENTS.md`. 要点是这份文件必须真的会被载入你的会话, 否则 Agent 看不到:
+**改 Agent 自己的全局规则** — 可在实际会被载入的 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、`~/.grok/AGENTS.md` 或 `~/.agents/AGENTS.md` 中逐角色指定. 这档高于 Onevoke 配置, 适合已有统一规则管理的用户.
 
-```markdown
-## 审核
+**改整台机器** — 重新运行 welcome, 它把每个角色的选择写入 Onevoke 配置:
 
-审核默认用 Grok, 按 `~/.agents/REVIEW-RULES.md` 执行.
+```sh
+onevoke welcome --reset
 ```
 
-同一个任务不能混用两个 reviewer 的阶段结论. 中途改 reviewer 视为重新审核, 已通过的阶段全部作废, 从 `PM` 重启. 选定的 CLI 在本机没装时 Agent 不会自己换成另一个, 而是停下来给编号选项让人决定.
+前三档都没指定时, 调 `onevoke review` 按角色读取本机配置. 不同角色可以使用不同 reviewer; 同一角色的一轮修复与复核不能中途换 Agent. 选定 CLI 不可用时不会自动换另一个, 而是按审核规则让用户决定.
 
 ### 9. 验收、集成与清理
 
@@ -378,7 +381,7 @@ kanban init
 kanban new feature login-retry 登录重试
 ```
 
-然后在 tmux 协调 window 对 Agent 说 "开始任务卡 20260802-login-retry-task". Agent 会执行:
+然后在协调终端对 Agent 说 "开始任务卡 20260802-login-retry-task". Agent 会执行:
 
 ```sh
 kanban pick 20260802-login-retry-task
@@ -397,11 +400,11 @@ kanban list working
 代码任务在独立 worktree 完成、提交、验证后, 按阶段串行审核:
 
 ```sh
-codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> PM "<任务目标>"
-codex-review.sh <worktree绝对路径> <base-commit-SHA> <commit-SHA> QA "<任务目标>"
+onevoke review <worktree绝对路径> <base-commit-SHA> <commit-SHA> PM "<任务目标>"
+onevoke review <worktree绝对路径> <base-commit-SHA> <commit-SHA> QA "<任务目标>"
 ```
 
-选 Grok 时把上述命令名换成 `grok-review.sh`, 参数完全一样. 怎么选见「指定 reviewer」.
+当前任务或项目明确指定 reviewer 时, 可把命令换成 `codex-review.sh` 或 `grok-review.sh`, 参数完全一样. 其他情况由 `onevoke review` 分发.
 
 - 第一阶段 `PM` 核对实现是否完整达到任务目标
 - 第二阶段按改动风险决定是否运行 `CSA` 和 `Hacker`, 未触发标记 N/A
@@ -419,4 +422,5 @@ Grok 默认使用 Grok CLI profile 配置的模型; 可用 `GROK_REVIEW_MODEL` �
 
 ```sh
 KANBAN_COMMAND="$PWD/bin/kanban" python3 tests/test-kanban.py
+python3 tests/test-onevoke.py
 ```

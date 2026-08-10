@@ -8,18 +8,16 @@
 
 ## Project Structure & Module Organization
 
-- `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 只放分册索引, 优先级和三项默认取值 (分支, Reviewer, 看板任务完成). 其余分册由它的分册表按需引用: `BASE-RULES.md` 跨项目通用条款, `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约 (Codex 与 Grok 共用), `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
-- 入口装的是用户可改的默认取值, 分册仍每次覆盖. `install.sh` 按 `entry_action` 四态处理入口: `seed` 缺失时种一份, `same` 与模板一致时静默跳过, `replace` 用户在提示里选了覆盖, `keep` 保留. 有 tty 时先给一段说明, 再循环问 `1. 直接覆盖 / 2. 先查看 diff / 3. 不要覆盖`: 选 `2` 打差异后回到同一组选项, 无法识别的答复重新问, 读到 EOF 按 `keep` 收尾 (否则会空转). 只有明确回 `1` 才是 `replace`; 无 tty 一律 `keep` 并在 stderr 说明. 交互分支只能用伪终端测, 见 `tests/test-kanban.py` 的 `run_installer_on_a_tty`.
-- `install.sh` 面向用户的输出一律中文; 唯一例外是 stdout 的 `Onevoke installed`, 它是测试和用户脚本都依赖的稳定契约, 不翻译也不加行. diff 用 sed 着色并跟随 `NO_COLOR`: 文件头只按 diff 的第 1, 2 行定位 (`1s` / `2s`), 其余行再按 `@@`, `-`, `+` 的行首着色. 不许改回 `^---` / `^+++` 前缀匹配 —— 规则文件里一条 `---` 被删掉后 diff 行是 `----`, 按前缀会被误判成文件头.
-- 安装测试的 `subprocess.run` 一律显式传 `stdin=subprocess.DEVNULL`, 否则从终端跑测试时会落进交互分支卡住. 入口的三项取值高于分册, 分册在对应条款里显式让位; 改取值语义时必须同步对应分册的让位措辞.
-- 过期入口的判据是正文不引用 `BASE-RULES.md`. 改入口模板时保留这个引用, 否则老用户拿不到升级提示.
-- 入口存在却读不到 (悬空软链, 目录, 权限不足) 是坏现场, 不是"已保留": 安装器在装任何东西之前报错退 1, 不留半套状态, 也不把它诊断成过期入口.
+- `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 只放分册索引, 优先级和默认行为. 其余分册由它的分册表按需引用: `BASE-RULES.md` 跨项目通用条款, `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约, `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
+- `install.sh` 遍历 `bin/*` 和 `rules/*.md`, 把全部普通文件直接覆盖到 `~/.local/bin/` 与 `~/.agents/`, 包括 `ONEVOKE-AGENTS.md`. 唯一稳定 stdout 是 `Onevoke installed`; 最后必须用绝对路径运行 `onevoke welcome`. 同名目标是目录时须在写任何文件前拒绝, 防止 `install` 把源文件塞进错误目录.
+- `bin/onevoke_config.py` 是 `onevoke` 与 `kanban` 共用的配置边界, 配置默认在 `~/.config/onevoke/config.json`, 测试用 `ONEVOKE_CONFIG` 隔离. 配置写入必须校验 schema, 用同目录临时文件加 `os.replace()` 原子替换, 权限为 `0600`.
+- `bin/onevoke` 提供 `welcome`, `doctor`, `config`, `review`. welcome 只在 tty 中提问, 无 tty 时诊断后正常提示重跑; 依赖安装必须经用户明确选择. `review` 按角色配置分发到 Codex 或 Grok wrapper, 当前任务或项目明确覆盖时可直接调用对应 wrapper.
+- `bin/kanban` 的 `start` 未传 `--agent` 时读取 `kanban_agent`; `--agent` 始终优先. launcher 为 `tmux` 时沿用独立 window, 为 `foreground` 时必须有交互 tty 并在当前终端等待 Agent 退出.
 - 新增分册时把它加进 `ONEVOKE-AGENTS.md` 的分册表即可; `install.sh` 和安装测试都遍历 `rules/*.md`, 不必改.
-- 分册改名或合并时, 把旧文件名加进 `install.sh` 的 `stale_rules`. 安装器只覆盖不删除, 旧文件会以过期内容留在用户的 `~/.agents/`, 靠这份清单点名警告; 任何情况下都不得让脚本代为删除.
 - 本仓库根目录的 `AGENTS.md` 是本仓库自己的开发规则, 与 `rules/` 下的发布物是两回事, 不要混改.
-- `bin/kanban` 是 Python 3 CLI 的唯一实现, 包含看板定位、任务校验、状态迁移和命令解析.
+- `bin/kanban` 是 Python 3 CLI 的唯一实现, 包含看板定位、任务校验、状态迁移和命令解析. `bin/onevoke` 负责首次引导、环境诊断、配置展示和 Reviewer 分发.
 - `bin/codex-review.sh` 与 `bin/grok-review.sh` 是审核 wrapper, 分别只读运行 Codex CLI 与 Grok CLI 并输出角色报告. `bin/merge-worktree-memory.py` 在集成后合并 worktree 的 memsearch 记忆, 并清除合并结果中的非法 UTF-8 字节.
-- `tests/test-kanban.py` 使用临时目录覆盖小任务、大任务、非法迁移、无效入口隔离、归档、安装及初始化流程. `tests/test-merge-worktree-memory.py` 覆盖条目切分、哈希兼容性、去重、字节清理和原子替换. `tests/test-codex-review.py` 与 `tests/test-grok-review.py` 覆盖审核门禁的全部拒绝路径、隔离参数和篡改检测.
+- `tests/test-onevoke.py` 用临时 HOME 和伪终端覆盖 welcome、配置和 Reviewer 分发. `tests/test-kanban.py` 覆盖看板生命周期、两种 launcher、安装及初始化. `tests/test-merge-worktree-memory.py` 覆盖记忆合并; 两个审核测试覆盖 wrapper 门禁.
 - 运行时创建的 `kanban/` 是本机共享数据, 不属于仓库源码, 不得提交.
 
 ## Build, Test, and Development Commands
@@ -29,17 +27,18 @@
 ```sh
 ./install.sh
 python3 bin/kanban --help
+python3 tests/test-onevoke.py
 python3 tests/test-kanban.py
 python3 tests/test-merge-worktree-memory.py
 python3 tests/test-codex-review.py
 python3 tests/test-grok-review.py
-python3 -m py_compile bin/kanban bin/merge-worktree-memory.py tests/*.py
+python3 -m py_compile bin/onevoke bin/onevoke_config.py bin/kanban bin/merge-worktree-memory.py tests/*.py
 sh -n install.sh && bash -n bin/codex-review.sh bin/grok-review.sh
 ```
 
 测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; 两个审核测试分别用假 Codex/Grok 二进制驱动, 不调用真的 CLI, 也不产生网络请求.
 
-安装脚本把四个命令复制到 `~/.local/bin/`, 把 `rules/` 下全部规则复制到 `~/.agents/`, 不接受参数, 不读写用户的 `~/.agents/AGENTS.md`. 后续命令依次检查入口、测试当前工作树脚本和执行快速语法检查. 手工试验应设置临时 `KANBAN_DIR`, 不要污染真实看板.
+安装脚本复制 `bin/` 和 `rules/` 下全部普通文件, 不接受参数, 不读写用户的 `~/.agents/AGENTS.md`, 最后运行 welcome. 手工试验必须同时设置临时 `HOME`, `ONEVOKE_CONFIG` 和 `KANBAN_DIR`, 不得修改真实配置或看板.
 
 ## Coding Style & Naming Conventions
 

@@ -1,7 +1,7 @@
 # Onevoke 全局工作流规则
 
 - 规则集入口, 装在 `~/.agents/ONEVOKE-AGENTS.md`. 只放分册索引, 优先级和少量默认取值; 通用条款在 `~/.agents/BASE-RULES.md`.
-- 安装器只在本文件不存在时写一次, 之后升级只覆盖分册, 不动本文件. 改这里的取值不会被下次安装冲掉.
+- 安装器每次用当前模板覆盖本文件和全部分册. 本机的执行 Agent、launcher 和各审核角色选择保存在 `~/.config/onevoke/config.json`, 用 `onevoke config` 查看, 用 `onevoke welcome --reset` 修改.
 - 本文件不是用户自己的 `~/.agents/AGENTS.md`, 两者不互相覆盖.
 
 ## 分册
@@ -18,9 +18,9 @@
 
 ## 优先级
 
-- 高到低: 当前任务明确用户指令 > 离目标文件最近项目级 `AGENTS.md` 或 `CLAUDE.md` > 本文件「默认取值」 > 上表各分册.
+- 高到低: 当前任务明确用户指令 > 离目标文件最近项目级 `AGENTS.md` 或 `CLAUDE.md` > Onevoke 本机配置与本文件「默认取值」 > 上表各分册.
 - 分册定机制, 本文件定取值. 只有「默认取值」里写到的条目高于分册; 其余一切以分册为准, 本文件不复述分册内容.
-- 项目要改这三项取值, 写进项目级 `AGENTS.md` 或 `CLAUDE.md`, 不改本文件. 本文件是本机默认值.
+- 项目要覆盖分支、Reviewer 或看板完成时机, 写进项目级 `AGENTS.md` 或 `CLAUDE.md`, 不改本文件和本机配置.
 - 同目录 `AGENTS.md` 与 `CLAUDE.md` 冲突且用户指令未消解时, 停止受影响操作, 问用户.
 
 ## 默认取值
@@ -34,8 +34,8 @@
 
 ### Reviewer
 
-- `PM`, `CSA`, `Hacker`, `QA` 四个角色一律用 `codex-review.sh`.
-- 同一任务不混用两个 reviewer. 换 reviewer 要用户明确指定, 换了就从第一阶段重启.
+- `PM`, `CSA`, `Hacker`, `QA` 分别取 Onevoke 配置中的 reviewer, 未完成 welcome 时四者都回落到 Codex.
+- 未被当前任务或项目规则覆盖时, 审核一律通过 `onevoke review` 分发. 同一角色的一轮审核中不得换 Agent; 不同角色可以按配置使用不同 Agent.
 
 ### 看板任务完成
 
