@@ -738,6 +738,29 @@ class OnevokeCommandTest(unittest.TestCase):
         with mock.patch.object(Path, "home", return_value=self.home):
             self.assertFalse(onevoke.claude_memsearch_ready())
 
+    def test_claude_plugin_rejects_symlinked_marketplace_or_cache_parent(
+        self,
+    ) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_claude_memsearch_plugin("3.2.1")
+        onevoke = load_onevoke_module()
+        plugins = self.home / ".claude" / "plugins"
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertTrue(onevoke.claude_memsearch_ready())
+            for name in ("marketplaces", "cache"):
+                with self.subTest(parent=name):
+                    parent = plugins / name
+                    external = self.root / f"external-{name}"
+                    os.replace(parent, external)
+                    parent.symlink_to(external, target_is_directory=True)
+                    try:
+                        self.assertFalse(onevoke.claude_memsearch_ready())
+                    finally:
+                        parent.unlink()
+                        os.replace(external, parent)
+            self.assertTrue(onevoke.claude_memsearch_ready())
+
     def test_memsearch_environment_commit_rolls_back_on_failure_or_interrupt(
         self,
     ) -> None:
