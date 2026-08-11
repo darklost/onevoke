@@ -125,6 +125,7 @@ printf '%s\\n' '@9'
     def test_locale_selects_chinese_or_english(self) -> None:
         chinese = self.run_command("--help")
         self.assertIn("本地文件看板", chinese.stdout)
+        self.assertIn("--lang {cn,en}", chinese.stdout)
         self.assertNotIn("usage:", chinese.stdout)
         self.assertEqual("通过: 0 个任务\n", self.run_command("check").stdout)
 
@@ -144,6 +145,17 @@ printf '%s\\n' '@9'
         self.assertIn("Local file kanban board", english.stdout)
         self.assertNotIn("本地文件看板", english.stdout)
 
+        forced_chinese = self.run_command("--lang", "cn", "--help")
+        self.assertIn("本地文件看板", forced_chinese.stdout)
+        self.env["ONEVOKE_LANG"] = "zh"
+        forced_english = self.run_command("--lang", "en", "--help")
+        self.assertIn("Local file kanban board", forced_english.stdout)
+        invalid = self.run_command("--lang", "fr", "--help", succeeds=False)
+        self.assertIn("无效选择", invalid.stderr)
+        missing = self.run_command("--lang", succeeds=False)
+        self.assertIn("需要一个参数", missing.stderr)
+
+        self.env["ONEVOKE_LANG"] = "en"
         rejected = self.run_command(
             "new", "chore", "Bad-Slug", "title", succeeds=False
         )
@@ -1156,6 +1168,30 @@ N/A
         self.assertTrue(entry.is_dir())
 
     def test_installer_rejects_arguments(self) -> None:
+        chinese_help = subprocess.run(
+            ["sh", str(INSTALLER), "--lang", "cn", "--help"],
+            env={
+                **os.environ,
+                "HOME": str(self.root / "help-home-cn"),
+                "ONEVOKE_LANG": "en",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, chinese_help.returncode, chinese_help.stderr)
+        self.assertIn("用法: install.sh", chinese_help.stdout)
+
+        help_result = subprocess.run(
+            ["sh", str(INSTALLER), "--lang", "en", "--help"],
+            env={**os.environ, "HOME": str(self.root / "help-home")},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, help_result.returncode, help_result.stderr)
+        self.assertIn("--lang {cn,en}", help_result.stdout)
+
         result = subprocess.run(
             ["sh", str(INSTALLER), "--force"],
             stdin=subprocess.DEVNULL,
@@ -1206,6 +1242,56 @@ N/A
             )
             self.assertEqual(2, localized.returncode)
             self.assertIn("用法: install.sh", localized.stderr)
+
+        missing = subprocess.run(
+            ["sh", str(INSTALLER), "--lang"],
+            env={**os.environ, "HOME": str(self.root / "arg-home-missing")},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(2, missing.returncode)
+        self.assertIn("用法: install.sh", missing.stderr)
+
+        invalid = subprocess.run(
+            ["sh", str(INSTALLER), "--lang", "fr"],
+            env={
+                **os.environ,
+                "HOME": str(self.root / "arg-home-invalid"),
+                "ONEVOKE_LANG": "en",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(2, invalid.returncode)
+        self.assertIn("--lang must be cn or en", invalid.stderr)
+
+    def test_installer_passes_explicit_language_to_welcome(self) -> None:
+        project = self.root / "lang-installer-project"
+        (project / "bin").mkdir(parents=True)
+        (project / "install.sh").write_bytes(INSTALLER.read_bytes())
+        (project / "bin" / "onevoke").write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$WELCOME_ARGS\"\n",
+            encoding="utf-8",
+        )
+        (project / "bin" / "onevoke").chmod(0o755)
+        welcome_args = self.root / "welcome-args"
+
+        result = subprocess.run(
+            ["sh", str(project / "install.sh"), "--lang", "cn"],
+            env={
+                **os.environ,
+                "HOME": str(self.root / "lang-install-home"),
+                "WELCOME_ARGS": str(welcome_args),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("--lang\ncn\nwelcome\n", welcome_args.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

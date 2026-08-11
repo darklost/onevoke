@@ -18,10 +18,12 @@ from typing import Any, NoReturn
 from onevoke_config import (
     ARGPARSE_ZH,
     EXECUTION_AGENTS,
+    LANGUAGES,
     REVIEW_AGENTS,
     REVIEW_ROLES,
     ConfigError,
     LocalizedArgumentParser,
+    apply_language_argument,
     config_path,
     default_config,
     effective_config,
@@ -30,6 +32,7 @@ from onevoke_config import (
     save_config,
 )
 
+apply_language_argument(sys.argv[1:])
 t = language_text
 argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 
@@ -1193,6 +1196,7 @@ def print_config(config: dict[str, Any]) -> None:
 
 def parser() -> argparse.ArgumentParser:
     result = LocalizedArgumentParser(prog="onevoke", description=t("Onevoke 配置与诊断", "Onevoke configuration and diagnostics"))
+    result.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
     commands = result.add_subparsers(dest="command", required=True)
     welcome = commands.add_parser("welcome", help=t("检查环境并完成首次配置", "check the environment and complete initial setup"))
     welcome.add_argument("--reset", action="store_true", help=t("重新执行配置向导", "run the setup wizard again"))

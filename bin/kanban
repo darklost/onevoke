@@ -18,13 +18,16 @@ from typing import Dict, Iterable, Optional
 
 from onevoke_config import (
     ARGPARSE_ZH,
+    LANGUAGES,
     ConfigError,
     LocalizedArgumentParser,
+    apply_language_argument,
     effective_config,
     language_text,
     load_config,
 )
 
+apply_language_argument(sys.argv[1:])
 t = language_text
 argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 
@@ -989,6 +992,7 @@ def command_check(root: Path) -> int:
 
 def parser() -> argparse.ArgumentParser:
     result = LocalizedArgumentParser(prog="kanban", description=t("本地文件看板", "Local file kanban board"))
+    result.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
     commands = result.add_subparsers(dest="command", required=True)
 
     init_parser = commands.add_parser("init", help=t("创建看板目录框架", "create the board directory structure"))

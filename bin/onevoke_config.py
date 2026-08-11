@@ -17,6 +17,7 @@ EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 LAUNCHERS = ("tmux", "foreground")
+LANGUAGES = ("cn", "en")
 ARGPARSE_ZH = {
     "usage: ": "用法: ",
     "positional arguments": "位置参数",
@@ -35,6 +36,16 @@ ARGPARSE_ZH = {
 }
 
 
+def apply_language_argument(arguments: list[str]) -> None:
+    if not arguments:
+        return
+    value = arguments[1] if arguments[0] == "--lang" and len(arguments) > 1 else None
+    if arguments[0].startswith("--lang="):
+        value = arguments[0].partition("=")[2]
+    if value in LANGUAGES:
+        os.environ["ONEVOKE_LANG"] = value
+
+
 def language_text(chinese: str, english: str) -> str:
     locale = next(
         (
@@ -44,7 +55,7 @@ def language_text(chinese: str, english: str) -> str:
         ),
         "",
     )
-    return chinese if locale.lower().startswith("zh") else english
+    return chinese if locale.lower().startswith(("cn", "zh")) else english
 
 
 class LocalizedArgumentParser(argparse.ArgumentParser):

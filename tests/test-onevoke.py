@@ -323,6 +323,7 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_locale_selects_chinese_or_english_and_honors_override(self) -> None:
         chinese = self.run_command("--help")
         self.assertIn("Onevoke 配置与诊断", chinese.stdout)
+        self.assertIn("--lang {cn,en}", chinese.stdout)
         self.assertNotIn("usage:", chinese.stdout)
 
         chinese_error = self.run_command("nope")
@@ -357,6 +358,19 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("Onevoke configuration and diagnostics", english.stdout)
         self.assertNotIn("配置与诊断", english.stdout)
 
+        forced_chinese = self.run_command("--lang", "cn", "--help")
+        self.assertIn("Onevoke 配置与诊断", forced_chinese.stdout)
+        self.env["ONEVOKE_LANG"] = "zh"
+        forced_english = self.run_command("--lang", "en", "--help")
+        self.assertIn("Onevoke configuration and diagnostics", forced_english.stdout)
+        invalid = self.run_command("--lang", "fr", "--help")
+        self.assertEqual(2, invalid.returncode)
+        self.assertIn("无效选择", invalid.stderr)
+        missing = self.run_command("--lang")
+        self.assertEqual(2, missing.returncode)
+        self.assertIn("需要一个参数", missing.stderr)
+
+        self.env["ONEVOKE_LANG"] = "en"
         status = self.run_command("config")
         self.assertEqual(0, status.returncode, status.stderr)
         self.assertIn("welcome: incomplete", status.stdout)

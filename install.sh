@@ -2,20 +2,66 @@
 
 set -eu
 
+onevoke_lang=
+onevoke_lang_set=0
 onevoke_locale=${ONEVOKE_LANG:-${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}}
+case "${1-}" in
+  --lang)
+    onevoke_lang_set=1
+    if [ "$#" -ge 2 ]; then
+      onevoke_lang=$2
+    fi
+    ;;
+  --lang=*)
+    onevoke_lang_set=1
+    onevoke_lang=${1#--lang=}
+    ;;
+esac
+case "$onevoke_lang" in
+  cn) onevoke_locale=cn ;;
+  en) onevoke_locale=en ;;
+esac
 case "$onevoke_locale" in
-  zh*|ZH*) onevoke_zh=1 ;;
+  cn*|CN*|zh*|ZH*) onevoke_zh=1 ;;
   *) onevoke_zh=0 ;;
 esac
 
-if [ "$#" -gt 0 ]; then
+usage() {
   if [ "$onevoke_zh" -eq 1 ]; then
-    echo "用法: install.sh" >&2
-    echo "把 Onevoke 命令装到 ~/.local/bin, 规则装到 ~/.agents." >&2
+    echo "用法: install.sh [--lang {cn,en}]"
+    echo "把 Onevoke 命令装到 ~/.local/bin, 规则装到 ~/.agents."
   else
-    echo "usage: install.sh" >&2
-    echo "Install Onevoke commands to ~/.local/bin and rules to ~/.agents." >&2
+    echo "usage: install.sh [--lang {cn,en}]"
+    echo "Install Onevoke commands to ~/.local/bin and rules to ~/.agents."
   fi
+}
+
+if [ "${1-}" = "--lang" ]; then
+  if [ "$#" -lt 2 ]; then
+    usage >&2
+    exit 2
+  fi
+  shift 2
+else
+  case "${1-}" in
+    --lang=*) shift ;;
+  esac
+fi
+if [ "$onevoke_lang_set" -eq 1 ] && [ "$onevoke_lang" != "cn" ] && [ "$onevoke_lang" != "en" ]; then
+  usage >&2
+  if [ "$onevoke_zh" -eq 1 ]; then
+    echo "错误: --lang 只接受 cn 或 en" >&2
+  else
+    echo "error: --lang must be cn or en" >&2
+  fi
+  exit 2
+fi
+if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+  usage
+  exit 0
+fi
+if [ "$#" -gt 0 ]; then
+  usage >&2
   exit 2
 fi
 
@@ -68,7 +114,10 @@ printf '%s\n' 'Onevoke installed'
 
 # 工具包文件安装已完成. welcome (含可选 MemSearch 安装) 失败不得回滚或
 # 把本脚本变成失败退出; MemSearch 出错时 welcome 内会提示用户自行安装.
-if ! "$bin_dir/onevoke" welcome; then
+if [ -n "$onevoke_lang" ]; then
+  set -- --lang "$onevoke_lang"
+fi
+if ! "$bin_dir/onevoke" "$@" welcome; then
   if [ "$onevoke_zh" -eq 1 ]; then
     printf '%s\n' \
       '警告: Onevoke 文件已安装, 但 welcome 未完成; 请修复提示问题后重新运行 onevoke welcome.' \
