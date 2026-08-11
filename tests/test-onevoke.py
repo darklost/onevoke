@@ -401,7 +401,7 @@ class OnevokeCommandTest(unittest.TestCase):
         )
 
         self.assertEqual(0, returncode, output)
-        self.assertIn("MemSearch CLI 未安装, 是否仍然只执行 CLI 安装命令?", output)
+        self.assertIn("MemSearch CLI 未安装, 是否确认执行 CLI 安装命令?", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("grok", config["kanban_agent"])
         self.assertEqual({role: "grok" for role in ROLES}, config["reviewers"])
@@ -442,7 +442,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, returncode, output)
         self.assertIn(
-            "MemSearch CLI 版本可能不受支持, 是否执行安装命令修正为 0.4.15?",
+            "MemSearch CLI 版本可能不受支持, 是否确认执行安装命令修正为 0.4.15?",
             output,
         )
         self.assertEqual(
@@ -667,6 +667,7 @@ class OnevokeCommandTest(unittest.TestCase):
         )
 
         self.assertEqual(0, returncode, output)
+        self.assertIn("确认现在由 Onevoke 执行 MemSearch 安装过程?", output)
         self.assertIn("已执行 MemSearch Codex 插件安装命令", output)
         self.assertNotIn("安装后校验未通过", output)
         self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))

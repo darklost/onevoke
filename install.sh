@@ -47,7 +47,13 @@ done
 
 printf '%s\n' 'Onevoke installed'
 
-# 用绝对路径启动, 即使 ~/.local/bin 尚未进入 PATH 也能完成诊断和引导.
+# 工具包文件安装已完成. welcome (含可选 MemSearch 安装) 失败不得回滚或
+# 把本脚本变成失败退出; MemSearch 出错时 welcome 内会提示用户自行安装.
 if ! "$bin_dir/onevoke" welcome; then
-  printf '%s\n' '警告: Onevoke 文件已安装, 但 welcome 未完成; 请修复提示问题后重新运行 onevoke welcome.' >&2
+  printf '%s\n' \
+    '警告: Onevoke 文件已安装, 但 welcome 未完成; 请修复提示问题后重新运行 onevoke welcome.' \
+    '说明: MemSearch 为可选项, 其安装失败不影响本工具包; 可稍后自行安装或再跑 welcome.' \
+    >&2
 fi
+# 文件安装成功时始终以 0 结束, 不因 welcome/MemSearch 阻断.
+exit 0
