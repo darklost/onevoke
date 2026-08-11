@@ -164,8 +164,14 @@ _NEGATION_RE = re.compile(
 )
 
 
-def _candidate_context(text: str, start: int, end: int) -> str:
-    """取候选语境: 同段 + 前序/后序各最多 40 行, 捕捉前后否定说明."""
+def _candidate_context(
+    text: str, start: int, end: int, *, include_match: bool = True
+) -> str:
+    """取候选语境: 同段 + 前序/后序各最多 40 行, 捕捉前后否定说明.
+
+    include_match=False 时不把候选正文本身计入语境, 避免合并式入口
+    (如 ONEVOKE-AGENTS.md 内的「不使用其他长期分支模型」) 被自身否定词误伤.
+    """
     before = text.rfind("\n\n", 0, start)
     after = text.find("\n\n", end)
     left = 0 if before < 0 else before + 2
@@ -176,7 +182,10 @@ def _candidate_context(text: str, start: int, end: int) -> str:
     heading_after = text.find("\n#", end, right)
     if heading_after >= 0:
         right = heading_after
-    section = text[left:right]
+    if include_match:
+        section = text[left:right]
+    else:
+        section = text[left:start] + text[end:right]
     prior_lines = text[:start].splitlines()[-40:]
     following_lines = text[end:].splitlines()[:40]
     return "\n".join([section, *prior_lines, *following_lines])
@@ -222,7 +231,11 @@ def _claude_rules_import_present(text: str, entry: Path) -> bool:
 
 
 def _merged_rules_present(text: str, entry: Path) -> bool:
-    """Codex/Grok 合并文件必须包含当前安装入口全文, 且语境不得是否定/废弃."""
+    """Codex/Grok 合并文件必须包含当前安装入口全文, 且外层语境不得是否定/废弃.
+
+    入口正文自身可能含「不使用」等词 (见 ONEVOKE-AGENTS 分支模型条款),
+    否定检查只看正文前后语境, 不扫描 expected 本身.
+    """
     try:
         expected = entry.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
@@ -233,7 +246,9 @@ def _merged_rules_present(text: str, entry: Path) -> bool:
     index = body.find(expected)
     if index < 0:
         return False
-    context = _candidate_context(body, index, index + len(expected))
+    context = _candidate_context(
+        body, index, index + len(expected), include_match=False
+    )
     if _NEGATION_RE.search(context):
         return False
     return True

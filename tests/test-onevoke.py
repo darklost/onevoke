@@ -887,6 +887,38 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual("grok", config["kanban_agent"])
         self.assertFalse(config["memsearch"]["enabled"])
 
+    def test_rules_integration_accepts_production_entry_with_internal_bu_shi_yong(
+        self,
+    ) -> None:
+        """生产入口正文含「不使用其他长期分支模型」, 全文合并不得被自身误拒."""
+        onevoke = load_onevoke_module()
+        production = PROJECT_ROOT / "rules" / "ONEVOKE-AGENTS.md"
+        production_text = production.read_text(encoding="utf-8")
+        self.assertIn("不使用其他长期分支模型", production_text)
+        entry = self.home / ".agents" / "ONEVOKE-AGENTS.md"
+        entry.parent.mkdir(parents=True)
+        entry.write_text(production_text, encoding="utf-8")
+        for agent, target in (
+            ("codex", self.home / ".codex" / "AGENTS.md"),
+            ("grok", self.home / ".grok" / "AGENTS.md"),
+        ):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                production_text.strip() + "\n\n## 我自己的规则\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(Path, "home", return_value=self.home):
+                with self.subTest(agent=agent, case="accept-production-body"):
+                    ok, detail = onevoke.rules_integration(agent)
+                    self.assertTrue(ok, detail)
+                with self.subTest(agent=agent, case="reject-outer-negation"):
+                    target.write_text(
+                        "以下规则不使用:\n\n" + production_text.strip() + "\n",
+                        encoding="utf-8",
+                    )
+                    ok, _ = onevoke.rules_integration(agent)
+                    self.assertFalse(ok)
+
     def test_rules_integration_rejects_comment_negation_and_placeholder(self) -> None:
         onevoke = load_onevoke_module()
         entry = self.home / ".agents" / "ONEVOKE-AGENTS.md"
