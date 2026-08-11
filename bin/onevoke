@@ -46,9 +46,9 @@ COMMANDS = (
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
 MEMSEARCH_PACKAGE = "memsearch[onnx]"
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
+MEMSEARCH_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 MEMSEARCH_VERSION_OUTPUT = re.compile(
-    r"\A\s*memsearch,\s+version\s+"
-    r"(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s*\Z",
+    rf"\A\s*memsearch,\s+version\s+({MEMSEARCH_VERSION_RE.pattern})\s*\Z",
     flags=re.IGNORECASE,
 )
 MEMSEARCH_HOOKS = {
@@ -430,7 +430,7 @@ def claude_memsearch_ready() -> bool:
             not isinstance(manifest, dict)
             or manifest.get("name") != "memsearch"
             or not isinstance(manifest.get("version"), str)
-            or not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", manifest["version"])
+            or not MEMSEARCH_VERSION_RE.fullmatch(manifest["version"])
         ):
             continue
         hooks_dir = hooks_directory(read_json_file(root / "hooks" / "hooks.json"), root)
@@ -783,6 +783,9 @@ def install_memsearch_for(agent: str) -> bool:
     try:
         cli_ok = install_memsearch_cli()
         if agent == "codex":
+            if not cli_ok:
+                warning(t("CLI 安装未完成, 已跳过 Codex 插件安装.", "CLI installation did not complete; skipped the Codex plugin installation."))
+                return False
             source = Path(
                 os.environ.get(
                     "ONEVOKE_MEMSEARCH_SOURCE",
@@ -876,19 +879,6 @@ def install_memsearch_for(agent: str) -> bool:
                             "The Codex plugin installation command failed; restored the previous cache."
                             if cached_source
                             else "The Codex plugin installation command failed; discarded the failed cache.",
-                        )
-                    )
-                    return False
-                if not cli_ok:
-                    restore_previous_source()
-                    warning(
-                        t(
-                            "Codex 插件安装命令已执行, 但 CLI 安装未完成; 已恢复原缓存."
-                            if cached_source
-                            else "Codex 插件安装命令已执行, 但 CLI 安装未完成; 未保留失败缓存.",
-                            "The Codex plugin installer ran, but the CLI installation did not complete; restored the previous cache."
-                            if cached_source
-                            else "The Codex plugin installer ran, but the CLI installation did not complete; discarded the failed cache.",
                         )
                     )
                     return False

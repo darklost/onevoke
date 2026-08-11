@@ -189,6 +189,7 @@ class OnevokeCommandTest(unittest.TestCase):
         install_hooks: bool = True,
         create_installer: bool = True,
         installer_exit: int = 0,
+        uv_exit: int = 0,
     ) -> tuple[Path, Path, Path]:
         uv_log = self.root / "uv.log"
         git_log = self.root / "git.log"
@@ -210,6 +211,7 @@ class OnevokeCommandTest(unittest.TestCase):
                 "MEMSEARCH_SOURCE_STATUS": source_status,
                 "MEMSEARCH_CREATE_INSTALLER": "1" if create_installer else "",
                 "MEMSEARCH_INSTALLER_EXIT": str(installer_exit),
+                "MEMSEARCH_UV_EXIT": str(uv_exit),
                 "ONEVOKE_MEMSEARCH_SOURCE": str(self.root / "memsearch-source"),
                 "MEMSEARCH_HOOKS_TEMPLATE": str(self.root / "hooks-template.json"),
             }
@@ -245,7 +247,11 @@ class OnevokeCommandTest(unittest.TestCase):
             "uv",
             "#!/bin/sh\n"
             "printf '%s\\n' \"$*\" > \"$UV_LOG\"\n"
-            "/bin/cp \"$MEMSEARCH_TEMPLATE\" \"$FAKE_BIN/memsearch\"\n",
+            "memsearch_uv_exit=${MEMSEARCH_UV_EXIT:-0}\n"
+            "if [ \"$memsearch_uv_exit\" -eq 0 ]; then\n"
+            "/bin/cp \"$MEMSEARCH_TEMPLATE\" \"$FAKE_BIN/memsearch\"\n"
+            "fi\n"
+            "exit \"$memsearch_uv_exit\"\n",
         )
         self.fake_command(
             "git",
@@ -750,6 +756,8 @@ class OnevokeCommandTest(unittest.TestCase):
         for output in (
             "memsearch, version 9.8.7broken",
             "memsearch, version 9.8.7.4",
+            "memsearch, version 9.8.7-...",
+            "memsearch, version 9.8.7+.",
             "Python 3.12.0",
         ):
             with self.subTest(output=output):
@@ -761,6 +769,22 @@ class OnevokeCommandTest(unittest.TestCase):
 
                 self.assertEqual(1, result.returncode)
                 self.assertIn("CLI 无法正常报告版本", result.stderr)
+
+    def test_claude_plugin_rejects_version_suffixes(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        plugin = self.install_fake_claude_memsearch_plugin("3.2.1")
+        onevoke = load_onevoke_module()
+        manifest = plugin / ".claude-plugin" / "plugin.json"
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertTrue(onevoke.claude_memsearch_ready())
+            for version in ("3.2.1-alpha", "3.2.1-...", "3.2.1+."):
+                with self.subTest(version=version):
+                    manifest.write_text(
+                        json.dumps({"name": "memsearch", "version": version}),
+                        encoding="utf-8",
+                    )
+                    self.assertFalse(onevoke.claude_memsearch_ready())
 
     def test_invalid_config_is_reported_without_fallback(self) -> None:
         self.config.parent.mkdir(parents=True)
@@ -889,6 +913,23 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("memsearch[onnx]", uv_log.read_text(encoding="utf-8"))
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_welcome_skips_codex_plugin_when_cli_install_fails(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        _, git_log, bash_log = self.install_fake_memsearch_tools(uv_exit=1)
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("CLI 安装未完成, 已跳过 Codex 插件安装", output)
+        self.assertFalse(git_log.exists())
+        self.assertFalse(bash_log.exists())
+        self.assertFalse((self.root / "memsearch-source").exists())
+        self.assertFalse((self.home / ".codex" / "hooks.json").exists())
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
 
     def test_welcome_skips_plugin_installer_on_dirty_cached_source(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
