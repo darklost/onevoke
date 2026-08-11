@@ -328,6 +328,9 @@ class OnevokeCommandTest(unittest.TestCase):
         chinese_error = self.run_command("nope")
         self.assertIn("参数 命令: 无效选择", chinese_error.stderr)
         self.assertNotIn("argument command", chinese_error.stderr)
+        review_help = self.run_command("review", "--help")
+        self.assertIn("参数", review_help.stdout)
+        self.assertNotIn("arguments", review_help.stdout)
 
         self.env.pop("ONEVOKE_LANG")
         self.env["LC_ALL"] = "zh_CN.UTF-8"

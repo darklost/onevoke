@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -671,8 +672,16 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
     headers = tuple(t(chinese, english) for chinese, english in zip(
         ("状态", "规模", "时间"), english_headers
     ))
+
+    def display_width(text: str) -> int:
+        return sum(
+            0 if unicodedata.combining(char) else
+            2 if unicodedata.east_asian_width(char) in "WF" else 1
+            for char in text
+        )
+
     widths = [
-        max([len(header), len(english_headers[index]), *(len(row[index]) for row in rows)])
+        max([display_width(header), len(english_headers[index]), *(len(row[index]) for row in rows)])
         for index, header in enumerate(headers)
     ]
     use_color = "NO_COLOR" not in os.environ and (
@@ -708,7 +717,10 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
             print(color(row[4], palette["title"]))
         return
 
-    heading = "  ".join(f"{header:<{width}}" for header, width in zip(headers, widths))
+    heading = "  ".join(
+        header + " " * (width - display_width(header))
+        for header, width in zip(headers, widths)
+    )
     print(color(heading + t("  任务 ID / 标题", "  TASK ID / TITLE"), "1"))
     print("  ".join("-" * width for width in widths) + "  ---------------")
     for row in rows:
@@ -980,7 +992,12 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
 
     init_parser = commands.add_parser("init", help=t("创建看板目录框架", "create the board directory structure"))
-    init_parser.add_argument("project", nargs="?", help=t("项目根目录, 默认当前项目", "project root; defaults to the current project"))
+    init_parser.add_argument(
+        "project",
+        nargs="?",
+        metavar=t("项目路径", "project"),
+        help=t("项目根目录, 默认当前项目", "project root; defaults to the current project"),
+    )
 
     commands.add_parser("rules", help=t("输出全局看板规则", "print global kanban rules"))
 
@@ -989,23 +1006,23 @@ def parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--mobile", action="store_true", help=t("使用竖屏手机布局", "use a vertical mobile layout"))
 
     show_parser = commands.add_parser("show", help=t("输出入口任务文档", "print a task document"))
-    show_parser.add_argument("task")
+    show_parser.add_argument("task", metavar=t("任务", "task"))
 
     new_parser = commands.add_parser("new", help=t("在 backlog 创建任务", "create a task in backlog"))
     new_parser.add_argument("--large", action="store_true", help=t("创建大任务目录", "create a large-task directory"))
     new_parser.add_argument("type", choices=tuple(TYPE_NAMES))
     new_parser.add_argument("slug")
-    new_parser.add_argument("title", nargs="+")
+    new_parser.add_argument("title", nargs="+", metavar=t("标题", "title"))
 
     move_parser = commands.add_parser("move", help=t("迁移任务状态", "move a task between states"))
-    move_parser.add_argument("task")
+    move_parser.add_argument("task", metavar=t("任务", "task"))
     move_parser.add_argument("state", choices=STATES)
 
     pick_parser = commands.add_parser("pick", help=t("将 backlog 任务移入 todo", "move a backlog task to todo"))
-    pick_parser.add_argument("task", nargs="?")
+    pick_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
 
     start_parser = commands.add_parser("start", help=t("领取任务并按 Onevoke 配置启动 Agent", "claim a task and launch an Agent using Onevoke configuration"))
-    start_parser.add_argument("task", nargs="?")
+    start_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
     start_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
     start_parser.add_argument(
         "--launcher", choices=("tmux", "foreground"), help=t("覆盖配置中的启动方式", "override the configured launcher")

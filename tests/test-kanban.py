@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -130,6 +131,10 @@ printf '%s\\n' '@9'
         chinese_error = self.run_command("nope", succeeds=False)
         self.assertIn("参数 命令: 无效选择", chinese_error.stderr)
         self.assertNotIn("argument command", chinese_error.stderr)
+
+        self.assertIn("项目路径", self.run_command("init", "--help").stdout)
+        self.assertIn("任务", self.run_command("show", "--help").stdout)
+        self.assertIn("标题", self.run_command("new", "--help").stdout)
 
         self.env["ONEVOKE_LANG"] = "en"
         english = self.run_command("--help")
@@ -296,7 +301,8 @@ printf '%s\\n' '@9'
         output = self.run_command("list", "backlog").stdout
         plain = re.sub(r"\033\[[0-9;]*m", "", output)
 
-        self.assertEqual("状态       规模     时间    任务 ID / 标题", plain.splitlines()[0])
+        lines = plain.splitlines()
+        self.assertEqual("状态     规模   时间  任务 ID / 标题", lines[0])
         self.assertIn(f"backlog  small  -     {task_id}  表格输出", plain)
         self.assertIn(f"backlog  large  -     {large_id}  大型表格输出", plain)
         self.assertIn("\033[90mbacklog", output)
@@ -305,6 +311,20 @@ printf '%s\\n' '@9'
         self.assertIn(f"\033[96m{task_id}", output)
         self.assertIn("\033[95m表格输出", output)
         self.assertNotIn("\t", output)
+
+        def display_width(text: str) -> int:
+            return sum(
+                0 if unicodedata.combining(char) else
+                2 if unicodedata.east_asian_width(char) in "WF" else 1
+                for char in text
+            )
+
+        row = next(line for line in lines if task_id in line)
+        for heading, value in (("规模", "small"), ("时间", "-"), ("任务 ID", task_id)):
+            self.assertEqual(
+                display_width(lines[0][: lines[0].index(heading)]),
+                display_width(row[: row.index(value)]),
+            )
 
     def test_list_mobile_formats_each_task_as_vertical_block(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-list-mobile-task"
@@ -1161,6 +1181,28 @@ N/A
         self.assertEqual(2, english.returncode)
         self.assertIn("usage: install.sh", english.stderr)
         self.assertNotIn("用法", english.stderr)
+
+        fallbacks = (
+            {"ONEVOKE_LANG": "zh", "LC_ALL": "en"},
+            {"ONEVOKE_LANG": "", "LC_ALL": "zh", "LC_MESSAGES": "en"},
+            {"ONEVOKE_LANG": "", "LC_ALL": "", "LC_MESSAGES": "zh", "LANG": "en"},
+            {"ONEVOKE_LANG": "", "LC_ALL": "", "LC_MESSAGES": "", "LANG": "zh"},
+        )
+        for index, locale_env in enumerate(fallbacks):
+            localized = subprocess.run(
+                ["sh", str(INSTALLER), "--force"],
+                stdin=subprocess.DEVNULL,
+                env={
+                    **os.environ,
+                    "HOME": str(self.root / f"arg-home-locale-{index}"),
+                    **locale_env,
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(2, localized.returncode)
+            self.assertIn("用法: install.sh", localized.stderr)
 
 
 if __name__ == "__main__":

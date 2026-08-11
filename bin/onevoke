@@ -1200,7 +1200,7 @@ def parser() -> argparse.ArgumentParser:
     config = commands.add_parser("config", help=t("输出当前配置", "print the current configuration"))
     config.add_argument("--json", action="store_true", help=t("以 JSON 输出", "output JSON"))
     review = commands.add_parser("review", help=t("按配置选择 Reviewer wrapper", "select a Reviewer wrapper from configuration"))
-    review.add_argument("arguments", nargs=argparse.REMAINDER)
+    review.add_argument("arguments", nargs=argparse.REMAINDER, metavar=t("参数", "arguments"))
     return result
 
 
