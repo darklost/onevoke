@@ -331,6 +331,9 @@ class OnevokeCommandTest(unittest.TestCase):
         review_help = self.run_command("review", "--help")
         self.assertIn("参数", review_help.stdout)
         self.assertNotIn("arguments", review_help.stdout)
+        option_error = self.run_command("config", "--json=foo")
+        self.assertIn("不接受显式参数 'foo'", option_error.stderr)
+        self.assertNotIn("ignored explicit argument", option_error.stderr)
 
         self.env.pop("ONEVOKE_LANG")
         self.env["LC_ALL"] = "zh_CN.UTF-8"

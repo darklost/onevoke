@@ -135,6 +135,9 @@ printf '%s\\n' '@9'
         self.assertIn("项目路径", self.run_command("init", "--help").stdout)
         self.assertIn("任务", self.run_command("show", "--help").stdout)
         self.assertIn("标题", self.run_command("new", "--help").stdout)
+        option_error = self.run_command("list", "--mobile=foo", succeeds=False)
+        self.assertIn("不接受显式参数 'foo'", option_error.stderr)
+        self.assertNotIn("ignored explicit argument", option_error.stderr)
 
         self.env["ONEVOKE_LANG"] = "en"
         english = self.run_command("--help")

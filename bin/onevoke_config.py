@@ -27,6 +27,7 @@ ARGPARSE_ZH = {
     "the following arguments are required: %s": "缺少以下必需参数: %s",
     "expected one argument": "需要一个参数",
     "expected at least one argument": "至少需要一个参数",
+    "ignored explicit argument %r": "不接受显式参数 %r",
     "invalid choice: %(value)r (choose from %(choices)s)": (
         "无效选择: %(value)r (可选: %(choices)s)"
     ),
