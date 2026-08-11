@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import pty
+import shutil
 import signal
 import subprocess
 import sys
@@ -116,13 +117,16 @@ class OnevokeCommandTest(unittest.TestCase):
         return hooks_file
 
     def install_fake_claude_memsearch_plugin(self, version: str) -> Path:
-        plugin = self.root / f"claude-memsearch-{version}"
-        (plugin / ".claude-plugin").mkdir(parents=True)
-        (plugin / ".claude-plugin" / "plugin.json").write_text(
+        marketplace = (
+            self.home / ".claude" / "plugins" / "marketplaces" / "memsearch-plugins"
+        )
+        source_plugin = marketplace / "plugins" / "claude-code"
+        (source_plugin / ".claude-plugin").mkdir(parents=True)
+        (source_plugin / ".claude-plugin" / "plugin.json").write_text(
             json.dumps({"name": "memsearch", "version": version}),
             encoding="utf-8",
         )
-        hooks_dir = plugin / "hooks"
+        hooks_dir = source_plugin / "hooks"
         hooks_dir.mkdir()
         (hooks_dir / "common.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         hooks = {}
@@ -147,6 +151,58 @@ class OnevokeCommandTest(unittest.TestCase):
         (hooks_dir / "hooks.json").write_text(
             json.dumps({"hooks": hooks}), encoding="utf-8"
         )
+        git = shutil.which("git")
+        if git is None:
+            self.fail("测试需要 git")
+        subprocess.run([git, "init", "-q", str(marketplace)], check=True)
+        subprocess.run(
+            [git, "-C", str(marketplace), "add", "plugins/claude-code"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                git,
+                "-C",
+                str(marketplace),
+                "-c",
+                "user.name=Onevoke Test",
+                "-c",
+                "user.email=onevoke@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "fixture",
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                git,
+                "-C",
+                str(marketplace),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/zilliztech/memsearch.git",
+            ],
+            check=True,
+        )
+        revision = subprocess.run(
+            [git, "-C", str(marketplace), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        plugin = (
+            self.home
+            / ".claude"
+            / "plugins"
+            / "cache"
+            / "memsearch-plugins"
+            / "memsearch"
+            / version
+        )
+        shutil.copytree(source_plugin, plugin)
         settings = self.home / ".claude" / "settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(
@@ -159,7 +215,13 @@ class OnevokeCommandTest(unittest.TestCase):
             json.dumps(
                 {
                     "plugins": {
-                        "memsearch@memsearch-plugins": [{"installPath": str(plugin)}]
+                        "memsearch@memsearch-plugins": [
+                            {
+                                "installPath": str(plugin),
+                                "version": version,
+                                "gitCommitSha": revision,
+                            }
+                        ]
                     }
                 }
             ),
@@ -173,11 +235,21 @@ class OnevokeCommandTest(unittest.TestCase):
                         "source": {
                             "source": "github",
                             "repo": "zilliztech/memsearch",
-                        }
+                        },
+                        "installLocation": str(marketplace),
                     }
                 }
             ),
             encoding="utf-8",
+        )
+        self.fake_command(
+            "git",
+            "#!/bin/sh\n"
+            "if [ \"$1\" = '-C' ] && [ \"$3\" = 'remote' ]; then\n"
+            "  printf '%s\\n' 'https://github.com/zilliztech/memsearch.git'\n"
+            "elif [ \"$1\" = '-C' ] && [ \"$3\" = 'rev-parse' ]; then\n"
+            f"  printf '%s\\n' '{revision}'\n"
+            "fi\n",
         )
         return plugin
 
@@ -188,6 +260,7 @@ class OnevokeCommandTest(unittest.TestCase):
         remote_url: str = "https://github.com/zilliztech/memsearch.git",
         install_hooks: bool = True,
         create_installer: bool = True,
+        create_bash: bool = True,
         installer_exit: int = 0,
         uv_exit: int = 0,
     ) -> tuple[Path, Path, Path]:
@@ -283,14 +356,23 @@ class OnevokeCommandTest(unittest.TestCase):
             "\"$destination/plugins/codex/hooks/stop.sh\"\n"
             "/bin/chmod +x \"$destination/plugins/codex/hooks/\"*.sh\n",
         )
-        bash_body = "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$BASH_LOG\"\n"
+        bash_body = (
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" > \"$BASH_LOG\"\n"
+            "/bin/mkdir -p \"$HOME/.codex\" \"$HOME/.agents/skills\"\n"
+            "printf '%s\\n' '[features]' 'hooks = true' > \"$HOME/.codex/config.toml\"\n"
+            "for skill in memory-recall memory-config memory-to-skill; do\n"
+            "  /bin/mkdir -p \"$HOME/.agents/skills/$skill\"\n"
+            "  printf '%s\\n' 'test skill' > \"$HOME/.agents/skills/$skill/SKILL.md\"\n"
+            "done\n"
+        )
         if install_hooks:
             bash_body += (
-                "/bin/mkdir -p \"$HOME/.codex\"\n"
                 "/bin/cp \"$MEMSEARCH_HOOKS_TEMPLATE\" \"$HOME/.codex/hooks.json\"\n"
             )
         bash_body += "exit \"$MEMSEARCH_INSTALLER_EXIT\"\n"
-        self.fake_command("bash", bash_body)
+        if create_bash:
+            self.fake_command("bash", bash_body)
         return uv_log, git_log, bash_log
 
     def run_command(self, *args: str) -> subprocess.CompletedProcess:
@@ -616,16 +698,97 @@ class OnevokeCommandTest(unittest.TestCase):
 
             common = plugin / "hooks" / "common.sh"
             common.write_text("#!/bin/sh\nprintf 'changed\\n'\n", encoding="utf-8")
-            self.assertTrue(onevoke.claude_memsearch_ready())
+            self.assertFalse(onevoke.claude_memsearch_ready())
+            shutil.copy2(
+                self.home
+                / ".claude"
+                / "plugins"
+                / "marketplaces"
+                / "memsearch-plugins"
+                / "plugins"
+                / "claude-code"
+                / "hooks"
+                / "common.sh",
+                common,
+            )
 
             extra_skill = plugin / "skills" / "extra" / "SKILL.md"
             extra_skill.parent.mkdir(parents=True)
             extra_skill.write_text("extra instructions\n", encoding="utf-8")
-            self.assertTrue(onevoke.claude_memsearch_ready())
+            self.assertFalse(onevoke.claude_memsearch_ready())
+            shutil.rmtree(plugin / "skills")
 
             common.unlink()
             common.symlink_to(plugin / "README.md")
             self.assertFalse(onevoke.claude_memsearch_ready())
+
+    def test_claude_plugin_rejects_external_install_path(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        plugin = self.install_fake_claude_memsearch_plugin("3.2.1")
+        external = self.root / "external-memsearch"
+        shutil.copytree(plugin, external)
+        installed = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        data = json.loads(installed.read_text(encoding="utf-8"))
+        data["plugins"]["memsearch@memsearch-plugins"][0]["installPath"] = str(
+            external
+        )
+        installed.write_text(json.dumps(data), encoding="utf-8")
+        onevoke = load_onevoke_module()
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertFalse(onevoke.claude_memsearch_ready())
+
+    def test_memsearch_environment_commit_rolls_back_on_failure_or_interrupt(
+        self,
+    ) -> None:
+        onevoke = load_onevoke_module()
+        original_replace = os.replace
+        targets = (
+            Path(".codex/config.toml"),
+            Path(".agents/skills/memory-recall"),
+        )
+
+        for raised in (OSError("publish failed"), KeyboardInterrupt()):
+            with self.subTest(exception=type(raised).__name__):
+                staged = self.root / f"staged-{type(raised).__name__}"
+                backup = self.root / f"backup-{type(raised).__name__}"
+                config = self.home / targets[0]
+                skill = self.home / targets[1]
+                shutil.rmtree(staged, ignore_errors=True)
+                shutil.rmtree(backup, ignore_errors=True)
+                shutil.rmtree(skill, ignore_errors=True)
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text("old config\n", encoding="utf-8")
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text("old skill\n", encoding="utf-8")
+                (staged / targets[0]).parent.mkdir(parents=True)
+                (staged / targets[0]).write_text("new config\n", encoding="utf-8")
+                (staged / targets[1]).mkdir(parents=True)
+                (staged / targets[1] / "SKILL.md").write_text(
+                    "new skill\n", encoding="utf-8"
+                )
+                promoted = 0
+
+                def replace(source, destination):
+                    nonlocal promoted
+                    if Path(source).is_relative_to(staged):
+                        promoted += 1
+                        if promoted == 2:
+                            raise raised
+                    return original_replace(source, destination)
+
+                with mock.patch.object(Path, "home", return_value=self.home):
+                    with mock.patch.object(onevoke.os, "replace", side_effect=replace):
+                        with self.assertRaises(type(raised)):
+                            onevoke.commit_staged_memsearch_home(
+                                staged, backup, targets
+                            )
+
+                self.assertEqual("old config\n", config.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    "old skill\n",
+                    (skill / "SKILL.md").read_text(encoding="utf-8"),
+                )
 
     def test_doctor_rejects_invalid_claude_plugin_version(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
@@ -826,6 +989,14 @@ class OnevokeCommandTest(unittest.TestCase):
             "plugins/codex/scripts/install.sh",
             bash_log.read_text(encoding="utf-8"),
         )
+        self.assertIn(
+            "hooks = true",
+            (self.home / ".codex" / "config.toml").read_text(encoding="utf-8"),
+        )
+        for skill_name in ("memory-recall", "memory-config", "memory-to-skill"):
+            self.assertTrue(
+                (self.home / ".agents" / "skills" / skill_name / "SKILL.md").is_file()
+            )
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertTrue(config["memsearch"]["enabled"])
 
@@ -1442,6 +1613,14 @@ class OnevokeCommandTest(unittest.TestCase):
         installer.write_text("#!/bin/sh\n", encoding="utf-8")
         marker = source / "old-cache"
         marker.write_text("keep\n", encoding="utf-8")
+        hooks = self.home / ".codex" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text('{"original": true}\n', encoding="utf-8")
+        config_file = self.home / ".codex" / "config.toml"
+        config_file.write_text("original = true\n", encoding="utf-8")
+        skill = self.home / ".agents" / "skills" / "memory-recall" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("original skill\n", encoding="utf-8")
 
         returncode, output = self.run_on_tty(
             "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
@@ -1450,8 +1629,37 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, returncode, output)
         self.assertIn("Codex 插件安装命令未成功退出; 已恢复原缓存", output)
         self.assertTrue(marker.is_file())
+        self.assertEqual('{"original": true}\n', hooks.read_text(encoding="utf-8"))
+        self.assertEqual("original = true\n", config_file.read_text(encoding="utf-8"))
+        self.assertEqual("original skill\n", skill.read_text(encoding="utf-8"))
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_restores_cache_when_codex_installer_cannot_start(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_memsearch_tools(create_bash=False)
+        source = self.root / "memsearch-source"
+        installer = source / "plugins" / "codex" / "scripts" / "install.sh"
+        installer.parent.mkdir(parents=True)
+        installer.write_text("#!/bin/sh\n", encoding="utf-8")
+        marker = source / "old-cache"
+        marker.write_text("keep\n", encoding="utf-8")
+        hooks = self.home / ".codex" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text('{"original": true}\n', encoding="utf-8")
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 安装过程异常", output)
+        self.assertTrue(marker.is_file())
+        self.assertEqual('{"original": true}\n', hooks.read_text(encoding="utf-8"))
+        self.assertFalse((self.home / ".codex" / "config.toml").exists())
+        self.assertFalse(
+            (self.home / ".agents" / "skills" / "memory-recall").exists()
+        )
 
     def test_welcome_reports_single_tmux_session_hint(self) -> None:
         """tmux 已装但当前不在 session 时, welcome/doctor 只给一次准确命令."""
@@ -1471,7 +1679,10 @@ class OnevokeCommandTest(unittest.TestCase):
         """用上游默认分支最新版验证 Claude 插件结构契约."""
         self.install_fake_environment(tmux=True, memsearch=False)
         onevoke = load_onevoke_module()
-        source = self.root / "memsearch-latest"
+        source = (
+            self.home / ".claude" / "plugins" / "marketplaces" / "memsearch-plugins"
+        )
+        source.parent.mkdir(parents=True)
         clone = subprocess.run(
             [
                 "git",
@@ -1487,8 +1698,29 @@ class OnevokeCommandTest(unittest.TestCase):
         )
         if clone.returncode != 0:
             self.fail(f"无法拉取 MemSearch 默认分支最新版: {clone.stderr}")
-        plugin = source / "plugins" / "claude-code"
-        self.assertTrue(plugin.is_dir(), plugin)
+        source_plugin = source / "plugins" / "claude-code"
+        manifest = json.loads(
+            (source_plugin / ".claude-plugin" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        version = manifest["version"]
+        plugin = (
+            self.home
+            / ".claude"
+            / "plugins"
+            / "cache"
+            / "memsearch-plugins"
+            / "memsearch"
+            / version
+        )
+        shutil.copytree(source_plugin, plugin)
+        revision = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
 
         settings = self.home / ".claude" / "settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)
@@ -1502,7 +1734,13 @@ class OnevokeCommandTest(unittest.TestCase):
             json.dumps(
                 {
                     "plugins": {
-                        "memsearch@memsearch-plugins": [{"installPath": str(plugin)}]
+                        "memsearch@memsearch-plugins": [
+                            {
+                                "installPath": str(plugin),
+                                "version": version,
+                                "gitCommitSha": revision,
+                            }
+                        ]
                     }
                 }
             ),
@@ -1516,7 +1754,8 @@ class OnevokeCommandTest(unittest.TestCase):
                         "source": {
                             "source": "github",
                             "repo": "zilliztech/memsearch",
-                        }
+                        },
+                        "installLocation": str(source),
                     }
                 }
             ),
@@ -1530,7 +1769,7 @@ class OnevokeCommandTest(unittest.TestCase):
             readme = plugin / "README.md"
             original = readme.read_bytes()
             readme.write_bytes(original + b"\n")
-            self.assertTrue(onevoke.claude_memsearch_ready())
+            self.assertFalse(onevoke.claude_memsearch_ready())
             readme.write_bytes(original)
             common = plugin / "hooks" / "common.sh"
             common.unlink()

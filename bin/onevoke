@@ -56,6 +56,12 @@ MEMSEARCH_HOOKS = {
     "UserPromptSubmit": "user-prompt-submit.sh",
     "Stop": "stop.sh",
 }
+MEMSEARCH_CODEX_FILES = (
+    Path(".codex/hooks.json"),
+    Path(".codex/hooks.json.bak"),
+    Path(".codex/config.toml"),
+)
+MEMSEARCH_SKILLS = ("memory-recall", "memory-config", "memory-to-skill")
 
 
 class OnevokeError(Exception):
@@ -377,6 +383,58 @@ def claude_plugin_identified(root: Path) -> bool:
     return True
 
 
+def plugin_trees_match(source: Path, installed: Path) -> bool:
+    def files(root: Path, *, ignore_runtime: bool) -> dict[Path, Path] | None:
+        if root.is_symlink() or not root.is_dir():
+            return None
+        found: dict[Path, Path] = {}
+        try:
+            for entry in root.rglob("*"):
+                relative = entry.relative_to(root)
+                if ignore_runtime and relative.parts[0] == ".in_use":
+                    continue
+                if entry.is_symlink():
+                    return None
+                if entry.is_file():
+                    found[relative] = entry
+                elif not entry.is_dir():
+                    return None
+        except OSError:
+            return None
+        return found
+
+    source_files = files(source, ignore_runtime=False)
+    installed_files = files(installed, ignore_runtime=True)
+    if source_files is None or installed_files is None:
+        return False
+    if source_files.keys() != installed_files.keys():
+        return False
+    try:
+        return all(
+            source_files[relative].read_bytes()
+            == installed_files[relative].read_bytes()
+            for relative in source_files
+        )
+    except OSError:
+        return False
+
+
+def git_revision(source: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    revision = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    return revision
+
+
 def codex_memsearch_ready() -> bool:
     hooks_file = Path.home() / ".codex" / "hooks.json"
     hooks_dir = hooks_directory(read_json_file(hooks_file))
@@ -407,6 +465,18 @@ def claude_memsearch_ready() -> bool:
         or marketplace_source.get("repo") != "zilliztech/memsearch"
     ):
         return False
+    expected_marketplace = claude / "plugins" / "marketplaces" / "memsearch-plugins"
+    install_location = marketplace.get("installLocation")
+    if (
+        not isinstance(install_location, str)
+        or Path(install_location).expanduser().absolute() != expected_marketplace
+        or not verify_memsearch_source(expected_marketplace, quiet=True)
+    ):
+        return False
+    marketplace_revision = git_revision(expected_marketplace)
+    if marketplace_revision is None:
+        return False
+    marketplace_plugin = expected_marketplace / "plugins" / "claude-code"
 
     settings = read_json_file(claude / "settings.json")
     if not isinstance(settings, dict):
@@ -424,19 +494,36 @@ def claude_memsearch_ready() -> bool:
     for record in records:
         if not isinstance(record, dict) or not isinstance(record.get("installPath"), str):
             continue
-        root = Path(record["installPath"]).expanduser()
+        record_version = record.get("version")
+        if (
+            not isinstance(record_version, str)
+            or not MEMSEARCH_VERSION_RE.fullmatch(record_version)
+            or record.get("gitCommitSha") != marketplace_revision
+        ):
+            continue
+        expected_root = (
+            claude
+            / "plugins"
+            / "cache"
+            / "memsearch-plugins"
+            / "memsearch"
+            / record_version
+        )
+        root = Path(record["installPath"]).expanduser().absolute()
+        if root != expected_root:
+            continue
         manifest = read_json_file(root / ".claude-plugin" / "plugin.json")
         if (
             not isinstance(manifest, dict)
             or manifest.get("name") != "memsearch"
-            or not isinstance(manifest.get("version"), str)
-            or not MEMSEARCH_VERSION_RE.fullmatch(manifest["version"])
+            or manifest.get("version") != record_version
         ):
             continue
         hooks_dir = hooks_directory(read_json_file(root / "hooks" / "hooks.json"), root)
         if (
             hooks_dir == (root / "hooks").resolve()
             and claude_plugin_identified(root)
+            and plugin_trees_match(marketplace_plugin, root)
         ):
             return True
     return False
@@ -769,6 +856,104 @@ def install_memsearch_cli() -> bool:
         return False
 
 
+def path_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def prepare_staged_memsearch_home(staged_home: Path) -> bool:
+    home = Path.home()
+    staged_home.mkdir()
+    for relative in MEMSEARCH_CODEX_FILES:
+        source = home / relative
+        if not path_exists(source):
+            continue
+        if source.is_symlink() or not source.is_file():
+            return False
+        target = staged_home / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    return True
+
+
+def staged_memsearch_targets(staged_home: Path) -> tuple[Path, ...] | None:
+    required_files = {Path(".codex/config.toml")}
+    optional_files = {
+        Path(".codex/hooks.json"),
+        Path(".codex/hooks.json.bak"),
+    }
+    skill_roots = {
+        Path(".agents/skills") / skill_name for skill_name in MEMSEARCH_SKILLS
+    }
+    allowed_files = required_files | optional_files
+
+    try:
+        for entry in staged_home.rglob("*"):
+            relative = entry.relative_to(staged_home)
+            if entry.is_symlink() or not (entry.is_file() or entry.is_dir()):
+                return None
+            if entry.is_file() and relative in allowed_files:
+                continue
+            if any(relative == root or root in relative.parents for root in skill_roots):
+                continue
+            if entry.is_dir() and any(relative in root.parents for root in skill_roots):
+                continue
+            if entry.is_dir() and any(relative in path.parents for path in allowed_files):
+                continue
+            return None
+    except OSError:
+        return None
+
+    if any(not (staged_home / relative).is_file() for relative in required_files):
+        return None
+    if any(not (staged_home / relative).is_dir() for relative in skill_roots):
+        return None
+    targets = [*required_files, *skill_roots]
+    targets.extend(
+        relative
+        for relative in optional_files
+        if path_exists(staged_home / relative)
+    )
+    return tuple(sorted(targets, key=str))
+
+
+def commit_staged_memsearch_home(
+    staged_home: Path, backup_root: Path, targets: tuple[Path, ...]
+) -> None:
+    home = Path.home()
+    committed: list[tuple[Path, Path, bool]] = []
+    try:
+        for relative in targets:
+            staged = staged_home / relative
+            target = home / relative
+            backup = backup_root / relative
+            had_target = path_exists(target)
+            if had_target:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target, backup)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(staged, target)
+            except BaseException:
+                remove_path(target)
+                if had_target:
+                    os.replace(backup, target)
+                raise
+            committed.append((target, backup, had_target))
+    except BaseException:
+        for target, backup, had_target in reversed(committed):
+            remove_path(target)
+            if had_target:
+                os.replace(backup, target)
+        raise
+
+
 def install_memsearch_for(agent: str) -> bool:
     """帮用户执行当前 Agent 的可自动安装步骤.
 
@@ -856,7 +1041,8 @@ def install_memsearch_for(agent: str) -> bool:
 
                 def restore_previous_source() -> None:
                     failed_source = temporary_root_path / "failed"
-                    os.replace(source, failed_source)
+                    if path_exists(source):
+                        os.replace(source, failed_source)
                     if cached_source:
                         os.replace(previous_source, source)
 
@@ -868,20 +1054,55 @@ def install_memsearch_for(agent: str) -> bool:
                     ),
                     file=sys.stderr,
                 )
-                result = subprocess.run(["bash", str(installer)], check=False)
-                if result.returncode != 0:
-                    restore_previous_source()
-                    warning(
-                        t(
-                            "Codex 插件安装命令未成功退出; 已恢复原缓存."
-                            if cached_source
-                            else "Codex 插件安装命令未成功退出; 未保留失败缓存.",
-                            "The Codex plugin installation command failed; restored the previous cache."
-                            if cached_source
-                            else "The Codex plugin installation command failed; discarded the failed cache.",
+                try:
+                    with tempfile.TemporaryDirectory(
+                        prefix=".onevoke-memsearch.", dir=Path.home()
+                    ) as environment_root:
+                        environment_root_path = Path(environment_root)
+                        staged_home = environment_root_path / "home"
+                        if not prepare_staged_memsearch_home(staged_home):
+                            restore_previous_source()
+                            warning(t(
+                                "Codex 配置目标不是普通文件, 已取消插件安装并恢复原缓存.",
+                                "A Codex configuration target is not a regular file; cancelled the plugin installation and restored the previous cache.",
+                            ))
+                            return False
+                        installer_environment = os.environ.copy()
+                        installer_environment["HOME"] = str(staged_home)
+                        result = subprocess.run(
+                            ["bash", str(installer)],
+                            check=False,
+                            env=installer_environment,
                         )
-                    )
-                    return False
+                        if result.returncode != 0:
+                            restore_previous_source()
+                            warning(
+                                t(
+                                    "Codex 插件安装命令未成功退出; 已恢复原缓存."
+                                    if cached_source
+                                    else "Codex 插件安装命令未成功退出; 未保留失败缓存.",
+                                    "The Codex plugin installation command failed; restored the previous cache."
+                                    if cached_source
+                                    else "The Codex plugin installation command failed; discarded the failed cache.",
+                                )
+                            )
+                            return False
+                        targets = staged_memsearch_targets(staged_home)
+                        if targets is None:
+                            restore_previous_source()
+                            warning(t(
+                                "Codex 插件安装器生成了不受支持的文件布局; 已恢复原缓存且未修改真实 Agent 环境.",
+                                "The Codex plugin installer produced an unsupported file layout; restored the previous cache without modifying the real Agent environment.",
+                            ))
+                            return False
+                        commit_staged_memsearch_home(
+                            staged_home,
+                            environment_root_path / "backup",
+                            targets,
+                        )
+                except BaseException:
+                    restore_previous_source()
+                    raise
                 success(t("已执行 MemSearch Codex 插件安装命令.", "Ran the MemSearch Codex plugin installation command."))
                 return True
         if agent == "claude":
