@@ -388,6 +388,21 @@ def codex_memsearch_ready() -> bool:
 
 def claude_memsearch_ready() -> bool:
     claude = Path.home() / ".claude"
+    marketplaces = read_json_file(claude / "plugins" / "known_marketplaces.json")
+    if not isinstance(marketplaces, dict):
+        return False
+    marketplace = marketplaces.get("memsearch-plugins")
+    if not isinstance(marketplace, dict) or not isinstance(
+        marketplace.get("source"), dict
+    ):
+        return False
+    marketplace_source = marketplace["source"]
+    if (
+        marketplace_source.get("source") != "github"
+        or marketplace_source.get("repo") != "zilliztech/memsearch"
+    ):
+        return False
+
     settings = read_json_file(claude / "settings.json")
     if not isinstance(settings, dict):
         return False

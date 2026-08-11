@@ -165,6 +165,20 @@ class OnevokeCommandTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        marketplaces = self.home / ".claude" / "plugins" / "known_marketplaces.json"
+        marketplaces.write_text(
+            json.dumps(
+                {
+                    "memsearch-plugins": {
+                        "source": {
+                            "source": "github",
+                            "repo": "zilliztech/memsearch",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
         return plugin
 
     def install_fake_memsearch_tools(
@@ -614,6 +628,33 @@ class OnevokeCommandTest(unittest.TestCase):
         result = self.run_command("doctor")
 
         self.assertIn("Claude 插件: 未接入", result.stderr)
+
+    def test_claude_plugin_requires_official_marketplace_source(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_claude_memsearch_plugin("3.2.1")
+        onevoke = load_onevoke_module()
+        marketplaces = self.home / ".claude" / "plugins" / "known_marketplaces.json"
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertTrue(onevoke.claude_memsearch_ready())
+
+            marketplaces.unlink()
+            self.assertFalse(onevoke.claude_memsearch_ready())
+
+            marketplaces.write_text(
+                json.dumps(
+                    {
+                        "memsearch-plugins": {
+                            "source": {
+                                "source": "github",
+                                "repo": "untrusted/memsearch",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertFalse(onevoke.claude_memsearch_ready())
 
     def test_doctor_rejects_unverified_same_name_codex_hooks(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
@@ -1362,6 +1403,20 @@ class OnevokeCommandTest(unittest.TestCase):
                 {
                     "plugins": {
                         "memsearch@memsearch-plugins": [{"installPath": str(plugin)}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        marketplaces = self.home / ".claude" / "plugins" / "known_marketplaces.json"
+        marketplaces.write_text(
+            json.dumps(
+                {
+                    "memsearch-plugins": {
+                        "source": {
+                            "source": "github",
+                            "repo": "zilliztech/memsearch",
+                        }
                     }
                 }
             ),
