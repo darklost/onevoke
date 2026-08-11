@@ -46,6 +46,11 @@ COMMANDS = (
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
 MEMSEARCH_PACKAGE = "memsearch[onnx]"
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
+MEMSEARCH_VERSION_OUTPUT = re.compile(
+    r"\A\s*memsearch,\s+version\s+"
+    r"(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s*\Z",
+    flags=re.IGNORECASE,
+)
 MEMSEARCH_HOOKS = {
     "SessionStart": "session-start.sh",
     "UserPromptSubmit": "user-prompt-submit.sh",
@@ -292,7 +297,7 @@ def memsearch_cli_state() -> tuple[str | None, str | None, bool]:
     except (OSError, subprocess.TimeoutExpired):
         return command, None, False
     output = "\n".join(part for part in (result.stdout, result.stderr) if part)
-    match = re.search(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)", output)
+    match = MEMSEARCH_VERSION_OUTPUT.fullmatch(output)
     version = match.group(1) if result.returncode == 0 and match else None
     return command, version, version is not None
 
@@ -784,7 +789,6 @@ def install_memsearch_for(agent: str) -> bool:
                     Path.home() / ".local" / "share" / "onevoke" / "memsearch",
                 )
             ).expanduser()
-            installer = source / "plugins" / "codex" / "scripts" / "install.sh"
             cached_source = source.exists() or source.is_symlink()
             if cached_source and not verify_memsearch_source(source):
                 warning(
@@ -827,6 +831,16 @@ def install_memsearch_for(agent: str) -> bool:
                 if not verify_memsearch_source(temporary_source):
                     warning(t("最新源码未通过来源或工作树校验, 已跳过 Codex 插件安装器.", "The latest source failed repository or worktree verification; skipped the Codex plugin installer."))
                     return False
+                temporary_installer = (
+                    temporary_source
+                    / "plugins"
+                    / "codex"
+                    / "scripts"
+                    / "install.sh"
+                )
+                if not temporary_installer.is_file():
+                    warning(t(f"找不到 MemSearch Codex 安装器: {temporary_installer}", f"MemSearch Codex installer not found: {temporary_installer}"))
+                    return False
                 previous_source = temporary_root_path / "previous"
                 if cached_source:
                     os.replace(source, previous_source)
@@ -836,25 +850,50 @@ def install_memsearch_for(agent: str) -> bool:
                     if cached_source:
                         os.replace(previous_source, source)
                     raise
-            if not installer.is_file():
-                warning(t(f"找不到 MemSearch Codex 安装器: {installer}", f"MemSearch Codex installer not found: {installer}"))
-                return False
-            print(
-                t(
-                    "Codex 插件会修改 ~/.codex 配置并替换 MemSearch skills.",
-                    "The Codex plugin will modify ~/.codex configuration and replace MemSearch skills.",
-                ),
-                file=sys.stderr,
-            )
-            result = subprocess.run(["bash", str(installer)], check=False)
-            if result.returncode != 0:
-                warning(t("Codex 插件安装命令未成功退出.", "The Codex plugin installation command failed."))
-                return False
-            if not cli_ok:
-                warning(t("Codex 插件安装命令已执行, 但 CLI 安装未完成.", "The Codex plugin installer ran, but the CLI installation did not complete."))
-                return False
-            success(t("已执行 MemSearch Codex 插件安装命令.", "Ran the MemSearch Codex plugin installation command."))
-            return True
+
+                def restore_previous_source() -> None:
+                    failed_source = temporary_root_path / "failed"
+                    os.replace(source, failed_source)
+                    if cached_source:
+                        os.replace(previous_source, source)
+
+                installer = source / "plugins" / "codex" / "scripts" / "install.sh"
+                print(
+                    t(
+                        "Codex 插件会修改 ~/.codex 配置并替换 MemSearch skills.",
+                        "The Codex plugin will modify ~/.codex configuration and replace MemSearch skills.",
+                    ),
+                    file=sys.stderr,
+                )
+                result = subprocess.run(["bash", str(installer)], check=False)
+                if result.returncode != 0:
+                    restore_previous_source()
+                    warning(
+                        t(
+                            "Codex 插件安装命令未成功退出; 已恢复原缓存."
+                            if cached_source
+                            else "Codex 插件安装命令未成功退出; 未保留失败缓存.",
+                            "The Codex plugin installation command failed; restored the previous cache."
+                            if cached_source
+                            else "The Codex plugin installation command failed; discarded the failed cache.",
+                        )
+                    )
+                    return False
+                if not cli_ok:
+                    restore_previous_source()
+                    warning(
+                        t(
+                            "Codex 插件安装命令已执行, 但 CLI 安装未完成; 已恢复原缓存."
+                            if cached_source
+                            else "Codex 插件安装命令已执行, 但 CLI 安装未完成; 未保留失败缓存.",
+                            "The Codex plugin installer ran, but the CLI installation did not complete; restored the previous cache."
+                            if cached_source
+                            else "The Codex plugin installer ran, but the CLI installation did not complete; discarded the failed cache.",
+                        )
+                    )
+                    return False
+                success(t("已执行 MemSearch Codex 插件安装命令.", "Ran the MemSearch Codex plugin installation command."))
+                return True
         if agent == "claude":
             # 插件只能在 Claude Code 内手工装; 仅 CLI 成功不算接入完成.
             if not cli_ok:

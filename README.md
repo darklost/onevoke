@@ -49,7 +49,7 @@ memsearch 是可选依赖. welcome/`doctor` 可检查 CLI 与当前执行 Agent 
 - 检查 MemSearch CLI 是否能正常报告版本及当前执行 Agent 的有效插件, 缺失或异常时询问安装.
 - 检查所选 Agent 是否已经接入 Onevoke 规则, 但不覆盖用户的 Agent 全局配置.
 
-Codex 的 MemSearch 自动安装不固定版本: CLI 使用 `uv tool install -U "memsearch[onnx]"` 获取 PyPI 最新版, 插件每次安装都从官方仓库默认分支重新浅克隆最新版. 只对来源匹配且工作树 clean 的插件源码执行安装命令; CLI 与 Codex 插件 install.sh 都执行成功才把配置标为启用, 不做安装后 hooks 完整就绪二次校验. `doctor` 仍可检查 CLI 与 hooks 的实际状态. 既有缓存被修改、来源不符或出现未跟踪文件时会跳过插件安装器, 且不把配置标为启用.
+Codex 的 MemSearch 自动安装不固定版本: CLI 使用 `uv tool install -U "memsearch[onnx]"` 获取 PyPI 最新版, 插件每次安装都从官方仓库默认分支重新浅克隆最新版. 只对来源匹配且工作树 clean 的插件源码执行安装命令; CLI 与 Codex 插件 install.sh 都执行成功才把配置标为启用, 不做安装后 hooks 完整就绪二次校验. `doctor` 仍可检查 CLI 与 hooks 的实际状态. 既有缓存被修改、来源不符或出现未跟踪文件时会跳过插件安装器; clean 旧缓存会保留到最新版安装成功, 安装器缺失时不替换, 执行失败时恢复. 这些失败均不把配置标为启用.
 
 Claude 的 MemSearch 接入不固定插件版本. 手动安装步骤先刷新 `memsearch-plugins` Marketplace, 再安装其当前最新版. `doctor` 校验 Marketplace 来自 `zilliztech/memsearch`、启用记录、插件名称、有效版本字段、hook 注册、必需文件和目录内无符号链接; 不用固定文件摘要限制上游新增或修改组件.
 

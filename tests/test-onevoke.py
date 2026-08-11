@@ -188,6 +188,7 @@ class OnevokeCommandTest(unittest.TestCase):
         remote_url: str = "https://github.com/zilliztech/memsearch.git",
         install_hooks: bool = True,
         create_installer: bool = True,
+        installer_exit: int = 0,
     ) -> tuple[Path, Path, Path]:
         uv_log = self.root / "uv.log"
         git_log = self.root / "git.log"
@@ -208,6 +209,7 @@ class OnevokeCommandTest(unittest.TestCase):
                 "MEMSEARCH_REMOTE_URL": remote_url,
                 "MEMSEARCH_SOURCE_STATUS": source_status,
                 "MEMSEARCH_CREATE_INSTALLER": "1" if create_installer else "",
+                "MEMSEARCH_INSTALLER_EXIT": str(installer_exit),
                 "ONEVOKE_MEMSEARCH_SOURCE": str(self.root / "memsearch-source"),
                 "MEMSEARCH_HOOKS_TEMPLATE": str(self.root / "hooks-template.json"),
             }
@@ -281,6 +283,7 @@ class OnevokeCommandTest(unittest.TestCase):
                 "/bin/mkdir -p \"$HOME/.codex\"\n"
                 "/bin/cp \"$MEMSEARCH_HOOKS_TEMPLATE\" \"$HOME/.codex/hooks.json\"\n"
             )
+        bash_body += "exit \"$MEMSEARCH_INSTALLER_EXIT\"\n"
         self.fake_command("bash", bash_body)
         return uv_log, git_log, bash_log
 
@@ -740,6 +743,24 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("CLI 无法正常报告版本", result.stderr)
         self.assertIn("配置启用了 MemSearch", result.stderr)
+
+    def test_doctor_rejects_malformed_or_unrelated_version_output(self) -> None:
+        self.install_fake_environment(tmux=True)
+
+        for output in (
+            "memsearch, version 9.8.7broken",
+            "memsearch, version 9.8.7.4",
+            "Python 3.12.0",
+        ):
+            with self.subTest(output=output):
+                self.fake_command(
+                    "memsearch", f"#!/bin/sh\nprintf '%s\\n' '{output}'\n"
+                )
+
+                result = self.run_command("doctor")
+
+                self.assertEqual(1, result.returncode)
+                self.assertIn("CLI 无法正常报告版本", result.stderr)
 
     def test_invalid_config_is_reported_without_fallback(self) -> None:
         self.config.parent.mkdir(parents=True)
@@ -1350,6 +1371,44 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("MemSearch 安装未完成", output)
         self.assertFalse(bash_log.exists())
         self.assertIn("memsearch[onnx]", uv_log.read_text(encoding="utf-8"))
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_keeps_clean_cache_when_latest_installer_is_missing(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_memsearch_tools(create_installer=False)
+        source = self.root / "memsearch-source"
+        installer = source / "plugins" / "codex" / "scripts" / "install.sh"
+        installer.parent.mkdir(parents=True)
+        installer.write_text("#!/bin/sh\n", encoding="utf-8")
+        marker = source / "old-cache"
+        marker.write_text("keep\n", encoding="utf-8")
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("找不到 MemSearch Codex 安装器", output)
+        self.assertTrue(marker.is_file())
+
+    def test_welcome_restores_clean_cache_when_latest_installer_fails(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_memsearch_tools(installer_exit=1)
+        source = self.root / "memsearch-source"
+        installer = source / "plugins" / "codex" / "scripts" / "install.sh"
+        installer.parent.mkdir(parents=True)
+        installer.write_text("#!/bin/sh\n", encoding="utf-8")
+        marker = source / "old-cache"
+        marker.write_text("keep\n", encoding="utf-8")
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("Codex 插件安装命令未成功退出; 已恢复原缓存", output)
+        self.assertTrue(marker.is_file())
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertFalse(config["memsearch"]["enabled"])
 
