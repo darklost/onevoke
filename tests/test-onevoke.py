@@ -249,6 +249,8 @@ class OnevokeCommandTest(unittest.TestCase):
             "  printf '%s\\n' 'https://github.com/zilliztech/memsearch.git'\n"
             "elif [ \"$1\" = '-C' ] && [ \"$3\" = 'rev-parse' ]; then\n"
             f"  printf '%s\\n' '{revision}'\n"
+            "elif [ \"$1\" = '-C' ] && [ \"$3\" = 'archive' ]; then\n"
+            f"  exec '{git}' \"$@\"\n"
             "fi\n",
         )
         return plugin
@@ -761,6 +763,36 @@ class OnevokeCommandTest(unittest.TestCase):
                         os.replace(external, parent)
             self.assertTrue(onevoke.claude_memsearch_ready())
 
+    def test_claude_plugin_rejects_ignored_file_in_marketplace_and_cache(
+        self,
+    ) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        plugin = self.install_fake_claude_memsearch_plugin("3.2.1")
+        marketplace = (
+            self.home / ".claude" / "plugins" / "marketplaces" / "memsearch-plugins"
+        )
+        exclude = marketplace / ".git" / "info" / "exclude"
+        exclude.write_text(
+            "plugins/claude-code/skills/local/\n", encoding="utf-8"
+        )
+        source_skill = (
+            marketplace
+            / "plugins"
+            / "claude-code"
+            / "skills"
+            / "local"
+            / "SKILL.md"
+        )
+        source_skill.parent.mkdir(parents=True)
+        source_skill.write_text("injected skill\n", encoding="utf-8")
+        cache_skill = plugin / "skills" / "local" / "SKILL.md"
+        cache_skill.parent.mkdir(parents=True)
+        cache_skill.write_text("injected skill\n", encoding="utf-8")
+        onevoke = load_onevoke_module()
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertFalse(onevoke.claude_memsearch_ready())
+
     def test_memsearch_environment_commit_rolls_back_on_failure_or_interrupt(
         self,
     ) -> None:
@@ -944,6 +976,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "memsearch, version 9.8.7.4",
             "memsearch, version 9.8.7-...",
             "memsearch, version 9.8.7+.",
+            "memsearch, version ١.٢.٣",
             "Python 3.12.0",
         ):
             with self.subTest(output=output):
