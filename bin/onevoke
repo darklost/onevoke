@@ -16,10 +16,12 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from onevoke_config import (
+    ARGPARSE_ZH,
     EXECUTION_AGENTS,
     REVIEW_AGENTS,
     REVIEW_ROLES,
     ConfigError,
+    LocalizedArgumentParser,
     config_path,
     default_config,
     effective_config,
@@ -29,6 +31,7 @@ from onevoke_config import (
 )
 
 t = language_text
+argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 
 
 COMMANDS = (
@@ -1189,7 +1192,7 @@ def print_config(config: dict[str, Any]) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog="onevoke", description=t("Onevoke 配置与诊断", "Onevoke configuration and diagnostics"))
+    result = LocalizedArgumentParser(prog="onevoke", description=t("Onevoke 配置与诊断", "Onevoke configuration and diagnostics"))
     commands = result.add_subparsers(dest="command", required=True)
     welcome = commands.add_parser("welcome", help=t("检查环境并完成首次配置", "check the environment and complete initial setup"))
     welcome.add_argument("--reset", action="store_true", help=t("重新执行配置向导", "run the setup wizard again"))

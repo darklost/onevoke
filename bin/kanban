@@ -15,9 +15,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-from onevoke_config import ConfigError, effective_config, language_text, load_config
+from onevoke_config import (
+    ARGPARSE_ZH,
+    ConfigError,
+    LocalizedArgumentParser,
+    effective_config,
+    language_text,
+    load_config,
+)
 
 t = language_text
+argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 
 
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
@@ -187,10 +195,10 @@ def command_init(args: argparse.Namespace) -> None:
             raise KanbanError(t(f"状态路径不是目录: {path}", f"State path is not a directory: {path}"))
         path.mkdir(exist_ok=True)
     exclude = add_git_exclude(root)
-    print(f"initialized: {root}")
+    print(t(f"已初始化: {root}", f"initialized: {root}"))
     if exclude:
-        print(f"git exclude: {exclude}")
-    print(f"rules: {global_rules_path()}")
+        print(t(f"Git 排除文件: {exclude}", f"git exclude: {exclude}"))
+    print(t(f"规则: {global_rules_path()}", f"rules: {global_rules_path()}"))
 
 
 def ensure_layout(root: Path) -> None:
@@ -659,9 +667,12 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
         )
     rows.sort(key=lambda row: (row[2], row[3]), reverse=True)
     rows.sort(key=lambda row: STATES.index(row[0]))
-    headers = ("STATE", "SIZE", "TIME")
+    english_headers = ("STATE", "SIZE", "TIME")
+    headers = tuple(t(chinese, english) for chinese, english in zip(
+        ("状态", "规模", "时间"), english_headers
+    ))
     widths = [
-        max([len(header), *(len(row[index]) for row in rows)])
+        max([len(header), len(english_headers[index]), *(len(row[index]) for row in rows)])
         for index, header in enumerate(headers)
     ]
     use_color = "NO_COLOR" not in os.environ and (
@@ -698,7 +709,7 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
         return
 
     heading = "  ".join(f"{header:<{width}}" for header, width in zip(headers, widths))
-    print(color(heading + "  TASK ID / TITLE", "1"))
+    print(color(heading + t("  任务 ID / 标题", "  TASK ID / TITLE"), "1"))
     print("  ".join("-" * width for width in widths) + "  ---------------")
     for row in rows:
         state = color(f"{row[0]:<{widths[0]}}", palette[row[0]])
@@ -929,7 +940,10 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         raise
     if launcher == "foreground":
         print(
-            f"started: {entry.task_id}\tagent={agent_name}\tlauncher=foreground",
+            t(
+                f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=foreground",
+                f"started: {entry.task_id}\tagent={agent_name}\tlauncher=foreground",
+            ),
             flush=True,
         )
         returncode = process.wait()
@@ -939,24 +953,30 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 f"Agent started but exited with status {returncode}; task remains in working",
             ))
         return
-    print(f"started: {entry.task_id}\tagent={agent_name}\twindow={window}")
+    print(t(
+        f"已启动: {entry.task_id}\tAgent={agent_name}\t窗口={window}",
+        f"started: {entry.task_id}\tagent={agent_name}\twindow={window}",
+    ))
 
 
 def command_check(root: Path) -> int:
     board = scan(root)
     for problem in board.problems:
-        print(f"invalid: {problem.message}", file=sys.stderr)
+        print(t(f"无效: {problem.message}", f"invalid: {problem.message}"), file=sys.stderr)
     if board.problems:
         print(
-            f"checked: {len(board.entries)} valid, {len(board.problems)} invalid"
+            t(
+                f"已检查: {len(board.entries)} 个有效, {len(board.problems)} 个无效",
+                f"checked: {len(board.entries)} valid, {len(board.problems)} invalid",
+            )
         )
         return 1
-    print(f"ok: {len(board.entries)} tasks")
+    print(t(f"通过: {len(board.entries)} 个任务", f"ok: {len(board.entries)} tasks"))
     return 0
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog="kanban", description=t("本地文件看板", "Local file kanban board"))
+    result = LocalizedArgumentParser(prog="kanban", description=t("本地文件看板", "Local file kanban board"))
     commands = result.add_subparsers(dest="command", required=True)
 
     init_parser = commands.add_parser("init", help=t("创建看板目录框架", "create the board directory structure"))

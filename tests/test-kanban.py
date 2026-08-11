@@ -124,6 +124,12 @@ printf '%s\\n' '@9'
     def test_locale_selects_chinese_or_english(self) -> None:
         chinese = self.run_command("--help")
         self.assertIn("本地文件看板", chinese.stdout)
+        self.assertNotIn("usage:", chinese.stdout)
+        self.assertEqual("通过: 0 个任务\n", self.run_command("check").stdout)
+
+        chinese_error = self.run_command("nope", succeeds=False)
+        self.assertIn("参数 命令: 无效选择", chinese_error.stderr)
+        self.assertNotIn("argument command", chinese_error.stderr)
 
         self.env["ONEVOKE_LANG"] = "en"
         english = self.run_command("--help")
@@ -204,7 +210,7 @@ printf '%s\\n' '@9'
             "- 完成时间: ",
             (self.root / "done" / large_id / "spec.md").read_text(encoding="utf-8"),
         )
-        self.assertEqual("ok: 2 tasks\n", self.run_command("check").stdout)
+        self.assertEqual("通过: 2 个任务\n", self.run_command("check").stdout)
 
     def test_pick_moves_only_ready_backlog_task_to_todo(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-pick-task"
@@ -290,7 +296,7 @@ printf '%s\\n' '@9'
         output = self.run_command("list", "backlog").stdout
         plain = re.sub(r"\033\[[0-9;]*m", "", output)
 
-        self.assertEqual("STATE    SIZE   TIME  TASK ID / TITLE", plain.splitlines()[0])
+        self.assertEqual("状态       规模     时间    任务 ID / 标题", plain.splitlines()[0])
         self.assertIn(f"backlog  small  -     {task_id}  表格输出", plain)
         self.assertIn(f"backlog  large  -     {large_id}  大型表格输出", plain)
         self.assertIn("\033[90mbacklog", output)
@@ -313,7 +319,7 @@ printf '%s\\n' '@9'
 
     def test_list_accepts_empty_state(self) -> None:
         self.assertEqual("", self.run_command("list", "--mobile", "done").stdout)
-        self.assertIn("STATE", self.run_command("list", "done").stdout)
+        self.assertIn("状态", self.run_command("list", "done").stdout)
 
     def test_list_uses_document_mtime_for_legacy_done_task(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-legacy-done-task"
@@ -387,7 +393,7 @@ printf '%s\\n' '@9'
 
         result = self.run_command("start", task_id)
 
-        self.assertIn(f"started: {task_id}", result.stdout)
+        self.assertIn(f"已启动: {task_id}", result.stdout)
         started = self.root / "working" / task.name
         text = started.read_text(encoding="utf-8")
         self.assertIn("- 负责人: codex\n", text)
@@ -445,7 +451,7 @@ printf '%s\\n' '@9'
         self.assertIn(f"2. {second_id}", result.stdout)
         self.assertTrue(first.exists())
         self.assertTrue((self.root / "working" / second.name).exists())
-        self.assertIn("agent=claude", result.stdout)
+        self.assertIn("Agent=claude", result.stdout)
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn("--model opus --effort medium", command)
         self.assertIn("--dangerously-skip-permissions", command)
@@ -456,7 +462,7 @@ printf '%s\\n' '@9'
 
         result = self.run_command("start", "--agent", "grok", task_id)
 
-        self.assertIn("agent=grok", result.stdout)
+        self.assertIn("Agent=grok", result.stdout)
         started = self.root / "working" / task.name
         self.assertIn("- 负责人: grok\n", started.read_text(encoding="utf-8"))
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
@@ -485,7 +491,7 @@ printf '%s\\n' '@9'
 
         result = self.run_command("start", task_id)
 
-        self.assertIn("agent=grok", result.stdout)
+        self.assertIn("Agent=grok", result.stdout)
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn(str(fake_bin / "grok"), command)
         self.assertIn("--permission-mode bypassPermissions", command)
@@ -497,7 +503,7 @@ printf '%s\\n' '@9'
 
         result = self.run_command("start", task_id)
 
-        self.assertIn("agent=codex", result.stdout)
+        self.assertIn("Agent=codex", result.stdout)
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn(str(fake_bin / "codex"), command)
 
@@ -695,7 +701,7 @@ printf '%s\\n' '@9'
                 check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("ok: 0 tasks\n", result.stdout)
+            self.assertEqual("通过: 0 个任务\n", result.stdout)
 
     def test_init_non_git_project_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -712,7 +718,7 @@ printf '%s\\n' '@9'
                     check=False,
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
-                self.assertIn("rules: ", result.stdout)
+                self.assertIn("规则: ", result.stdout)
             for state in STATES:
                 self.assertTrue((project / "kanban" / state).is_dir())
             self.assertFalse((project / ".git").exists())
@@ -774,15 +780,15 @@ printf '%s\\n' '@9'
 
         self.assertEqual(1, result.returncode)
         self.assertIn("notes.md", result.stderr)
-        self.assertIn("checked: 0 valid, 1 invalid", result.stdout)
-        self.assertNotIn("ok:", result.stdout)
+        self.assertIn("已检查: 0 个有效, 1 个无效", result.stdout)
+        self.assertNotIn("通过:", result.stdout)
 
     def test_check_passes_on_a_clean_board(self) -> None:
         self.make_todo("clean")
 
         result = self.run_command("check")
 
-        self.assertEqual("ok: 1 tasks\n", result.stdout)
+        self.assertEqual("通过: 1 个任务\n", result.stdout)
 
     def test_duplicate_task_id_blocks_only_that_task(self) -> None:
         duplicated, todo_path = self.make_todo("dup")
@@ -823,7 +829,7 @@ printf '%s\\n' '@9'
         start = self.run_command("start", task_id, succeeds=False)
 
         self.assertIn("spec.md 不得是符号链接", check.stderr)
-        self.assertIn("checked:", check.stdout)
+        self.assertIn("已检查:", check.stdout)
         self.assertIn("spec.md 不得是符号链接", show.stderr)
         self.assertIn("spec.md 不得是符号链接", start.stderr)
         self.assertIn(healthy, self.run_command("list").stdout)

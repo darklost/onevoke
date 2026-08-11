@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import tempfile
@@ -16,6 +17,21 @@ EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 LAUNCHERS = ("tmux", "foreground")
+ARGPARSE_ZH = {
+    "usage: ": "用法: ",
+    "positional arguments": "位置参数",
+    "optional arguments": "可选参数",
+    "options": "选项",
+    "show this help message and exit": "显示帮助并退出",
+    "unrecognized arguments: %s": "无法识别的参数: %s",
+    "the following arguments are required: %s": "缺少以下必需参数: %s",
+    "expected one argument": "需要一个参数",
+    "expected at least one argument": "至少需要一个参数",
+    "invalid choice: %(value)r (choose from %(choices)s)": (
+        "无效选择: %(value)r (可选: %(choices)s)"
+    ),
+    "%(prog)s: error: %(message)s\n": "%(prog)s: 错误: %(message)s\n",
+}
 
 
 def language_text(chinese: str, english: str) -> str:
@@ -28,6 +44,29 @@ def language_text(chinese: str, english: str) -> str:
         "",
     )
     return chinese if locale.lower().startswith("zh") else english
+
+
+class LocalizedArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        if language_text("zh", "en") == "zh":
+            names = {
+                "arguments": "参数",
+                "command": "命令",
+                "project": "项目",
+                "slug": "slug",
+                "state": "状态",
+                "task": "任务",
+                "title": "标题",
+                "type": "类型",
+            }
+            if message.startswith("argument "):
+                name, separator, detail = message.removeprefix("argument ").partition(":")
+                message = f"参数 {names.get(name, name)}{separator}{detail}"
+            required = "缺少以下必需参数: "
+            if message.startswith(required):
+                values = message.removeprefix(required).split(", ")
+                message = required + ", ".join(names.get(value, value) for value in values)
+        super().error(message)
 
 
 class ConfigError(Exception):
