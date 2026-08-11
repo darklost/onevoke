@@ -15,7 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-from onevoke_config import ConfigError, effective_config, load_config
+from onevoke_config import ConfigError, effective_config, language_text, load_config
+
+t = language_text
 
 
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
@@ -38,7 +40,7 @@ TYPE_NAMES = {
 READY_SECTIONS = ("任务目标", "预期成果", "验收条件", "不在本轮范围")
 ARCHIVE_RESULTS = {"completed", "cancelled", "duplicate", "wontfix"}
 AGENT_NAMES = ("codex", "claude", "grok")
-NO_TITLE = "(无标题)"
+NO_TITLE = t("(无标题)", "(untitled)")
 
 
 class KanbanError(Exception):
@@ -106,7 +108,10 @@ def board_root() -> Path:
         candidate = parent / "kanban"
         if candidate.is_dir():
             return candidate.resolve()
-    raise KanbanError("找不到看板目录; 请在项目内运行或设置 KANBAN_DIR")
+    raise KanbanError(t(
+        "找不到看板目录; 请在项目内运行或设置 KANBAN_DIR",
+        "Board directory not found; run inside a project or set KANBAN_DIR",
+    ))
 
 
 def global_rules_path() -> Path:
@@ -116,7 +121,7 @@ def global_rules_path() -> Path:
 def command_rules() -> None:
     rules = global_rules_path()
     if not rules.is_file():
-        raise KanbanError(f"全局规则不存在: {rules}")
+        raise KanbanError(t(f"全局规则不存在: {rules}", f"Global rules file does not exist: {rules}"))
     sys.stdout.write(rules.read_text(encoding="utf-8"))
 
 
@@ -144,7 +149,7 @@ def add_git_exclude(root: Path) -> Optional[Path]:
         check=False,
     )
     if exclude_result.returncode != 0:
-        raise KanbanError("无法定位 Git info/exclude")
+        raise KanbanError(t("无法定位 Git info/exclude", "Cannot locate Git info/exclude"))
     exclude = Path(exclude_result.stdout.strip())
     if not exclude.is_absolute():
         exclude = git_root / exclude
@@ -162,11 +167,11 @@ def add_git_exclude(root: Path) -> Optional[Path]:
 def command_init(args: argparse.Namespace) -> None:
     configured = os.environ.get("KANBAN_DIR")
     if args.project and configured:
-        raise KanbanError("不能同时指定 project-path 和 KANBAN_DIR")
+        raise KanbanError(t("不能同时指定 project-path 和 KANBAN_DIR", "project-path and KANBAN_DIR cannot be used together"))
     if args.project:
         project = Path(args.project).expanduser().resolve()
         if not project.is_dir():
-            raise KanbanError(f"项目目录不存在: {project}")
+            raise KanbanError(t(f"项目目录不存在: {project}", f"Project directory does not exist: {project}"))
         root = project / "kanban"
     elif configured:
         root = Path(configured).expanduser().resolve()
@@ -174,12 +179,12 @@ def command_init(args: argparse.Namespace) -> None:
         project = git_main_worktree(Path.cwd()) or Path.cwd().resolve()
         root = project / "kanban"
     if root.exists() and not root.is_dir():
-        raise KanbanError(f"看板路径不是目录: {root}")
+        raise KanbanError(t(f"看板路径不是目录: {root}", f"Board path is not a directory: {root}"))
     root.mkdir(parents=True, exist_ok=True)
     for state in STATES:
         path = root / state
         if path.exists() and not path.is_dir():
-            raise KanbanError(f"状态路径不是目录: {path}")
+            raise KanbanError(t(f"状态路径不是目录: {path}", f"State path is not a directory: {path}"))
         path.mkdir(exist_ok=True)
     exclude = add_git_exclude(root)
     print(f"initialized: {root}")
@@ -190,13 +195,13 @@ def command_init(args: argparse.Namespace) -> None:
 
 def ensure_layout(root: Path) -> None:
     if not root.is_dir() or root.is_symlink():
-        raise KanbanError(f"看板目录不存在或不得是符号链接: {root}")
+        raise KanbanError(t(f"看板目录不存在或不得是符号链接: {root}", f"Board directory does not exist or is a symlink: {root}"))
     for state in STATES:
         path = root / state
         if path.is_symlink():
-            raise KanbanError(f"状态目录不得是符号链接: {path}")
+            raise KanbanError(t(f"状态目录不得是符号链接: {path}", f"State directory must not be a symlink: {path}"))
         if not path.is_dir():
-            raise KanbanError(f"状态目录不存在: {path}")
+            raise KanbanError(t(f"状态目录不存在: {path}", f"State directory does not exist: {path}"))
 
 
 def scan(root: Path) -> Board:
@@ -216,34 +221,34 @@ def scan(root: Path) -> Board:
             if path.name.startswith("."):
                 continue
             if path.is_symlink():
-                reject(path, f"任务入口不得是符号链接: {path}")
+                reject(path, t(f"任务入口不得是符号链接: {path}", f"Task entry must not be a symlink: {path}"))
                 continue
             if path.is_file() and path.name.endswith("-task.md"):
                 task_id, document, kind = path.name[:-3], path, "small"
             elif path.is_dir() and path.name.endswith("-task"):
                 task_id, document, kind = path.name, path / "spec.md", "large"
             else:
-                reject(path, f"无效任务入口: {path}")
+                reject(path, t(f"无效任务入口: {path}", f"Invalid task entry: {path}"))
                 continue
             if not TASK_ID_RE.fullmatch(task_id):
-                reject(path, f"无效任务 ID: {task_id}")
+                reject(path, t(f"无效任务 ID: {task_id}", f"Invalid task ID: {task_id}"))
                 continue
             if kind == "large":
                 if document.is_symlink():
                     reject(
                         path,
-                        f"大任务 spec.md 不得是符号链接: {document}",
+                        t(f"大任务 spec.md 不得是符号链接: {document}", f"Large-task spec.md must not be a symlink: {document}"),
                         task_id,
                     )
                     continue
                 if not document.is_file():
-                    reject(path, f"大任务缺少 spec.md: {path}", task_id)
+                    reject(path, t(f"大任务缺少 spec.md: {path}", f"Large task is missing spec.md: {path}"), task_id)
                     continue
             if task_id in blocked:
-                problems.append(Problem(path, f"任务 ID 存在冲突: {task_id}"))
+                problems.append(Problem(path, t(f"任务 ID 存在冲突: {task_id}", f"Task ID conflict: {task_id}")))
                 continue
             if task_id in entries:
-                reject(path, f"重复任务 ID: {entries[task_id].path} 与 {path}", task_id)
+                reject(path, t(f"重复任务 ID: {entries[task_id].path} 与 {path}", f"Duplicate task ID: {entries[task_id].path} and {path}"), task_id)
                 continue
             entries[task_id] = Entry(task_id, state, path, document, kind)
     return Board(entries, blocked, problems)
@@ -253,7 +258,10 @@ def load_board(root: Path) -> Board:
     board = scan(root)
     if board.problems:
         print(
-            f"kanban: 警告: {len(board.problems)} 个无效入口已忽略, 运行 kanban check 查看",
+            t(
+                f"kanban: 警告: {len(board.problems)} 个无效入口已忽略, 运行 kanban check 查看",
+                f"kanban: warning: ignored {len(board.problems)} invalid entries; run kanban check for details",
+            ),
             file=sys.stderr,
         )
     return board
@@ -261,10 +269,10 @@ def load_board(root: Path) -> Board:
 
 def normalize_task_id(value: str) -> str:
     if "/" in value or "\\" in value:
-        raise KanbanError("任务参数只能使用任务 ID 或入口名")
+        raise KanbanError(t("任务参数只能使用任务 ID 或入口名", "Task argument must be a task ID or entry name"))
     task_id = value[:-3] if value.endswith(".md") else value
     if not TASK_ID_RE.fullmatch(task_id):
-        raise KanbanError(f"无效任务 ID: {value}")
+        raise KanbanError(t(f"无效任务 ID: {value}", f"Invalid task ID: {value}"))
     return task_id
 
 
@@ -275,7 +283,7 @@ def locate(board: Board, value: str) -> Entry:
     try:
         return board.entries[task_id]
     except KeyError as error:
-        raise KanbanError(f"任务不存在: {task_id}") from error
+        raise KanbanError(t(f"任务不存在: {task_id}", f"Task does not exist: {task_id}")) from error
 
 
 def board_root_from_entry(entry: Entry) -> Path:
@@ -290,19 +298,19 @@ def ensure_no_symlinks_under_board(root: Path, path: Path) -> None:
     try:
         common = os.path.commonpath([str(root), str(candidate)])
     except ValueError as error:
-        raise KanbanError(f"任务路径越出看板: {path}") from error
+        raise KanbanError(t(f"任务路径越出看板: {path}", f"Task path escapes the board: {path}")) from error
     if common != str(root):
-        raise KanbanError(f"任务路径越出看板: {path}")
+        raise KanbanError(t(f"任务路径越出看板: {path}", f"Task path escapes the board: {path}"))
     relative = os.path.relpath(str(candidate), str(root))
     current = root
     if current.is_symlink():
-        raise KanbanError(f"路径分量不得是符号链接: {current}")
+        raise KanbanError(t(f"路径分量不得是符号链接: {current}", f"Path component must not be a symlink: {current}"))
     if relative in ("", "."):
         return
     for part in Path(relative).parts:
         current = current / part
         if current.is_symlink():
-            raise KanbanError(f"路径分量不得是符号链接: {current}")
+            raise KanbanError(t(f"路径分量不得是符号链接: {current}", f"Path component must not be a symlink: {current}"))
 
 
 def openat_nofollow(dir_fd: int, name: str, flags: int) -> int:
@@ -313,7 +321,7 @@ def openat_nofollow(dir_fd: int, name: str, flags: int) -> int:
         return os.open(name, open_flags, dir_fd=dir_fd)
     except OSError as error:
         if getattr(error, "errno", None) in {getattr(os, "ELOOP", 40), 40}:
-            raise KanbanError(f"路径分量不得是符号链接: {name}") from error
+            raise KanbanError(t(f"路径分量不得是符号链接: {name}", f"Path component must not be a symlink: {name}")) from error
         raise
 
 
@@ -323,7 +331,7 @@ def open_path_nofollow(root: Path, path: Path, *, write: bool = False) -> int:
     relative = os.path.relpath(str(path), str(root.resolve(strict=False)))
     parts = [] if relative in ("", ".") else list(Path(relative).parts)
     if not parts:
-        raise KanbanError(f"任务文档路径无效: {path}")
+        raise KanbanError(t(f"任务文档路径无效: {path}", f"Invalid task document path: {path}"))
     dir_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         for part in parts[:-1]:
@@ -339,7 +347,7 @@ def open_path_nofollow(root: Path, path: Path, *, write: bool = False) -> int:
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode):
         os.close(fd)
-        raise KanbanError(f"任务文档必须是普通文件: {path}")
+        raise KanbanError(t(f"任务文档必须是普通文件: {path}", f"Task document must be a regular file: {path}"))
     return fd
 
 
@@ -363,7 +371,7 @@ def read_document(entry: Entry) -> str:
         finally:
             os.close(fd)
     except UnicodeError as error:
-        raise KanbanError(f"任务文档不是有效 UTF-8: {entry.document}") from error
+        raise KanbanError(t(f"任务文档不是有效 UTF-8: {entry.document}", f"Task document is not valid UTF-8: {entry.document}")) from error
 
 
 def title_from(text: str) -> str:
@@ -398,10 +406,10 @@ def completion_metadata(text: str) -> str:
     if len(matches) == 1:
         return re.sub(r"(?m)^- 完成时间:.*$", f"- 完成时间: {value}", text, count=1)
     if matches:
-        raise KanbanError("任务文档缺少唯一元数据字段: 完成时间")
+        raise KanbanError(t("任务文档缺少唯一元数据字段: 完成时间", "Task document must contain exactly one completion-time metadata field"))
     started = list(re.finditer(r"(?m)^- 开始时间:.*$", text))
     if len(started) != 1:
-        raise KanbanError("任务文档缺少唯一元数据字段: 开始时间")
+        raise KanbanError(t("任务文档缺少唯一元数据字段: 开始时间", "Task document must contain exactly one start-time metadata field"))
     return re.sub(
         r"(?m)^(- 开始时间:.*)$", rf"\1\n- 完成时间: {value}", text, count=1
     )
@@ -431,7 +439,7 @@ def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -
     """通过父目录 fd 创建临时文件并 replace, 避免校验后父路径被换成软链."""
     if entry is None:
         if path.is_symlink():
-            raise KanbanError(f"任务文档不得是符号链接: {path}")
+            raise KanbanError(t(f"任务文档不得是符号链接: {path}", f"Task document must not be a symlink: {path}"))
         handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
         temp_path = Path(temp_name)
         try:
@@ -455,14 +463,14 @@ def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -
             existing = openat_nofollow(parent_fd, path.name, os.O_RDONLY)
         except OSError as error:
             if error.errno != getattr(os, "ENOENT", 2):
-                raise KanbanError(f"无法打开任务文档: {path}: {error}") from error
+                raise KanbanError(t(f"无法打开任务文档: {path}: {error}", f"Cannot open task document: {path}: {error}")) from error
             existing = None
         # openat_nofollow 对软链抛 KanbanError, 必须原样失败, 不得当缺失文件.
         if existing is not None:
             try:
                 info = os.fstat(existing)
                 if not stat.S_ISREG(info.st_mode):
-                    raise KanbanError(f"任务文档必须是普通文件: {path}")
+                    raise KanbanError(t(f"任务文档必须是普通文件: {path}", f"Task document must be a regular file: {path}"))
                 mode = stat.S_IMODE(info.st_mode)
             finally:
                 os.close(existing)
@@ -497,7 +505,7 @@ def validate_ready(entry: Entry, text: str) -> None:
         if not body or "<填写>" in body:
             missing.append(heading)
     if missing:
-        raise KanbanError("任务未满足 todo 条件: " + ", ".join(missing))
+        raise KanbanError(t("任务未满足 todo 条件: ", "Task does not meet todo requirements: ") + ", ".join(missing))
 
 
 def validate_target(entry: Entry, target_state: str, text: str) -> None:
@@ -505,22 +513,22 @@ def validate_target(entry: Entry, target_state: str, text: str) -> None:
         validate_ready(entry, text)
     elif target_state == "done":
         if result_from(text) != "completed":
-            raise KanbanError("移入 done 前必须填写: 结果: completed")
+            raise KanbanError(t("移入 done 前必须填写: 结果: completed", "Before moving to done, set: 结果: completed"))
         if entry.kind == "small":
             summary = section_body(text, "完成总结")
             if not summary or "<填写>" in summary:
-                raise KanbanError("小任务移入 done 前必须填写完成总结")
+                raise KanbanError(t("小任务移入 done 前必须填写完成总结", "Complete the summary before moving a small task to done"))
         else:
             report = entry.path / "report.md"
             if not report.is_file() or not report.read_text(encoding="utf-8").strip():
-                raise KanbanError("大任务移入 done 前必须完成 report.md")
+                raise KanbanError(t("大任务移入 done 前必须完成 report.md", "Complete report.md before moving a large task to done"))
     elif target_state == "archived":
         result = result_from(text)
         if result not in ARCHIVE_RESULTS:
             allowed = ", ".join(sorted(ARCHIVE_RESULTS))
-            raise KanbanError(f"移入 archived 前必须填写有效结果: {allowed}")
+            raise KanbanError(t(f"移入 archived 前必须填写有效结果: {allowed}", f"Before moving to archived, set a valid result: {allowed}"))
     elif target_state == "trash" and result_from(text) != "trashed":
-        raise KanbanError("移入 trash 前必须填写: 结果: trashed")
+        raise KanbanError(t("移入 trash 前必须填写: 结果: trashed", "Before moving to trash, set: 结果: trashed"))
 
 
 def render_contract(title: str, task_type: str) -> str:
@@ -566,14 +574,14 @@ N/A
 
 def command_new(args: argparse.Namespace, root: Path) -> None:
     if not SLUG_RE.fullmatch(args.slug):
-        raise KanbanError("slug 只能包含小写 ASCII 字母, 数字和连字符")
+        raise KanbanError(t("slug 只能包含小写 ASCII 字母, 数字和连字符", "slug may contain only lowercase ASCII letters, digits, and hyphens"))
     title = " ".join(args.title).strip()
     if not title or "\n" in title or "\r" in title:
-        raise KanbanError("标题不能为空或包含换行")
+        raise KanbanError(t("标题不能为空或包含换行", "Title must not be empty or contain newlines"))
     board = load_board(root)
     task_id = f"{datetime.now().strftime('%Y%m%d')}-{args.slug}-task"
     if task_id in board.entries or task_id in board.blocked:
-        raise KanbanError(f"任务已存在: {task_id}")
+        raise KanbanError(t(f"任务已存在: {task_id}", f"Task already exists: {task_id}"))
     contract = render_contract(title, args.type)
     if args.large:
         target = root / "backlog" / task_id
@@ -610,24 +618,27 @@ def selected_entries(entries: Dict[str, Entry], state: Optional[str]) -> Iterabl
 def select_from_state(board: Board, state: str) -> Entry:
     candidates = list(selected_entries(board.entries, state))
     if not candidates:
-        raise KanbanError(f"{state} 中没有任务")
+        raise KanbanError(t(f"{state} 中没有任务", f"No tasks in {state}"))
     for index, entry in enumerate(candidates, 1):
         print(f"{index}. {entry.task_id}\t{title_from(read_document(entry))}")
     while True:
         try:
-            choice = input("选择任务编号: ").strip()
+            choice = input(t("选择任务编号: ", "Choose a task number: ")).strip()
         except EOFError as error:
-            raise KanbanError("未选择任务; 请指定 task-id") from error
+            raise KanbanError(t("未选择任务; 请指定 task-id", "No task selected; specify task-id")) from error
         if choice.isdecimal() and 1 <= int(choice) <= len(candidates):
             return candidates[int(choice) - 1]
-        print(f"请输入 1-{len(candidates)}")
+        print(t(f"请输入 1-{len(candidates)}", f"Enter a number from 1 to {len(candidates)}"))
 
 
 def select_todo(board: Board, task: Optional[str]) -> Entry:
     if task:
         entry = locate(board, task)
         if entry.state != "todo":
-            raise KanbanError(f"只能启动 todo 任务: {entry.task_id} 当前位于 {entry.state}")
+            raise KanbanError(t(
+                f"只能启动 todo 任务: {entry.task_id} 当前位于 {entry.state}",
+                f"Only todo tasks can be started: {entry.task_id} is currently in {entry.state}",
+            ))
         return entry
     return select_from_state(board, "todo")
 
@@ -717,7 +728,7 @@ def rename_entry_nofollow(root: Path, entry: Entry, target_state: str) -> Path:
             except FileNotFoundError:
                 pass
             else:
-                raise KanbanError(f"目标已存在: {root / target_state / name}")
+                raise KanbanError(t(f"目标已存在: {root / target_state / name}", f"Target already exists: {root / target_state / name}"))
             try:
                 os.rename(
                     name,
@@ -726,20 +737,20 @@ def rename_entry_nofollow(root: Path, entry: Entry, target_state: str) -> Path:
                     dst_dir_fd=target_state_fd,
                 )
             except OSError as error:
-                raise KanbanError(f"迁移失败: {error}") from error
+                raise KanbanError(t(f"迁移失败: {error}", f"Move failed: {error}")) from error
         finally:
             os.close(target_state_fd)
     finally:
         os.close(source_state_fd)
     target = root / target_state / entry.path.name
     if entry.path.exists() or not target.exists() or target.is_symlink():
-        raise KanbanError("迁移后状态校验失败, 请保留现场")
+        raise KanbanError(t("迁移后状态校验失败, 请保留现场", "Post-move state verification failed; preserve the current state"))
     return target
 
 
 def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
     if target_state not in TRANSITIONS[entry.state]:
-        raise KanbanError(f"不允许迁移: {entry.state} -> {target_state}")
+        raise KanbanError(t(f"不允许迁移: {entry.state} -> {target_state}", f"Move not allowed: {entry.state} -> {target_state}"))
     text = read_document(entry)
     validate_target(entry, target_state, text)
     updated = completion_metadata(text) if target_state == "done" else text
@@ -753,10 +764,11 @@ def move_entry(entry: Entry, root: Path, target_state: str) -> Entry:
             try:
                 rename_entry_nofollow(root, moved, entry.state)
             except (OSError, UnicodeError, KanbanError) as rollback_error:
-                raise KanbanError(
-                    f"记录完成时间失败且回滚失败; 卡片保留在 done: {error}; {rollback_error}"
-                ) from error
-            raise KanbanError(f"记录完成时间失败: {error}") from error
+                raise KanbanError(t(
+                    f"记录完成时间失败且回滚失败; 卡片保留在 done: {error}; {rollback_error}",
+                    f"Failed to record completion time and rollback; task remains in done: {error}; {rollback_error}",
+                )) from error
+            raise KanbanError(t(f"记录完成时间失败: {error}", f"Failed to record completion time: {error}")) from error
     return moved
 
 
@@ -778,7 +790,7 @@ def start_metadata(text: str, agent: str) -> str:
     ):
         pattern = rf"(?m)^- {name}:\s*$"
         if len(re.findall(pattern, text)) != 1:
-            raise KanbanError(f"任务文档缺少唯一元数据字段: {name}")
+            raise KanbanError(t(f"任务文档缺少唯一元数据字段: {name}", f"Task document must contain exactly one metadata field: {name}"))
         text = re.sub(pattern, f"- {name}: {value}", text, count=1)
     return text
 
@@ -789,9 +801,10 @@ TMUX_SESSION_HINT = "tmux new -A -s onevoke"
 def tmux_session_id(tmux: str) -> str:
     pane = os.environ.get("TMUX_PANE")
     if not os.environ.get("TMUX") or not pane:
-        raise KanbanError(
-            f"当前不在 tmux session. 先运行: {TMUX_SESSION_HINT}"
-        )
+        raise KanbanError(t(
+            f"当前不在 tmux session. 先运行: {TMUX_SESSION_HINT}",
+            f"Not currently in a tmux session. Run: {TMUX_SESSION_HINT}",
+        ))
     result = subprocess.run(
         [tmux, "display-message", "-p", "-t", pane, "#{session_id}"],
         text=True,
@@ -800,8 +813,8 @@ def tmux_session_id(tmux: str) -> str:
     )
     session = result.stdout.strip()
     if result.returncode != 0 or not re.fullmatch(r"\$\d+", session):
-        detail = result.stderr.strip() or "无法确定当前 session"
-        raise KanbanError(f"读取 tmux session 失败: {detail}")
+        detail = result.stderr.strip() or t("无法确定当前 session", "cannot determine the current session")
+        raise KanbanError(t(f"读取 tmux session 失败: {detail}", f"Failed to read tmux session: {detail}"))
     return session
 
 
@@ -828,7 +841,7 @@ def agent_command(agent: str, binary: str, effort: str) -> list[str]:
         return [binary, "--model", "opus", "--effort", effort, "--dangerously-skip-permissions"]
     if agent == "grok":
         return [binary, "--permission-mode", "bypassPermissions"]
-    raise KanbanError(f"不支持的 Agent: {agent}")
+    raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
 
 
 def command_start(args: argparse.Namespace, root: Path) -> None:
@@ -838,19 +851,19 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     launcher = args.launcher or config["launcher"]
     agent = shutil.which(agent_name)
     if not agent:
-        raise KanbanError(f"Agent 不在 PATH: {agent_name}")
+        raise KanbanError(t(f"Agent 不在 PATH: {agent_name}", f"Agent is not in PATH: {agent_name}"))
     tmux = None
     session = None
     if launcher == "tmux":
         tmux = shutil.which("tmux")
         if not tmux:
-            raise KanbanError("tmux 不在 PATH; 运行 onevoke welcome 选择前台启动模式")
+            raise KanbanError(t("tmux 不在 PATH; 运行 onevoke welcome 选择前台启动模式", "tmux is not in PATH; run onevoke welcome to select foreground mode"))
         session = tmux_session_id(tmux)
     elif not (sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()):
-        raise KanbanError(
-            "前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). "
-            "在 CI、管道或无 TTY 环境请改用: kanban start --launcher tmux <task-id>"
-        )
+        raise KanbanError(t(
+            "前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). 在 CI、管道或无 TTY 环境请改用: kanban start --launcher tmux <task-id>",
+            "Foreground mode requires an interactive terminal (stdin/stdout/stderr must be TTYs). In CI, pipelines, or environments without a TTY, use: kanban start --launcher tmux <task-id>",
+        ))
 
     original = read_document(entry)
     updated = start_metadata(original, agent_name)
@@ -888,26 +901,29 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             )
             if result.returncode != 0:
                 detail = result.stderr.strip() or f"exit {result.returncode}"
-                raise KanbanError(f"tmux new-window 失败: {detail}")
+                raise KanbanError(t(f"tmux new-window 失败: {detail}", f"tmux new-window failed: {detail}"))
             window = result.stdout.strip() or "unknown"
         else:
             try:
                 process = subprocess.Popen(agent_argv, cwd=root.parent)
             except OSError as error:
-                raise KanbanError(f"启动 Agent 失败: {error}") from error
+                raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
     except (KanbanError, OSError, UnicodeError) as error:
         rollback_errors: list[str] = []
         try:
             write_text_atomic(moved.document, original, entry=moved)
         except (OSError, UnicodeError, KanbanError) as content_error:
-            rollback_errors.append(f"恢复文档失败: {content_error}")
+            rollback_errors.append(t(f"恢复文档失败: {content_error}", f"failed to restore document: {content_error}"))
         try:
             rename_entry_nofollow(root, moved, entry.state)
         except (OSError, UnicodeError, KanbanError) as move_error:
-            rollback_errors.append(f"迁回 todo 失败: {move_error}")
+            rollback_errors.append(t(f"迁回 todo 失败: {move_error}", f"failed to move back to todo: {move_error}"))
         if rollback_errors:
             raise KanbanError(
-                f"启动失败且回滚失败; 卡片保留在 working: {error}; "
+                t(
+                    f"启动失败且回滚失败; 卡片保留在 working: {error}; ",
+                    f"Start and rollback both failed; task remains in working: {error}; ",
+                )
                 + "; ".join(rollback_errors)
             ) from error
         raise
@@ -918,10 +934,10 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         )
         returncode = process.wait()
         if returncode != 0:
-            raise KanbanError(
-                f"Agent 已启动但以非零状态退出: {returncode}; "
-                "卡片保留在 working"
-            )
+            raise KanbanError(t(
+                f"Agent 已启动但以非零状态退出: {returncode}; 卡片保留在 working",
+                f"Agent started but exited with status {returncode}; task remains in working",
+            ))
         return
     print(f"started: {entry.task_id}\tagent={agent_name}\twindow={window}")
 
@@ -940,42 +956,42 @@ def command_check(root: Path) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog="kanban", description="本地文件看板")
+    result = argparse.ArgumentParser(prog="kanban", description=t("本地文件看板", "Local file kanban board"))
     commands = result.add_subparsers(dest="command", required=True)
 
-    init_parser = commands.add_parser("init", help="创建看板目录框架")
-    init_parser.add_argument("project", nargs="?", help="项目根目录, 默认当前项目")
+    init_parser = commands.add_parser("init", help=t("创建看板目录框架", "create the board directory structure"))
+    init_parser.add_argument("project", nargs="?", help=t("项目根目录, 默认当前项目", "project root; defaults to the current project"))
 
-    commands.add_parser("rules", help="输出全局看板规则")
+    commands.add_parser("rules", help=t("输出全局看板规则", "print global kanban rules"))
 
-    list_parser = commands.add_parser("list", aliases=["ls"], help="列出任务")
+    list_parser = commands.add_parser("list", aliases=["ls"], help=t("列出任务", "list tasks"))
     list_parser.add_argument("state", nargs="?", choices=STATES)
-    list_parser.add_argument("--mobile", action="store_true", help="使用竖屏手机布局")
+    list_parser.add_argument("--mobile", action="store_true", help=t("使用竖屏手机布局", "use a vertical mobile layout"))
 
-    show_parser = commands.add_parser("show", help="输出入口任务文档")
+    show_parser = commands.add_parser("show", help=t("输出入口任务文档", "print a task document"))
     show_parser.add_argument("task")
 
-    new_parser = commands.add_parser("new", help="在 backlog 创建任务")
-    new_parser.add_argument("--large", action="store_true", help="创建大任务目录")
+    new_parser = commands.add_parser("new", help=t("在 backlog 创建任务", "create a task in backlog"))
+    new_parser.add_argument("--large", action="store_true", help=t("创建大任务目录", "create a large-task directory"))
     new_parser.add_argument("type", choices=tuple(TYPE_NAMES))
     new_parser.add_argument("slug")
     new_parser.add_argument("title", nargs="+")
 
-    move_parser = commands.add_parser("move", help="迁移任务状态")
+    move_parser = commands.add_parser("move", help=t("迁移任务状态", "move a task between states"))
     move_parser.add_argument("task")
     move_parser.add_argument("state", choices=STATES)
 
-    pick_parser = commands.add_parser("pick", help="将 backlog 任务移入 todo")
+    pick_parser = commands.add_parser("pick", help=t("将 backlog 任务移入 todo", "move a backlog task to todo"))
     pick_parser.add_argument("task", nargs="?")
 
-    start_parser = commands.add_parser("start", help="领取任务并按 Onevoke 配置启动 Agent")
+    start_parser = commands.add_parser("start", help=t("领取任务并按 Onevoke 配置启动 Agent", "claim a task and launch an Agent using Onevoke configuration"))
     start_parser.add_argument("task", nargs="?")
-    start_parser.add_argument("--agent", choices=AGENT_NAMES, help="覆盖配置中的默认 Agent")
+    start_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
     start_parser.add_argument(
-        "--launcher", choices=("tmux", "foreground"), help="覆盖配置中的启动方式"
+        "--launcher", choices=("tmux", "foreground"), help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
 
-    commands.add_parser("check", help="检查看板不变量")
+    commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
     return result
 
 

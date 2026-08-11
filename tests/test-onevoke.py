@@ -37,6 +37,8 @@ def load_onevoke_module():
 
 class OnevokeCommandTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
+        self.language.start()
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.home = self.root / "home"
@@ -52,6 +54,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+        self.language.stop()
 
     def fake_command(self, name: str, body: str | None = None) -> Path:
         command = self.fake_bin / name
@@ -316,6 +319,55 @@ class OnevokeCommandTest(unittest.TestCase):
             os.close(master)
             reader.join(timeout=5)
         return returncode, b"".join(seen).decode("utf-8", "replace")
+
+    def test_locale_selects_chinese_or_english_and_honors_override(self) -> None:
+        chinese = self.run_command("--help")
+        self.assertIn("Onevoke 配置与诊断", chinese.stdout)
+
+        self.env.pop("ONEVOKE_LANG")
+        self.env["LC_ALL"] = "zh_CN.UTF-8"
+        fallback = self.run_command("--help")
+        self.assertIn("Onevoke 配置与诊断", fallback.stdout)
+
+        self.env["LC_ALL"] = "en_US.UTF-8"
+        self.env["LC_MESSAGES"] = "zh_CN.UTF-8"
+        self.assertIn("Onevoke configuration and diagnostics", self.run_command("--help").stdout)
+
+        self.env.pop("LC_ALL")
+        self.assertIn("Onevoke 配置与诊断", self.run_command("--help").stdout)
+
+        self.env.pop("LC_MESSAGES")
+        self.env["LANG"] = "zh_CN.UTF-8"
+        self.assertIn("Onevoke 配置与诊断", self.run_command("--help").stdout)
+
+        self.env["ONEVOKE_LANG"] = "en"
+        self.env["LC_ALL"] = "zh_CN.UTF-8"
+        english = self.run_command("--help")
+        self.assertIn("Onevoke configuration and diagnostics", english.stdout)
+        self.assertNotIn("配置与诊断", english.stdout)
+
+        status = self.run_command("config")
+        self.assertEqual(0, status.returncode, status.stderr)
+        self.assertIn("welcome: incomplete", status.stdout)
+        self.assertIn("MemSearch: disabled", status.stdout)
+
+        rejected = self.run_command("review")
+        self.assertEqual(1, rejected.returncode)
+        self.assertIn("usage: onevoke review", rejected.stderr)
+
+    def test_welcome_interaction_uses_english(self) -> None:
+        self.install_fake_environment(tmux=False)
+        self.env["ONEVOKE_LANG"] = "en"
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n2\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("Which Agent should kanban use by default?", output)
+        self.assertIn("Configuration summary:", output)
+        self.assertIn("Configuration saved:", output)
+        self.assertNotIn("配置摘要", output)
 
     def test_noninteractive_welcome_only_diagnoses(self) -> None:
         self.install_fake_environment(tmux=False)

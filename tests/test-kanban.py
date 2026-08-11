@@ -31,6 +31,8 @@ STATES = ("backlog", "todo", "working", "done", "archived", "trash")
 
 class KanbanCommandTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
+        self.language.start()
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         for state in STATES:
@@ -47,6 +49,7 @@ class KanbanCommandTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+        self.language.stop()
 
     def run_command(
         self, *args: str, succeeds: bool = True, input_text: Optional[str] = None
@@ -117,6 +120,23 @@ printf '%s\\n' '@9'
         self.env["TMUX_PANE"] = "%7"
         self.env["KANBAN_TMUX_LOG"] = str(self.root / "tmux.log")
         return fake_bin
+
+    def test_locale_selects_chinese_or_english(self) -> None:
+        chinese = self.run_command("--help")
+        self.assertIn("本地文件看板", chinese.stdout)
+
+        self.env["ONEVOKE_LANG"] = "en"
+        english = self.run_command("--help")
+        self.assertIn("Local file kanban board", english.stdout)
+        self.assertNotIn("本地文件看板", english.stdout)
+
+        rejected = self.run_command(
+            "new", "chore", "Bad-Slug", "title", succeeds=False
+        )
+        self.assertIn("slug may contain only lowercase ASCII", rejected.stderr)
+
+        checked = self.run_command("check")
+        self.assertEqual("ok: 0 tasks\n", checked.stdout)
 
     def write_onevoke_config(
         self, agent: str, launcher: str, *, welcome_complete: bool = True
@@ -1118,6 +1138,23 @@ N/A
 
         self.assertEqual(2, result.returncode)
         self.assertIn("用法: install.sh", result.stderr)
+
+        english = subprocess.run(
+            ["sh", str(INSTALLER), "--force"],
+            stdin=subprocess.DEVNULL,
+            env={
+                **os.environ,
+                "HOME": str(self.root / "arg-home-en"),
+                "ONEVOKE_LANG": "en",
+                "LC_ALL": "zh_CN.UTF-8",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(2, english.returncode)
+        self.assertIn("usage: install.sh", english.stderr)
+        self.assertNotIn("用法", english.stderr)
 
 
 if __name__ == "__main__":
