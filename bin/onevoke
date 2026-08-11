@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -45,34 +44,12 @@ COMMANDS = (
     "merge-worktree-memory.py",
 )
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
-MEMSEARCH_VERSION = "0.4.15"
-MEMSEARCH_COMMIT = "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8"
+MEMSEARCH_PACKAGE = "memsearch[onnx]"
+MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
 MEMSEARCH_HOOKS = {
     "SessionStart": "session-start.sh",
     "UserPromptSubmit": "user-prompt-submit.sh",
     "Stop": "stop.sh",
-}
-# Complete plugins/claude-code tree at MEMSEARCH_COMMIT.
-CLAUDE_PLUGIN_HASHES = {
-    ".claude-plugin/plugin.json": "bfb1787dbcd9cd874a6e7705e4b566d4b37c7ee91fe13d2c841db8545009ac8f",
-    "README.md": "c1db07a71d8ca8cdaa3098fa17da0014687fcc9bd333d3541e010102cce952e9",
-    "hooks/common.sh": "9aa7ea76c4241dbd1b2b6ad1ea32ec446f534e6bd0bbbd89d8bdd262edee1c06",
-    "hooks/hooks.json": "ef55f112ea0b0df12fe2a1e52584d5a7aa475a3a617e24b9e17e092b71e3a094",
-    "hooks/parse-transcript.sh": "6ce5b2ac8d24b64961e681fa8fd2eba50265c74c03c192c29320c462fa515e6c",
-    "hooks/session-end.sh": "c68f354aecba0d5badeb9d0362dff39b2fe595576d55aaedb329bfb02fcf5c67",
-    "hooks/session-start.sh": "9c8ce984c8c294911f91c731bc6de648c72337bcdef6a12483a73d8abdcb3715",
-    "hooks/stop.sh": "f7f6af5d00c14affa57f72e60786b6a6ac1e28a4387bf803c446195144f5ad74",
-    "hooks/user-prompt-submit.sh": "cb0476786ced0229d385d5c7fc4a66c1605963b4dd1e9d77cd523de2ae73d810",
-    "prompts/memory_to_skill.txt": "633d2af85f836a4d0e5a3873d33e9566291e817c2d997de34934f438ea627e01",
-    "prompts/project_review.txt": "321579ff511c9e84c0706613c25dfd00f3358d612898a25e967529de7464edeb",
-    "prompts/summarize.txt": "e7fb99d8201dfd2e357b8d6db7ce0dd81e409744502f46d61515b015b4bc4f9c",
-    "prompts/user_profile.txt": "d37e1981df3d999d9b39ac3edda0a072a416147dde5a7caf290cd0370f234ddb",
-    "scripts/derive-collection.sh": "f1f99290a3c776c09b1a09c4a4ff4ed4fb542fc374cf4011fbc6d675015a0ce4",
-    "scripts/maintenance-runner.py": "9e497c1e390d7ad8a516a04496e0e75bcf8737e0be788022a1766bb17ca6ff1f",
-    "skills/memory-config/SKILL.md": "7296e5539675b0ab149c904ab1c018fb526c9d89570b87e9f9e1ae8b33ca067c",
-    "skills/memory-recall/SKILL.md": "39cddb7879123a96941825dc03edd04faf17ca6e9027b48c48ca5cea8365cca8",
-    "skills/memory-to-skill/SKILL.md": "45b84bcb689649487140c9662436d32582a97ee50f6cd07b76ef55a272b2f032",
-    "transcript.py": "a587c3a4a4a8943efd931240154c675b165ca3aeda90e02e0c3102cadd7607a6",
 }
 
 
@@ -317,7 +294,7 @@ def memsearch_cli_state() -> tuple[str | None, str | None, bool]:
     output = "\n".join(part for part in (result.stdout, result.stderr) if part)
     match = re.search(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)", output)
     version = match.group(1) if result.returncode == 0 and match else None
-    return command, version, version == MEMSEARCH_VERSION
+    return command, version, version is not None
 
 
 def resolve_hook_script(command: object, expected: str, root: Path | None) -> Path | None:
@@ -379,36 +356,19 @@ def hooks_directory(raw: object, root: Path | None = None) -> Path | None:
 def claude_plugin_identified(root: Path) -> bool:
     if root.is_symlink() or not root.is_dir():
         return False
-    expected_files = {Path(relative) for relative in CLAUDE_PLUGIN_HASHES}
-    expected_directories = {parent for path in expected_files for parent in path.parents}
-    actual_files: set[Path] = set()
+    required_files = (
+        root / ".claude-plugin" / "plugin.json",
+        root / "hooks" / "hooks.json",
+        root / "hooks" / "common.sh",
+    )
+    if any(path.is_symlink() or not path.is_file() for path in required_files):
+        return False
     try:
         for entry in root.rglob("*"):
-            relative = entry.relative_to(root)
-            if relative.parts[0] == ".in_use":
-                continue
-            if entry.is_symlink():
-                return False
-            if entry.is_dir():
-                if relative not in expected_directories:
-                    return False
-            elif entry.is_file():
-                if relative not in expected_files:
-                    return False
-                actual_files.add(relative)
-            else:
+            if entry.is_symlink() or not (entry.is_dir() or entry.is_file()):
                 return False
     except OSError:
         return False
-    if actual_files != expected_files:
-        return False
-    for relative, expected in CLAUDE_PLUGIN_HASHES.items():
-        try:
-            digest = hashlib.sha256((root / relative).read_bytes()).hexdigest()
-            if digest != expected:
-                return False
-        except OSError:
-            return False
     return True
 
 
@@ -449,7 +409,8 @@ def claude_memsearch_ready() -> bool:
         if (
             not isinstance(manifest, dict)
             or manifest.get("name") != "memsearch"
-            or manifest.get("version") != MEMSEARCH_VERSION
+            or not isinstance(manifest.get("version"), str)
+            or not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", manifest["version"])
         ):
             continue
         hooks_dir = hooks_directory(read_json_file(root / "hooks" / "hooks.json"), root)
@@ -535,13 +496,13 @@ def print_doctor() -> bool:
     memory = memsearch_state()
     print("\nMemSearch:", file=sys.stderr)
     if memory["cli_ready"]:
-        print(f"  CLI: {memory['cli_version']} ({t('已支持', 'supported')})", file=sys.stderr)
+        print(f"  CLI: {memory['cli_version']} ({t('可用', 'available')})", file=sys.stderr)
     elif memory["cli"]:
         healthy = False
         warning(
             t(
-                f"MemSearch CLI 版本不受支持: {memory['cli_version'] or '无法识别'}; 需要 {MEMSEARCH_VERSION}",
-                f"Unsupported MemSearch CLI version: {memory['cli_version'] or 'unknown'}; {MEMSEARCH_VERSION} is required",
+                f"MemSearch CLI 无法正常报告版本: {memory['cli_version'] or '无法识别'}",
+                f"MemSearch CLI could not report a valid version: {memory['cli_version'] or 'unknown'}",
             )
         )
     else:
@@ -684,40 +645,22 @@ def verify_memsearch_source(source: Path, *, quiet: bool = False) -> bool:
             warning(message)
         return False
 
+    if source.is_symlink() or not source.is_dir():
+        return reject(t("MemSearch 源码目录无效.", "The MemSearch source directory is invalid."))
     if not shutil.which("git"):
-        return reject(t("未找到 git, 无法校验 MemSearch 源码版本.", "git was not found; cannot verify the MemSearch source version."))
-    result = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        return reject(t("未找到 git, 无法校验 MemSearch 源码.", "git was not found; cannot verify the MemSearch source."))
+    remote = subprocess.run(
+        ["git", "-C", str(source), "remote", "get-url", "origin"],
         text=True,
         capture_output=True,
         check=False,
     )
-    revision = result.stdout.strip()
-    if result.returncode != 0 or revision != MEMSEARCH_COMMIT:
+    remote_url = remote.stdout.strip()
+    if remote.returncode != 0 or remote_url != MEMSEARCH_REPOSITORY:
         return reject(
             t(
-                f"MemSearch 源码校验失败: 预期 {MEMSEARCH_COMMIT}, 实际 {revision or '无法读取'}",
-                f"MemSearch source verification failed: expected {MEMSEARCH_COMMIT}, got {revision or 'unreadable'}",
-            )
-        )
-    tag = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(source),
-            "rev-parse",
-            f"refs/tags/v{MEMSEARCH_VERSION}^{{commit}}",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    tag_revision = tag.stdout.strip()
-    if tag.returncode != 0 or tag_revision != MEMSEARCH_COMMIT:
-        return reject(
-            t(
-                f"MemSearch tag 校验失败: v{MEMSEARCH_VERSION} 应指向 {MEMSEARCH_COMMIT}, 实际 {tag_revision or '无法读取'}",
-                f"MemSearch tag verification failed: v{MEMSEARCH_VERSION} must point to {MEMSEARCH_COMMIT}, got {tag_revision or 'unreadable'}",
+                f"MemSearch 源码来源不是官方仓库: {remote_url or '无法读取'}",
+                f"MemSearch source is not from the official repository: {remote_url or 'unreadable'}",
             )
         )
     status = subprocess.run(
@@ -739,70 +682,66 @@ def verify_memsearch_source(source: Path, *, quiet: bool = False) -> bool:
     return True
 
 
+def print_claude_memsearch_install() -> None:
+    print("  /plugin marketplace add zilliztech/memsearch", file=sys.stderr)
+    print("  /plugin marketplace update memsearch-plugins", file=sys.stderr)
+    print("  /plugin install memsearch@memsearch-plugins", file=sys.stderr)
+
+
 def print_memsearch_manual_install(agent: str | None = None) -> None:
     """提示用户自行安装 MemSearch; 失败时调用, 不阻断 welcome/工具包安装."""
-    package = f"memsearch[onnx]=={MEMSEARCH_VERSION}"
     print(t(
         "请自行安装 MemSearch (不影响 Onevoke 其它配置与工具包安装):",
         "Install MemSearch manually (this does not affect other Onevoke configuration or tools):",
     ), file=sys.stderr)
-    print(f"  uv tool install -U {package}", file=sys.stderr)
+    print(f"  uv tool install -U {MEMSEARCH_PACKAGE}", file=sys.stderr)
     if agent in (None, "codex"):
         print(
-            f"  {t('Codex 插件', 'Codex plugin')}: git clone --depth 1 --branch v{MEMSEARCH_VERSION} "
-            "https://github.com/zilliztech/memsearch.git "
+            f"  {t('Codex 插件', 'Codex plugin')}: git clone --depth 1 "
+            f"{MEMSEARCH_REPOSITORY} "
             "&& bash memsearch/plugins/codex/scripts/install.sh",
             file=sys.stderr,
         )
     if agent in (None, "claude"):
         print(
-            t("  Claude 插件 (在 Claude Code 内): ", "  Claude plugin (in Claude Code): ")
-            +
-            "/plugin marketplace add zilliztech/memsearch ; "
-            "/plugin install memsearch",
+            t("  Claude 插件 (在 Claude Code 内):", "  Claude plugin (in Claude Code):"),
             file=sys.stderr,
         )
+        print_claude_memsearch_install()
     print(t("完成后可运行 onevoke doctor 查看接入状态.", "Run onevoke doctor afterward to check integration status."), file=sys.stderr)
 
 
 def install_memsearch_cli() -> bool:
     """执行 CLI 安装命令. 以命令是否跑完为准; 异常与失败只返回 False, 不抛错."""
     try:
-        command, version, ready = memsearch_cli_state()
-        if ready:
+        command, version, _ = memsearch_cli_state()
+        if command:
             print(
                 t(
-                    f"MemSearch CLI 已是目标版本 {MEMSEARCH_VERSION}, 跳过安装.",
-                    f"MemSearch CLI is already at target version {MEMSEARCH_VERSION}; skipping installation.",
+                    f"现有 MemSearch CLI 版本为 {version or '无法识别'}, 将升级到 PyPI 最新版.",
+                    f"Current MemSearch CLI version is {version or 'unknown'}; upgrading to the latest PyPI release.",
                 ),
                 file=sys.stderr,
-            )
-            return True
-        if command:
-            warning(
-                t(
-                    f"现有 MemSearch CLI 版本为 {version or '无法识别'}, 将尝试安装固定版本 {MEMSEARCH_VERSION}.",
-                    f"Current MemSearch CLI version is {version or 'unknown'}; attempting to install pinned version {MEMSEARCH_VERSION}.",
-                )
             )
         if not shutil.which("uv"):
             warning(t("未找到 uv, 无法自动安装 MemSearch CLI.", "uv was not found; cannot install the MemSearch CLI automatically."))
             return False
-        package = f"memsearch[onnx]=={MEMSEARCH_VERSION}"
         print(
             t(
-                f"即将通过 PyPI 安装 {package}, 首次使用会下载 ONNX 模型.",
-                f"Installing {package} from PyPI; first use will download the ONNX model.",
+                f"即将通过 PyPI 安装最新版 {MEMSEARCH_PACKAGE}, 首次使用会下载 ONNX 模型.",
+                f"Installing the latest {MEMSEARCH_PACKAGE} from PyPI; first use will download the ONNX model.",
             ),
             file=sys.stderr,
         )
-        result = subprocess.run(["uv", "tool", "install", "-U", package], check=False)
+        result = subprocess.run(
+            ["uv", "tool", "install", "-U", MEMSEARCH_PACKAGE], check=False
+        )
         if result.returncode != 0:
             warning(t("MemSearch CLI 安装命令未成功退出.", "The MemSearch CLI installation command failed."))
             return False
         success(t(
-            f"已执行 MemSearch CLI 安装命令: uv tool install -U {package}",
-            f"Ran the MemSearch CLI installation command: uv tool install -U {package}",
+            f"已执行 MemSearch CLI 安装命令: uv tool install -U {MEMSEARCH_PACKAGE}",
+            f"Ran the MemSearch CLI installation command: uv tool install -U {MEMSEARCH_PACKAGE}",
         ))
         return True
     except (OSError, UnicodeError, subprocess.SubprocessError) as error:
@@ -831,51 +770,57 @@ def install_memsearch_for(agent: str) -> bool:
                 )
             ).expanduser()
             installer = source / "plugins" / "codex" / "scripts" / "install.sh"
-            if not source.exists():
-                if not shutil.which("git"):
-                    warning(t("未找到 git, 无法下载 MemSearch Codex 插件源码.", "git was not found; cannot download the MemSearch Codex plugin source."))
-                    return False
-                source.parent.mkdir(parents=True, exist_ok=True)
-                print(
-                    t(
-                        f"正在把 MemSearch v{MEMSEARCH_VERSION} 克隆到 {source}.",
-                        f"Cloning MemSearch v{MEMSEARCH_VERSION} to {source}.",
-                    ),
-                    file=sys.stderr,
-                )
-                with tempfile.TemporaryDirectory(
-                    prefix="memsearch.", dir=source.parent
-                ) as temporary_root:
-                    temporary_source = Path(temporary_root) / "source"
-                    result = subprocess.run(
-                        [
-                            "git",
-                            "clone",
-                            "--depth",
-                            "1",
-                            "--branch",
-                            f"v{MEMSEARCH_VERSION}",
-                            "https://github.com/zilliztech/memsearch.git",
-                            str(temporary_source),
-                        ],
-                        check=False,
-                    )
-                    if result.returncode != 0:
-                        warning(t("MemSearch 源码下载命令未成功退出.", "The MemSearch source download command failed."))
-                        return False
-                    # 源码校验失败则跳过安装器, 且不算 Codex 安装步骤完成.
-                    if not verify_memsearch_source(temporary_source):
-                        warning(t("源码未通过固定版本校验, 已跳过 Codex 插件安装器.", "Source verification for the pinned version failed; skipped the Codex plugin installer."))
-                        return False
-                    os.replace(temporary_source, source)
-            elif not verify_memsearch_source(source):
+            cached_source = source.exists() or source.is_symlink()
+            if cached_source and not verify_memsearch_source(source):
                 warning(
                     t(
-                        "缓存的 MemSearch 源码未通过固定版本校验, 已跳过 Codex 插件安装器.",
-                        "Cached MemSearch source failed pinned-version verification; skipped the Codex plugin installer.",
+                        "缓存的 MemSearch 源码未通过来源或工作树校验, 已跳过 Codex 插件安装器.",
+                        "Cached MemSearch source failed repository or worktree verification; skipped the Codex plugin installer.",
                     )
                 )
                 return False
+            if not shutil.which("git"):
+                warning(t("未找到 git, 无法下载 MemSearch Codex 插件源码.", "git was not found; cannot download the MemSearch Codex plugin source."))
+                return False
+            source.parent.mkdir(parents=True, exist_ok=True)
+            print(
+                t(
+                    f"正在把 MemSearch 默认分支最新版克隆到 {source}.",
+                    f"Cloning the latest MemSearch default branch to {source}.",
+                ),
+                file=sys.stderr,
+            )
+            with tempfile.TemporaryDirectory(
+                prefix="memsearch.", dir=source.parent
+            ) as temporary_root:
+                temporary_root_path = Path(temporary_root)
+                temporary_source = temporary_root_path / "source"
+                result = subprocess.run(
+                    [
+                        "git",
+                        "clone",
+                        "--depth",
+                        "1",
+                        MEMSEARCH_REPOSITORY,
+                        str(temporary_source),
+                    ],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    warning(t("MemSearch 源码下载命令未成功退出.", "The MemSearch source download command failed."))
+                    return False
+                if not verify_memsearch_source(temporary_source):
+                    warning(t("最新源码未通过来源或工作树校验, 已跳过 Codex 插件安装器.", "The latest source failed repository or worktree verification; skipped the Codex plugin installer."))
+                    return False
+                previous_source = temporary_root_path / "previous"
+                if cached_source:
+                    os.replace(source, previous_source)
+                try:
+                    os.replace(temporary_source, source)
+                except OSError:
+                    if cached_source:
+                        os.replace(previous_source, source)
+                    raise
             if not installer.is_file():
                 warning(t(f"找不到 MemSearch Codex 安装器: {installer}", f"MemSearch Codex installer not found: {installer}"))
                 return False
@@ -906,14 +851,7 @@ def install_memsearch_for(agent: str) -> bool:
                     ),
                     file=sys.stderr,
                 )
-                print(
-                    "  /plugin marketplace add zilliztech/memsearch",
-                    file=sys.stderr,
-                )
-                print(
-                    "  /plugin install memsearch",
-                    file=sys.stderr,
-                )
+                print_claude_memsearch_install()
                 return False
             if claude_memsearch_ready():
                 success(t("MemSearch CLI 已就绪, 且 Claude 插件已接入.", "MemSearch CLI is ready and the Claude plugin is connected."))
@@ -925,14 +863,7 @@ def install_memsearch_for(agent: str) -> bool:
                 ),
                 file=sys.stderr,
             )
-            print(
-                "  /plugin marketplace add zilliztech/memsearch",
-                file=sys.stderr,
-            )
-            print(
-                "  /plugin install memsearch",
-                file=sys.stderr,
-            )
+            print_claude_memsearch_install()
             return False
         return cli_ok
     except (OSError, UnicodeError, subprocess.SubprocessError) as error:
@@ -1064,9 +995,9 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
                 "MemSearch 未完整安装. 若确认, Onevoke 将代为执行安装命令 ",
                 "MemSearch is not fully installed. With confirmation, Onevoke will run the installation commands ",
             )
-            + f"(CLI: uv tool install -U memsearch[onnx]=={MEMSEARCH_VERSION}"
+            + f"(CLI: uv tool install -U {MEMSEARCH_PACKAGE}"
             + (
-                t("; 另可能 clone 并运行 Codex 插件 install.sh", "; it may also clone and run the Codex plugin install.sh")
+                t("; 另会 clone 默认分支最新版并运行 Codex 插件 install.sh", "; it will also clone the latest default branch and run the Codex plugin install.sh")
                 if memory_agent == "codex"
                 else t("; Claude 插件仍须在 Claude Code 内手动装", "; the Claude plugin must still be installed manually in Claude Code")
             )
@@ -1098,8 +1029,8 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
             if not memory["cli"]
             else (
                 t(
-                    f"MemSearch CLI 版本可能不受支持, 是否确认执行安装命令修正为 {MEMSEARCH_VERSION}?",
-                    f"The MemSearch CLI version may be unsupported; run the installation command for {MEMSEARCH_VERSION}?",
+                    "MemSearch CLI 无法正常报告版本, 是否确认安装 PyPI 最新版?",
+                    "MemSearch CLI could not report a valid version; install the latest PyPI release?",
                 )
             )
         )
