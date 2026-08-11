@@ -27,7 +27,7 @@ Onevoke - One person. Many agents.
 - tmux 可选; 不安装时 `kanban start` 可在当前终端前台运行
 - uv 可选; 仅 Onevoke 自动安装或修正 MemSearch CLI 版本时需要
 
-memsearch 是可选依赖. welcome/`doctor` 可检查 CLI 与当前执行 Agent 的插件接入状态; 缺失时**先询问用户确认**, 确认后才代跑安装命令 (Codex: CLI + 插件安装器; Claude: CLI + 打印 marketplace 步骤). 安装失败只提示自行安装, **不阻断** Onevoke 工具包安装与 welcome 其它配置. CLI 或当前 Agent 插件任一未就绪时, `BASE-RULES.md` 的「记忆管理」不适用. 源 worktree 没有 `.memsearch/memory` 时记忆合并命令以成功空操作退出; 来源在合并窗口内仍被写入且无法证明稳定时必须失败并阻止清理 worktree.
+memsearch 是可选依赖. welcome/`doctor` 可检查 CLI 与当前执行 Agent 的插件接入状态; 缺失时**先询问用户确认**, 确认后才代跑安装命令 (Codex: CLI + 插件安装器; Claude: CLI + 打印 marketplace 步骤). 仅当该 Agent 的可自动步骤完成且插件已接入时才把配置标为启用: Codex 需 CLI 与 install.sh 都执行成功; Claude 需 CLI 成功且插件已接入. 安装失败或插件未接入只提示自行安装, **不阻断** Onevoke 工具包安装与 welcome 其它配置. CLI 或当前 Agent 插件任一未就绪时, `BASE-RULES.md` 的「记忆管理」不适用. 源 worktree 没有 `.memsearch/memory` 时记忆合并命令以成功空操作退出; 来源在合并窗口内仍被写入且无法证明稳定时必须失败并阻止清理 worktree.
 
 ## 安装
 

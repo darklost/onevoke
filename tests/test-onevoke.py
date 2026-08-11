@@ -1045,10 +1045,10 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("配置的 launcher 是 tmux", result.stderr)
         self.assertIn("welcome --reset", result.stderr)
 
-    def test_install_memsearch_for_claude_runs_cli_command_and_prints_plugin_steps(
+    def test_install_memsearch_for_claude_requires_plugin_before_success(
         self,
     ) -> None:
-        """Claude 路径: 执行 CLI 安装命令并打印 marketplace 步骤, 不要求插件已就绪."""
+        """Claude 路径: 仅 CLI 成功不算完成; 插件已接入才返回 True."""
         self.install_fake_environment(tmux=True, memsearch=False)
         onevoke = load_onevoke_module()
         self.fake_command(
@@ -1080,7 +1080,11 @@ class OnevokeCommandTest(unittest.TestCase):
             with mock.patch.object(Path, "home", return_value=self.home):
                 _, version, ready = onevoke.memsearch_cli_state()
                 self.assertFalse(ready, version)
-                self.assertTrue(onevoke.install_memsearch_for("claude"))
+                self.assertFalse(onevoke.install_memsearch_for("claude"))
+                with mock.patch.object(
+                    onevoke, "claude_memsearch_ready", return_value=True
+                ):
+                    self.assertTrue(onevoke.install_memsearch_for("claude"))
         finally:
             for key, value in previous.items():
                 if value is None:
@@ -1089,6 +1093,141 @@ class OnevokeCommandTest(unittest.TestCase):
                     os.environ[key] = value
 
         self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
+
+    def test_welcome_claude_without_plugin_does_not_enable_memsearch(self) -> None:
+        """Claude 执行 Agent 且插件未接入时, 仅装 CLI 不得标 enabled."""
+        self.install_fake_environment(tmux=True, memsearch=False)
+        uv_log, _, _ = self.install_fake_memsearch_tools(
+            "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8"
+        )
+
+        # 2=claude 执行; 四个 Reviewer 全选 codex; tmux launcher; 确认安装; 保存.
+        returncode, output = self.run_on_tty(
+            "2\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("plugin marketplace add zilliztech/memsearch", output)
+        self.assertIn("MemSearch 安装未完成", output)
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("claude", config["kanban_agent"])
+        self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_claude_enables_memsearch_after_cli_repair_with_plugin(
+        self,
+    ) -> None:
+        """Claude 插件已就绪时, 修复 CLI 后可启用 MemSearch."""
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.fake_command(
+            "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 9.9.9'\n"
+        )
+        uv_log, _, _ = self.install_fake_memsearch_tools(
+            "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8"
+        )
+        plugin = self.install_fake_claude_memsearch_plugin("0.4.15")
+        hashes = {
+            str(path.relative_to(plugin)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in plugin.rglob("*")
+            if path.is_file()
+        }
+        # 子进程无法共享 mock; 用包装入口在加载后覆盖生产摘要表.
+        wrapper = self.root / "onevoke-claude-ready-wrapper.py"
+        wrapper.write_text(
+            "import importlib.machinery\n"
+            "import importlib.util\n"
+            "import sys\n"
+            f"sys.path.insert(0, {str(ONEVOKE.parent)!r})\n"
+            f"loader = importlib.machinery.SourceFileLoader('onevoke', {str(ONEVOKE)!r})\n"
+            "spec = importlib.util.spec_from_loader(loader.name, loader)\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[loader.name] = module\n"
+            "loader.exec_module(module)\n"
+            f"module.CLAUDE_PLUGIN_HASHES = {hashes!r}\n"
+            "sys.argv = [module.__file__] + sys.argv[1:]\n"
+            "raise SystemExit(module.main())\n",
+            encoding="utf-8",
+        )
+
+        master, slave = pty.openpty()
+        process = subprocess.Popen(
+            [sys.executable, str(wrapper), "welcome"],
+            env=self.env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+        seen: list[bytes] = []
+
+        def drain() -> None:
+            while True:
+                try:
+                    data = os.read(master, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                seen.append(data)
+
+        reader = threading.Thread(target=drain)
+        reader.start()
+        try:
+            # 2=claude; 四个 Reviewer=codex; tmux; 确认安装; 保存.
+            os.write(master, b"2\n1\n1\n1\n1\n1\n1\n1\n")
+            returncode = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            os.close(master)
+            reader.join(timeout=5)
+        output = b"".join(seen).decode("utf-8", "replace")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
+        self.assertIn("Claude 插件已接入", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("claude", config["kanban_agent"])
+        self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_welcome_skips_when_codex_installer_missing(self) -> None:
+        """clean pinned 源码存在但缺 install.sh 时不得标 enabled."""
+        self.install_fake_environment(tmux=True, memsearch=False)
+        uv_log, _, bash_log = self.install_fake_memsearch_tools(
+            "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8"
+        )
+        source = self.root / "memsearch-source"
+        source.mkdir(parents=True)
+        # 源码目录已存在且校验通过, 但故意不放 install.sh.
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("找不到 MemSearch Codex 安装器", output)
+        self.assertIn("MemSearch 安装未完成", output)
+        self.assertFalse(bash_log.exists())
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_reports_single_tmux_session_hint(self) -> None:
+        """tmux 已装但当前不在 session 时, welcome/doctor 只给一次准确命令."""
+        self.install_fake_environment(tmux=True)
+        self.env.pop("TMUX", None)
+
+        # MemSearch 已就绪, 无安装提问: agent + 4 reviewers + launcher + save.
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("已安装但当前不在 session", output)
+        self.assertEqual(1, output.count("tmux new -A -s onevoke"))
 
     def test_claude_plugin_positive_against_production_hashes(self) -> None:
         """用固定 commit 的真实插件树对照生产 CLAUDE_PLUGIN_HASHES, 不 patch 摘要表."""

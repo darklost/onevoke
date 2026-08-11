@@ -738,10 +738,12 @@ def install_memsearch_cli() -> bool:
 def install_memsearch_for(agent: str) -> bool:
     """帮用户执行当前 Agent 的可自动安装步骤.
 
-    返回 True 仅表示本函数已完成该 Agent 的全部可自动步骤:
-    Codex 需要 CLI 命令与插件 install.sh 都执行成功; 源码校验失败、
-    安装器缺失或被跳过时返回 False, 即使 CLI 已装好也不把配置标为启用.
-    不做安装后 hooks/插件就绪二次门禁; doctor 仍检查实际状态.
+    返回 True 仅表示该 Agent 可自动完成的步骤已做完, 且足以标 enabled:
+    - Codex: CLI 命令与插件 install.sh 都执行成功 (不做 hooks 二次门禁)
+    - Claude: CLI 命令成功, 且 Claude 插件在安装前/后已接入
+      (插件只能手工装; 仅 CLI 成功不算接入完成)
+    源码校验失败、安装器缺失/跳过、Claude 插件未接入时返回 False,
+    即使 CLI 已装好也不把配置标为启用. doctor 仍检查实际状态.
     失败只返回 False, 由调用方提示自行安装, 不中断 welcome.
     """
     try:
@@ -810,8 +812,26 @@ def install_memsearch_for(agent: str) -> bool:
             success("已执行 MemSearch Codex 插件安装命令.")
             return True
         if agent == "claude":
+            # 插件只能在 Claude Code 内手工装; 仅 CLI 成功不算接入完成.
             if not cli_ok:
                 warning("CLI 安装命令未完成; 仍给出 Claude 插件接入步骤.")
+                print(
+                    "Claude 的 MemSearch 插件需在 Claude Code 内手动安装 "
+                    "(Onevoke 只代跑 CLI):",
+                    file=sys.stderr,
+                )
+                print(
+                    "  /plugin marketplace add zilliztech/memsearch",
+                    file=sys.stderr,
+                )
+                print(
+                    "  /plugin install memsearch",
+                    file=sys.stderr,
+                )
+                return False
+            if claude_memsearch_ready():
+                success("MemSearch CLI 已就绪, 且 Claude 插件已接入.")
+                return True
             print(
                 "Claude 的 MemSearch 插件需在 Claude Code 内手动安装 "
                 "(Onevoke 只代跑 CLI):",
@@ -825,7 +845,7 @@ def install_memsearch_for(agent: str) -> bool:
                 "  /plugin install memsearch",
                 file=sys.stderr,
             )
-            return cli_ok
+            return False
         return cli_ok
     except (OSError, UnicodeError, subprocess.SubprocessError) as error:
         warning(f"MemSearch 安装过程异常: {error}")
