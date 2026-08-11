@@ -354,6 +354,35 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, second.returncode, second.stderr)
         self.assertIn("welcome 已完成", second.stderr)
 
+    def test_welcome_colors_question_titles_and_honors_no_color(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        answers = "1\n1\n1\n1\n1\n1\n2\n1\n"
+        prompts = (
+            "kanban 默认用哪个 Agent 执行任务?",
+            "PM 使用哪个 Reviewer?",
+            "CSA 使用哪个 Reviewer?",
+            "Hacker 使用哪个 Reviewer?",
+            "QA 使用哪个 Reviewer?",
+            "kanban start 使用哪种启动方式?",
+            "确认现在由 Onevoke 执行 MemSearch 安装过程?",
+            "保存以上配置?",
+        )
+
+        returncode, output = self.run_on_tty(answers, "welcome")
+
+        self.assertEqual(0, returncode, output)
+        for prompt in prompts:
+            self.assertIn(f"\033[1;36m{prompt}\033[0m", output)
+        self.assertNotIn("\033[1;36m请选择", output)
+
+        self.env["NO_COLOR"] = "1"
+        returncode, output = self.run_on_tty(answers, "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertNotIn("\033[", output)
+        for prompt in prompts:
+            self.assertIn(prompt, output)
+
     def test_welcome_installs_tmux_with_available_package_manager(self) -> None:
         self.install_fake_environment(tmux=False)
         brew_log = self.root / "brew.log"

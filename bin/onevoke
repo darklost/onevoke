@@ -618,7 +618,7 @@ def ask_choice(prompt: str, choices: list[tuple[str, str]], default: str | None 
     if not choices:
         raise OnevokeError(f"没有可选项: {prompt}")
     while True:
-        print(f"\n{prompt}", file=sys.stderr)
+        print(f"\n{color('1;36', prompt)}", file=sys.stderr)
         for index, (_, label) in enumerate(choices, 1):
             suffix = " (当前)" if choices[index - 1][0] == default else ""
             print(f"  {index}. {label}{suffix}", file=sys.stderr)
