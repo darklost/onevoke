@@ -998,6 +998,38 @@ class OnevokeCommandTest(unittest.TestCase):
                         )
                         ok, _ = onevoke.rules_integration(agent)
                         self.assertFalse(ok)
+                    for phrase in (
+                        "不使用",
+                        "不遵守",
+                        "请勿使用",
+                        "disabled",
+                        "deprecated",
+                        "ignore",
+                    ):
+                        with self.subTest(agent=agent, case=f"reject-{phrase}"):
+                            if phrase.isascii():
+                                prefix = f"These rules are {phrase}:\n\n"
+                            else:
+                                prefix = f"以下规则{phrase}:\n\n"
+                            target.write_text(prefix + current_entry, encoding="utf-8")
+                            ok, _ = onevoke.rules_integration(agent)
+                            self.assertFalse(ok)
+                if agent == "claude":
+                    for phrase in ("不使用", "请勿使用", "disabled"):
+                        with self.subTest(agent=agent, case=f"reject-claude-{phrase}"):
+                            if phrase.isascii():
+                                body = (
+                                    f"These imports are {phrase}:\n"
+                                    "@~/.agents/ONEVOKE-AGENTS.md\n"
+                                )
+                            else:
+                                body = (
+                                    f"以下导入{phrase}:\n"
+                                    "@~/.agents/ONEVOKE-AGENTS.md\n"
+                                )
+                            target.write_text(body, encoding="utf-8")
+                            ok, _ = onevoke.rules_integration(agent)
+                            self.assertFalse(ok)
 
     def test_doctor_validates_configured_agent_reviewers_wrapper_and_launcher(self) -> None:
         self.install_fake_environment(tmux=True)

@@ -348,6 +348,27 @@ class MergeTest(unittest.TestCase):
         self.assertIn("Nothing to merge", result.stdout)
         self.assertEqual(b"### 09:30\n- kept\n", (self.target_memory / "keep.md").read_bytes())
 
+    def test_source_memory_symlink_file_fails_closed(self) -> None:
+        """来源 `*.md` 若是软链, 必须失败, 禁止当空目录成功后清 worktree."""
+        real = self.source_memory / "real-body.md"
+        real.write_bytes(b"### 09:30\n- secret memory that must not be dropped\n")
+        link = self.source_memory / "a.md"
+        link.symlink_to(real.name)
+        before = real.read_bytes()
+
+        result = subprocess.run(
+            [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("must not be a symlink", result.stderr)
+        self.assertFalse((self.target_memory / "a.md").exists())
+        self.assertEqual(before, real.read_bytes())
+        self.assertTrue(link.is_symlink())
+
     def test_source_memory_disappearance_fails_closed(self) -> None:
         self.write_source("a.md", b"### 09:30\n- first\n")
         shutil.rmtree(self.source_memory)

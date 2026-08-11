@@ -205,12 +205,22 @@ def source_memory_identity(source_memory: Path) -> tuple[int, int]:
 
 
 def list_source_memory_files(source_memory: Path) -> list[Path]:
+    """枚举来源 `*.md`; 软链或非普通文件立即失败, 禁止静默跳过."""
     source_memory_identity(source_memory)
-    return sorted(
-        path
-        for path in source_memory.glob("*.md")
-        if path.is_file() and not path.is_symlink()
-    )
+    files: list[Path] = []
+    for path in sorted(source_memory.glob("*.md")):
+        if path.is_symlink():
+            die(
+                f"source memory file must not be a symlink: {path.name}; "
+                "refusing success so the worktree is not cleaned"
+            )
+        if not path.is_file():
+            die(
+                f"source memory entry is not a regular file: {path.name}; "
+                "refusing success so the worktree is not cleaned"
+            )
+        files.append(path)
+    return files
 
 
 def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
