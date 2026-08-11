@@ -401,7 +401,7 @@ class OnevokeCommandTest(unittest.TestCase):
         )
 
         self.assertEqual(0, returncode, output)
-        self.assertIn("MemSearch CLI 未安装, 是否仍然只安装 CLI?", output)
+        self.assertIn("MemSearch CLI 未安装, 是否仍然只执行 CLI 安装命令?", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("grok", config["kanban_agent"])
         self.assertEqual({role: "grok" for role in ROLES}, config["reviewers"])
@@ -441,7 +441,10 @@ class OnevokeCommandTest(unittest.TestCase):
         )
 
         self.assertEqual(0, returncode, output)
-        self.assertIn("MemSearch CLI 版本不受支持, 是否修正为 0.4.15?", output)
+        self.assertIn(
+            "MemSearch CLI 版本可能不受支持, 是否执行安装命令修正为 0.4.15?",
+            output,
+        )
         self.assertEqual(
             "tool install -U memsearch[onnx]==0.4.15",
             uv_log.read_text(encoding="utf-8").strip(),
@@ -649,9 +652,12 @@ class OnevokeCommandTest(unittest.TestCase):
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertTrue(config["memsearch"]["enabled"])
 
-    def test_welcome_rejects_plugin_installer_that_does_not_install_hooks(self) -> None:
+    def test_welcome_enables_memsearch_after_install_commands_without_readiness_gate(
+        self,
+    ) -> None:
+        """安装只要求命令执行完, 不要求 hooks 已就绪的二次校验."""
         self.install_fake_environment(tmux=True, memsearch=False)
-        self.install_fake_memsearch_tools(
+        uv_log, _, bash_log = self.install_fake_memsearch_tools(
             "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8",
             install_hooks=False,
         )
@@ -661,9 +667,12 @@ class OnevokeCommandTest(unittest.TestCase):
         )
 
         self.assertEqual(0, returncode, output)
-        self.assertIn("安装后校验未通过", output)
+        self.assertIn("已执行 MemSearch Codex 插件安装命令", output)
+        self.assertNotIn("安装后校验未通过", output)
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
+        self.assertTrue(bash_log.exists())
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertFalse(config["memsearch"]["enabled"])
+        self.assertTrue(config["memsearch"]["enabled"])
 
     def test_welcome_updates_an_existing_wrong_memsearch_version(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
@@ -684,9 +693,11 @@ class OnevokeCommandTest(unittest.TestCase):
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertTrue(config["memsearch"]["enabled"])
 
-    def test_welcome_rejects_wrong_memsearch_tag_target(self) -> None:
+    def test_welcome_skips_plugin_installer_on_wrong_memsearch_tag_but_keeps_cli(
+        self,
+    ) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
-        _, _, bash_log = self.install_fake_memsearch_tools(
+        uv_log, _, bash_log = self.install_fake_memsearch_tools(
             "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8",
             tag_revision="unexpected-tag-revision",
         )
@@ -697,13 +708,16 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch tag 校验失败", output)
+        self.assertIn("已跳过 Codex 插件安装器", output)
         self.assertFalse(bash_log.exists())
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
+        # CLI 安装命令已执行即视为安装路径完成, 不再做安装后完整就绪校验.
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertFalse(config["memsearch"]["enabled"])
+        self.assertTrue(config["memsearch"]["enabled"])
 
-    def test_welcome_rejects_unexpected_memsearch_source_revision(self) -> None:
+    def test_welcome_skips_plugin_installer_on_unexpected_source_revision(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
-        _, _, bash_log = self.install_fake_memsearch_tools("unexpected-revision")
+        uv_log, _, bash_log = self.install_fake_memsearch_tools("unexpected-revision")
 
         returncode, output = self.run_on_tty(
             "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
@@ -711,14 +725,16 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch 源码校验失败", output)
+        self.assertIn("已跳过 Codex 插件安装器", output)
         self.assertFalse(bash_log.exists())
         self.assertFalse((self.root / "memsearch-source").exists())
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertFalse(config["memsearch"]["enabled"])
+        self.assertTrue(config["memsearch"]["enabled"])
 
-    def test_welcome_rejects_a_dirty_cached_memsearch_source(self) -> None:
+    def test_welcome_skips_plugin_installer_on_dirty_cached_source(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
-        _, _, bash_log = self.install_fake_memsearch_tools(
+        uv_log, _, bash_log = self.install_fake_memsearch_tools(
             "177d23b0e76f4a3a4a8bb920bd1bed421bb664d8",
             " M plugins/codex/scripts/install.sh",
         )
@@ -739,9 +755,11 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch 源码工作树不干净", output)
+        self.assertIn("已跳过 Codex 插件安装器", output)
         self.assertFalse(bash_log.exists())
+        self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertFalse(config["memsearch"]["enabled"])
+        self.assertTrue(config["memsearch"]["enabled"])
 
     def test_welcome_decline_keeps_existing_config_unchanged(self) -> None:
         self.install_fake_environment(tmux=True)
@@ -1023,18 +1041,12 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("配置的 launcher 是 tmux", result.stderr)
         self.assertIn("welcome --reset", result.stderr)
 
-    def test_install_memsearch_for_claude_succeeds_when_plugin_ready_after_cli_fix(
+    def test_install_memsearch_for_claude_runs_cli_command_and_prints_plugin_steps(
         self,
     ) -> None:
-        """插件已就绪、仅 CLI 损坏时, 修 CLI 后应直接启用, 不因 marketplace 提示失败."""
+        """Claude 路径: 执行 CLI 安装命令并打印 marketplace 步骤, 不要求插件已就绪."""
         self.install_fake_environment(tmux=True, memsearch=False)
         onevoke = load_onevoke_module()
-        plugin = self.install_fake_claude_memsearch_plugin("0.4.15")
-        hashes = {
-            str(path.relative_to(plugin)): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in plugin.rglob("*")
-            if path.is_file()
-        }
         self.fake_command(
             "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 9.9.9'\n"
         )
@@ -1053,17 +1065,18 @@ class OnevokeCommandTest(unittest.TestCase):
         try:
             os.environ["PATH"] = str(self.fake_bin)
             os.environ["HOME"] = str(self.home)
-            for key in ("UV_LOG", "FAKE_BIN", "MEMSEARCH_TEMPLATE", "ONEVOKE_MEMSEARCH_SOURCE"):
+            for key in (
+                "UV_LOG",
+                "FAKE_BIN",
+                "MEMSEARCH_TEMPLATE",
+                "ONEVOKE_MEMSEARCH_SOURCE",
+            ):
                 if key in self.env:
                     os.environ[key] = self.env[key]
             with mock.patch.object(Path, "home", return_value=self.home):
-                with mock.patch.object(onevoke, "CLAUDE_PLUGIN_HASHES", hashes):
-                    self.assertTrue(onevoke.claude_memsearch_ready())
-                    _, version, ready = onevoke.memsearch_cli_state()
-                    self.assertFalse(ready, version)
-                    self.assertTrue(onevoke.install_memsearch_for("claude"))
-                    _, fixed_version, fixed_ready = onevoke.memsearch_cli_state()
-                    self.assertTrue(fixed_ready, fixed_version)
+                _, version, ready = onevoke.memsearch_cli_state()
+                self.assertFalse(ready, version)
+                self.assertTrue(onevoke.install_memsearch_for("claude"))
         finally:
             for key, value in previous.items():
                 if value is None:

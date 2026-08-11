@@ -680,17 +680,22 @@ def verify_memsearch_source(source: Path, *, quiet: bool = False) -> bool:
 
 
 def install_memsearch_cli() -> bool:
+    """执行 CLI 安装命令. 以命令是否跑完为准, 不做版本就绪完整校验."""
     command, version, ready = memsearch_cli_state()
     if ready:
+        print(f"MemSearch CLI 已是目标版本 {MEMSEARCH_VERSION}, 跳过安装.", file=sys.stderr)
         return True
     if command:
         warning(
             f"现有 MemSearch CLI 版本为 {version or '无法识别'}, "
-            f"将更新为固定版本 {MEMSEARCH_VERSION}."
+            f"将尝试安装固定版本 {MEMSEARCH_VERSION}."
         )
     if not shutil.which("uv"):
-        warning("未找到 uv, 无法自动安装 MemSearch.")
-        print("请先安装 uv, 再重新运行 onevoke welcome.", file=sys.stderr)
+        warning("未找到 uv, 无法自动安装 MemSearch CLI.")
+        print(
+            f"请先安装 uv, 再手动运行: uv tool install -U memsearch[onnx]=={MEMSEARCH_VERSION}",
+            file=sys.stderr,
+        )
         return False
     package = f"memsearch[onnx]=={MEMSEARCH_VERSION}"
     print(
@@ -698,19 +703,16 @@ def install_memsearch_cli() -> bool:
         file=sys.stderr,
     )
     result = subprocess.run(["uv", "tool", "install", "-U", package], check=False)
-    _, installed_version, installed_ready = memsearch_cli_state()
-    if result.returncode != 0 or not installed_ready:
-        warning(
-            "MemSearch CLI 安装失败或版本校验未通过: "
-            f"预期 {MEMSEARCH_VERSION}, 实际 {installed_version or '无法读取'}."
-        )
+    if result.returncode != 0:
+        warning("MemSearch CLI 安装命令未成功退出. 可稍后手动重试上述 uv 命令.")
         return False
+    success(f"已执行 MemSearch CLI 安装命令: uv tool install -U {package}")
     return True
 
 
 def install_memsearch_for(agent: str) -> bool:
-    if not install_memsearch_cli():
-        return False
+    """帮用户执行安装步骤; 以命令执行为准, 不要求安装后完整就绪校验."""
+    cli_ok = install_memsearch_cli()
     if agent == "codex":
         source = Path(
             os.environ.get(
@@ -721,10 +723,16 @@ def install_memsearch_for(agent: str) -> bool:
         installer = source / "plugins" / "codex" / "scripts" / "install.sh"
         if not source.exists():
             if not shutil.which("git"):
-                warning("未找到 git, 无法安装 MemSearch Codex 插件.")
-                return False
+                warning("未找到 git, 无法下载 MemSearch Codex 插件源码.")
+                print(
+                    f"可手动: git clone --depth 1 --branch v{MEMSEARCH_VERSION} "
+                    "https://github.com/zilliztech/memsearch.git "
+                    f"&& bash <源码>/plugins/codex/scripts/install.sh",
+                    file=sys.stderr,
+                )
+                return cli_ok
             source.parent.mkdir(parents=True, exist_ok=True)
-            print(f"正在把 MemSearch v{MEMSEARCH_VERSION} 安装到 {source}.", file=sys.stderr)
+            print(f"正在把 MemSearch v{MEMSEARCH_VERSION} 克隆到 {source}.", file=sys.stderr)
             with tempfile.TemporaryDirectory(
                 prefix="memsearch.", dir=source.parent
             ) as temporary_root:
@@ -743,41 +751,44 @@ def install_memsearch_for(agent: str) -> bool:
                     check=False,
                 )
                 if result.returncode != 0:
-                    warning("MemSearch 源码下载失败.")
-                    return False
+                    warning("MemSearch 源码下载命令未成功退出.")
+                    return cli_ok
+                # 源码校验仅决定是否用该树执行安装器; 失败则跳过插件安装命令.
                 if not verify_memsearch_source(temporary_source):
-                    return False
+                    warning("源码未通过固定版本校验, 已跳过 Codex 插件安装器.")
+                    return cli_ok
                 os.replace(temporary_source, source)
         elif not verify_memsearch_source(source):
-            return False
+            warning("缓存的 MemSearch 源码未通过固定版本校验, 已跳过 Codex 插件安装器.")
+            return cli_ok
         if not installer.is_file():
             warning(f"找不到 MemSearch Codex 安装器: {installer}")
-            return False
+            return cli_ok
         print("Codex 插件会修改 ~/.codex 配置并替换 MemSearch skills.", file=sys.stderr)
         result = subprocess.run(["bash", str(installer)], check=False)
         if result.returncode != 0:
-            warning("MemSearch Codex 插件安装失败.")
-            return False
-    elif agent == "claude":
-        # 插件可能已就绪, 本次只是修 CLI; 先复检再决定是否提示 marketplace.
-        state = memsearch_state()
-        if state["cli_ready"] and state.get("claude_plugin"):
-            return True
-        warning("Claude 的 MemSearch 插件需要在 Claude Code 内通过 marketplace 安装.")
+            warning("Codex 插件安装命令未成功退出; 可手动重试该 install.sh.")
+            return cli_ok
+        success("已执行 MemSearch Codex 插件安装命令.")
+        return True
+    if agent == "claude":
+        if not cli_ok:
+            warning("CLI 安装命令未完成; 仍给出 Claude 插件接入步骤.")
         print(
-            "运行 /plugin marketplace add zilliztech/memsearch, "
-            "再运行 /plugin install memsearch.",
+            "Claude 的 MemSearch 插件需在 Claude Code 内手动安装 (Onevoke 只代跑 CLI):",
             file=sys.stderr,
         )
-        state = memsearch_state()
-        if state["cli_ready"] and state.get("claude_plugin"):
-            return True
-        return False
-    state = memsearch_state()
-    if not state["cli_ready"] or not state.get(f"{agent}_plugin", False):
-        warning(f"MemSearch {AGENT_LABELS[agent]} 插件安装后校验未通过.")
-        return False
-    return True
+        print(
+            "  /plugin marketplace add zilliztech/memsearch",
+            file=sys.stderr,
+        )
+        print(
+            "  /plugin install memsearch",
+            file=sys.stderr,
+        )
+        # 安装路径只负责执行/展示命令, 不要求 marketplace 已就绪.
+        return cli_ok
+    return cli_ok
 
 
 def install_tmux() -> bool:
@@ -884,20 +895,31 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         config["memsearch"]["enabled"] = True
         success(f"MemSearch CLI 和 {AGENT_LABELS[memory_agent]} 插件均可用.")
     elif memory_agent:
-        if ask_yes_no("MemSearch 未完整安装, 是否现在安装或显示接入步骤?", default=False):
-            config["memsearch"]["enabled"] = install_memsearch_for(memory_agent)
+        if ask_yes_no(
+            "MemSearch 未完整安装, 是否现在执行安装命令 (或显示接入步骤)?",
+            default=False,
+        ):
+            # 以安装命令是否执行完成为准, 不要求安装后完整就绪校验.
+            installed = install_memsearch_for(memory_agent)
+            config["memsearch"]["enabled"] = installed
+            if installed:
+                print(
+                    "已按请求执行安装步骤. doctor 仍可检查实际就绪状态; "
+                    "若插件未接入, 请按输出提示补完.",
+                    file=sys.stderr,
+                )
         else:
             config["memsearch"]["enabled"] = False
     else:
         warning("当前可用 Agent 没有 Onevoke 支持的 MemSearch 插件.")
         cli_prompt = (
-            "MemSearch CLI 未安装, 是否仍然只安装 CLI?"
+            "MemSearch CLI 未安装, 是否仍然只执行 CLI 安装命令?"
             if not memory["cli"]
-            else f"MemSearch CLI 版本不受支持, 是否修正为 {MEMSEARCH_VERSION}?"
+            else f"MemSearch CLI 版本可能不受支持, 是否执行安装命令修正为 {MEMSEARCH_VERSION}?"
         )
         if not memory["cli_ready"] and ask_yes_no(cli_prompt, default=False):
             if install_memsearch_cli():
-                success("MemSearch CLI 已安装, 但当前 Agent 没有对应插件.")
+                success("已执行 MemSearch CLI 安装命令; 当前 Agent 无对应插件.")
         config["memsearch"]["enabled"] = False
 
     print("\n配置摘要:", file=sys.stderr)
