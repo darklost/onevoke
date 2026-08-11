@@ -710,11 +710,12 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch tag 校验失败", output)
         self.assertIn("已跳过 Codex 插件安装器", output)
+        self.assertIn("MemSearch 安装未完成", output)
         self.assertFalse(bash_log.exists())
         self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
-        # CLI 安装命令已执行即视为安装路径完成, 不再做安装后完整就绪校验.
+        # CLI 可能已装好, 但 Codex 插件步骤未完成时不得标 enabled.
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertTrue(config["memsearch"]["enabled"])
+        self.assertFalse(config["memsearch"]["enabled"])
 
     def test_welcome_skips_plugin_installer_on_unexpected_source_revision(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
@@ -727,11 +728,12 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch 源码校验失败", output)
         self.assertIn("已跳过 Codex 插件安装器", output)
+        self.assertIn("MemSearch 安装未完成", output)
         self.assertFalse(bash_log.exists())
         self.assertFalse((self.root / "memsearch-source").exists())
         self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertTrue(config["memsearch"]["enabled"])
+        self.assertFalse(config["memsearch"]["enabled"])
 
     def test_welcome_skips_plugin_installer_on_dirty_cached_source(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
@@ -757,10 +759,11 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch 源码工作树不干净", output)
         self.assertIn("已跳过 Codex 插件安装器", output)
+        self.assertIn("MemSearch 安装未完成", output)
         self.assertFalse(bash_log.exists())
         self.assertIn("memsearch[onnx]==0.4.15", uv_log.read_text(encoding="utf-8"))
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertTrue(config["memsearch"]["enabled"])
+        self.assertFalse(config["memsearch"]["enabled"])
 
     def test_welcome_decline_keeps_existing_config_unchanged(self) -> None:
         self.install_fake_environment(tmux=True)

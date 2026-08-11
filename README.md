@@ -49,7 +49,7 @@ memsearch 是可选依赖. welcome/`doctor` 可检查 CLI 与当前执行 Agent 
 - 检查 MemSearch CLI 版本和当前执行 Agent 的有效插件, 缺失或版本不符时询问安装.
 - 检查所选 Agent 是否已经接入 Onevoke 规则, 但不覆盖用户的 Agent 全局配置.
 
-Codex 的 MemSearch 自动安装固定 PyPI 版本、上游 tag 和 commit, 只对 tag、commit 均匹配且工作树 clean 的插件源码执行安装命令; 以安装命令是否执行完成为准, 不再做安装后完整就绪校验. `doctor` 仍可检查 CLI 与 hooks 的实际状态. 既有缓存被修改或出现未跟踪文件时会跳过插件安装器.
+Codex 的 MemSearch 自动安装固定 PyPI 版本、上游 tag 和 commit, 只对 tag、commit 均匹配且工作树 clean 的插件源码执行安装命令; CLI 与 Codex 插件 install.sh 都执行成功才把配置标为启用, 不做安装后 hooks 完整就绪二次校验. `doctor` 仍可检查 CLI 与 hooks 的实际状态. 既有缓存被修改或出现未跟踪文件时会跳过插件安装器, 且不把配置标为启用.
 
 Claude 的 MemSearch 接入只接受固定 `0.4.15` 发布树: manifest、hooks、辅助脚本、prompts 和 skills 必须逐文件通过 SHA-256 校验, 也不得增加可自动发现的插件组件; 仅忽略 Claude 自己创建的 `.in_use/` 运行时标记.
 

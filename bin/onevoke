@@ -736,7 +736,14 @@ def install_memsearch_cli() -> bool:
 
 
 def install_memsearch_for(agent: str) -> bool:
-    """帮用户执行安装步骤; 失败只返回 False 并留给调用方提示自行安装."""
+    """帮用户执行当前 Agent 的可自动安装步骤.
+
+    返回 True 仅表示本函数已完成该 Agent 的全部可自动步骤:
+    Codex 需要 CLI 命令与插件 install.sh 都执行成功; 源码校验失败、
+    安装器缺失或被跳过时返回 False, 即使 CLI 已装好也不把配置标为启用.
+    不做安装后 hooks/插件就绪二次门禁; doctor 仍检查实际状态.
+    失败只返回 False, 由调用方提示自行安装, 不中断 welcome.
+    """
     try:
         cli_ok = install_memsearch_cli()
         if agent == "codex":
@@ -776,19 +783,19 @@ def install_memsearch_for(agent: str) -> bool:
                     if result.returncode != 0:
                         warning("MemSearch 源码下载命令未成功退出.")
                         return False
-                    # 源码校验仅决定是否用该树执行安装器; 失败则跳过插件安装命令.
+                    # 源码校验失败则跳过安装器, 且不算 Codex 安装步骤完成.
                     if not verify_memsearch_source(temporary_source):
                         warning("源码未通过固定版本校验, 已跳过 Codex 插件安装器.")
-                        return cli_ok
+                        return False
                     os.replace(temporary_source, source)
             elif not verify_memsearch_source(source):
                 warning(
                     "缓存的 MemSearch 源码未通过固定版本校验, 已跳过 Codex 插件安装器."
                 )
-                return cli_ok
+                return False
             if not installer.is_file():
                 warning(f"找不到 MemSearch Codex 安装器: {installer}")
-                return cli_ok
+                return False
             print(
                 "Codex 插件会修改 ~/.codex 配置并替换 MemSearch skills.",
                 file=sys.stderr,
@@ -796,6 +803,9 @@ def install_memsearch_for(agent: str) -> bool:
             result = subprocess.run(["bash", str(installer)], check=False)
             if result.returncode != 0:
                 warning("Codex 插件安装命令未成功退出.")
+                return False
+            if not cli_ok:
+                warning("Codex 插件安装命令已执行, 但 CLI 安装未完成.")
                 return False
             success("已执行 MemSearch Codex 插件安装命令.")
             return True
