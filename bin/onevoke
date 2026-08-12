@@ -6,12 +6,9 @@ import argparse
 import json
 import os
 import re
-import shlex
 import shutil
-import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -45,35 +42,11 @@ COMMANDS = (
     "merge-worktree-memory.py",
 )
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
-MEMSEARCH_PACKAGE = "memsearch[onnx]"
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
-MEMSEARCH_VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
-MEMSEARCH_VERSION_OUTPUT = re.compile(
-    rf"\A\s*memsearch,\s+version\s+({MEMSEARCH_VERSION_RE.pattern})\s*\Z",
-    flags=re.IGNORECASE,
-)
-MEMSEARCH_HOOKS = {
-    "SessionStart": "session-start.sh",
-    "UserPromptSubmit": "user-prompt-submit.sh",
-    "Stop": "stop.sh",
-}
-MEMSEARCH_CODEX_FILES = (
-    Path(".codex/hooks.json"),
-    Path(".codex/hooks.json.bak"),
-    Path(".codex/config.toml"),
-)
-MEMSEARCH_SKILLS = ("memory-recall", "memory-config", "memory-to-skill")
 
 
 class OnevokeError(Exception):
     pass
-
-
-class PathReplacement:
-    def __init__(self, target: Path, backup: Path, had_target: bool) -> None:
-        self.target = target
-        self.backup = backup
-        self.had_target = had_target
 
 
 def color(code: str, text: str) -> str:
@@ -287,349 +260,6 @@ def rules_integration(agent: str) -> tuple[bool, str]:
     )
 
 
-def read_json_file(path: Path) -> object | None:
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-
-
-def memsearch_cli_state() -> tuple[str | None, str | None, bool]:
-    command = shutil.which("memsearch")
-    if not command:
-        return None, None, False
-    try:
-        result = subprocess.run(
-            [command, "--version"],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return command, None, False
-    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
-    match = MEMSEARCH_VERSION_OUTPUT.fullmatch(output)
-    version = match.group(1) if result.returncode == 0 and match else None
-    return command, version, version is not None
-
-
-def resolve_hook_script(command: object, expected: str, root: Path | None) -> Path | None:
-    if not isinstance(command, str):
-        return None
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return None
-    if len(tokens) != 2 or tokens[0] != "bash":
-        return None
-    token = tokens[1]
-    if root is not None:
-        token = token.replace("${CLAUDE_PLUGIN_ROOT}", str(root))
-    if "$" in token:
-        return None
-    candidate = Path(token).expanduser()
-    if (
-        candidate.is_absolute()
-        and candidate.name == expected
-        and candidate.is_file()
-        and os.access(candidate, os.X_OK)
-    ):
-        return candidate.resolve()
-    return None
-
-
-def hooks_directory(raw: object, root: Path | None = None) -> Path | None:
-    if not isinstance(raw, dict) or not isinstance(raw.get("hooks"), dict):
-        return None
-    resolved: list[Path] = []
-    hook_events = raw["hooks"]
-    for event, expected in MEMSEARCH_HOOKS.items():
-        registrations = hook_events.get(event)
-        if not isinstance(registrations, list):
-            return None
-        script = None
-        for registration in registrations:
-            if not isinstance(registration, dict):
-                continue
-            commands = registration.get("hooks")
-            if not isinstance(commands, list):
-                continue
-            for hook in commands:
-                if not isinstance(hook, dict) or hook.get("type") != "command":
-                    continue
-                script = resolve_hook_script(hook.get("command"), expected, root)
-                if script:
-                    break
-            if script:
-                break
-        if not script:
-            return None
-        resolved.append(script)
-    directories = {script.parent for script in resolved}
-    return resolved[0].parent if len(directories) == 1 else None
-
-
-def claude_plugin_identified(root: Path) -> bool:
-    if root.is_symlink() or not root.is_dir():
-        return False
-    required_files = (
-        root / ".claude-plugin" / "plugin.json",
-        root / "hooks" / "hooks.json",
-        root / "hooks" / "common.sh",
-    )
-    if any(path.is_symlink() or not path.is_file() for path in required_files):
-        return False
-    try:
-        for entry in root.rglob("*"):
-            if entry.is_symlink() or not (entry.is_dir() or entry.is_file()):
-                return False
-    except OSError:
-        return False
-    return True
-
-
-def plugin_matches_git_tree(repository: Path, revision: str, installed: Path) -> bool:
-    prefix = Path("plugins/claude-code")
-    git_environment = os.environ.copy()
-    git_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
-    try:
-        tree = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repository),
-                "ls-tree",
-                "-rz",
-                "--full-tree",
-                revision,
-                "--",
-                str(prefix),
-            ],
-            capture_output=True,
-            check=False,
-            env=git_environment,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if tree.returncode != 0:
-        return False
-
-    expected: dict[Path, tuple[bytes, bool]] = {}
-    try:
-        for raw_entry in tree.stdout.split(b"\0"):
-            if not raw_entry:
-                continue
-            metadata, raw_path = raw_entry.split(b"\t", 1)
-            mode, object_type, object_id = metadata.split(b" ", 2)
-            if object_type != b"blob" or mode not in (b"100644", b"100755"):
-                return False
-            path = Path(raw_path.decode("utf-8"))
-            relative = path.relative_to(prefix)
-            blob = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(repository),
-                    "cat-file",
-                    "blob",
-                    object_id.decode("ascii"),
-                ],
-                capture_output=True,
-                check=False,
-                env=git_environment,
-            )
-            if blob.returncode != 0:
-                return False
-            expected[relative] = (blob.stdout, mode == b"100755")
-    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
-        return False
-
-    actual: dict[Path, tuple[bytes, bool]] = {}
-    if installed.is_symlink() or not installed.is_dir():
-        return False
-    try:
-        for entry in installed.rglob("*"):
-            relative = entry.relative_to(installed)
-            if relative.parts[0] == ".in_use":
-                continue
-            if entry.is_symlink():
-                return False
-            if entry.is_file():
-                actual[relative] = (
-                    entry.read_bytes(),
-                    bool(entry.stat().st_mode & stat.S_IXUSR),
-                )
-            elif not entry.is_dir():
-                return False
-    except OSError:
-        return False
-    return actual == expected
-
-
-def path_components_are_real(base: Path, target: Path) -> bool:
-    try:
-        relative = target.relative_to(base)
-        current = base
-        if current.is_symlink():
-            return False
-        for part in relative.parts:
-            current /= part
-            if current.is_symlink():
-                return False
-    except (OSError, ValueError):
-        return False
-    return True
-
-
-def git_revision(source: Path) -> str | None:
-    git_environment = os.environ.copy()
-    git_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(source), "rev-parse", "HEAD"],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=git_environment,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    revision = result.stdout.strip()
-    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", revision):
-        return None
-    return revision
-
-
-def codex_memsearch_commit_path() -> Path:
-    return config_path().with_name("memsearch-codex-commit")
-
-
-def read_codex_memsearch_commit() -> str | None:
-    path = codex_memsearch_commit_path()
-    if path.is_symlink() or not path.is_file():
-        return None
-    try:
-        revision = path.read_text(encoding="ascii").strip()
-    except (OSError, UnicodeError):
-        return None
-    return revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None
-
-
-def codex_memsearch_ready() -> bool:
-    hooks_file = Path.home() / ".codex" / "hooks.json"
-    hooks_dir = hooks_directory(read_json_file(hooks_file))
-    if (
-        hooks_dir is None
-        or hooks_dir.name != "hooks"
-        or hooks_dir.parent.name != "codex"
-        or hooks_dir.parent.parent.name != "plugins"
-    ):
-        return False
-    source = hooks_dir.parent.parent.parent
-    expected_revision = read_codex_memsearch_commit()
-    return bool(
-        expected_revision
-        and verify_memsearch_source(source, quiet=True)
-        and git_revision(source) == expected_revision
-    )
-
-
-def claude_memsearch_ready() -> bool:
-    claude = Path.home() / ".claude"
-    plugins_root = claude / "plugins"
-    marketplaces = read_json_file(claude / "plugins" / "known_marketplaces.json")
-    if not isinstance(marketplaces, dict):
-        return False
-    marketplace = marketplaces.get("memsearch-plugins")
-    if not isinstance(marketplace, dict) or not isinstance(
-        marketplace.get("source"), dict
-    ):
-        return False
-    marketplace_source = marketplace["source"]
-    if (
-        marketplace_source.get("source") != "github"
-        or marketplace_source.get("repo") != "zilliztech/memsearch"
-    ):
-        return False
-    expected_marketplace = claude / "plugins" / "marketplaces" / "memsearch-plugins"
-    install_location = marketplace.get("installLocation")
-    if (
-        not isinstance(install_location, str)
-        or Path(install_location).expanduser().absolute() != expected_marketplace
-        or not path_components_are_real(plugins_root, expected_marketplace)
-        or not verify_memsearch_source(expected_marketplace, quiet=True)
-    ):
-        return False
-    marketplace_revision = git_revision(expected_marketplace)
-    if marketplace_revision is None:
-        return False
-
-    settings = read_json_file(claude / "settings.json")
-    if not isinstance(settings, dict):
-        return False
-    enabled = settings.get("enabledPlugins")
-    if not isinstance(enabled, dict) or enabled.get("memsearch@memsearch-plugins") is not True:
-        return False
-
-    installed = read_json_file(claude / "plugins" / "installed_plugins.json")
-    if not isinstance(installed, dict) or not isinstance(installed.get("plugins"), dict):
-        return False
-    records = installed["plugins"].get("memsearch@memsearch-plugins")
-    if not isinstance(records, list):
-        return False
-    for record in records:
-        if not isinstance(record, dict) or not isinstance(record.get("installPath"), str):
-            continue
-        record_version = record.get("version")
-        if (
-            not isinstance(record_version, str)
-            or not MEMSEARCH_VERSION_RE.fullmatch(record_version)
-            or record.get("gitCommitSha") != marketplace_revision
-        ):
-            continue
-        expected_root = (
-            claude
-            / "plugins"
-            / "cache"
-            / "memsearch-plugins"
-            / "memsearch"
-            / record_version
-        )
-        root = Path(record["installPath"]).expanduser().absolute()
-        if root != expected_root or not path_components_are_real(plugins_root, root):
-            continue
-        manifest = read_json_file(root / ".claude-plugin" / "plugin.json")
-        if (
-            not isinstance(manifest, dict)
-            or manifest.get("name") != "memsearch"
-            or manifest.get("version") != record_version
-        ):
-            continue
-        hooks_dir = hooks_directory(read_json_file(root / "hooks" / "hooks.json"), root)
-        if (
-            hooks_dir == (root / "hooks").resolve()
-            and claude_plugin_identified(root)
-            and plugin_matches_git_tree(expected_marketplace, marketplace_revision, root)
-        ):
-            return True
-    return False
-
-
-def memsearch_state() -> dict[str, str | bool | None]:
-    cli_path, cli_version, cli_ready = memsearch_cli_state()
-    return {
-        "cli": cli_path is not None,
-        "cli_path": cli_path,
-        "cli_version": cli_version,
-        "cli_ready": cli_ready,
-        "codex_plugin": codex_memsearch_ready(),
-        "claude_plugin": claude_memsearch_ready(),
-    }
-
-
 def print_doctor() -> bool:
     healthy = True
     print(t("Onevoke 环境检查", "Onevoke environment check"), file=sys.stderr)
@@ -689,28 +319,6 @@ def print_doctor() -> bool:
         healthy = False
         warning(t("没有发现 Reviewer; 审核流程无法运行.", "No Reviewer found; reviews cannot run."))
 
-    memory = memsearch_state()
-    print("\nMemSearch:", file=sys.stderr)
-    if memory["cli_ready"]:
-        print(f"  CLI: {memory['cli_version']} ({t('可用', 'available')})", file=sys.stderr)
-    elif memory["cli"]:
-        healthy = False
-        warning(
-            t(
-                f"MemSearch CLI 无法正常报告版本: {memory['cli_version'] or '无法识别'}",
-                f"MemSearch CLI could not report a valid version: {memory['cli_version'] or 'unknown'}",
-            )
-        )
-    else:
-        print(t("  CLI: 未安装", "  CLI: not installed"), file=sys.stderr)
-    print(
-        f"  {t('Codex 插件', 'Codex plugin')}: {t('已接入', 'connected') if memory['codex_plugin'] else t('未接入', 'not connected')}",
-        file=sys.stderr,
-    )
-    print(
-        f"  {t('Claude 插件', 'Claude plugin')}: {t('已接入', 'connected') if memory['claude_plugin'] else t('未接入', 'not connected')}",
-        file=sys.stderr,
-    )
     try:
         config = load_config()
     except ConfigError as error:
@@ -722,14 +330,13 @@ def print_doctor() -> bool:
         else:
             print(t(f"[-] 配置: 尚未完成 ({config_path()})", f"[-] config: incomplete ({config_path()})"), file=sys.stderr)
         # 无论 welcome 是否完成, 都校验 effective_config 指向的实际资源.
-        healthy = validate_configured_resources(config, agents, memory) and healthy
+        healthy = validate_configured_resources(config, agents) and healthy
     return healthy
 
 
 def validate_configured_resources(
     config: dict[str, Any],
     agents: dict[str, dict[str, str | bool | None]],
-    memory: dict[str, str | bool | None],
 ) -> bool:
     """对生效配置逐项核对执行 Agent、Reviewer、wrapper 和 launcher."""
     healthy = True
@@ -797,17 +404,6 @@ def validate_configured_resources(
                 file=sys.stderr,
             )
 
-    memory_enabled = bool(
-        memory["cli_ready"] and memory.get(f"{selected_agent}_plugin", False)
-    )
-    if effective["memsearch"]["enabled"] and not memory_enabled:
-        healthy = False
-        warning(
-            t(
-                "配置启用了 MemSearch, 但当前执行 Agent 的 CLI 或插件未就绪; 请重新运行 onevoke welcome --reset.",
-                "MemSearch is enabled, but the current execution Agent's CLI or plugin is not ready; run onevoke welcome --reset.",
-            )
-        )
     return healthy
 
 
@@ -835,475 +431,36 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
     return selected == "yes"
 
 
-def verify_memsearch_source(source: Path, *, quiet: bool = False) -> bool:
-    def reject(message: str) -> bool:
-        if not quiet:
-            warning(message)
-        return False
-
-    if source.is_symlink() or not source.is_dir():
-        return reject(t("MemSearch 源码目录无效.", "The MemSearch source directory is invalid."))
-    if not shutil.which("git"):
-        return reject(t("未找到 git, 无法校验 MemSearch 源码.", "git was not found; cannot verify the MemSearch source."))
-    git_environment = os.environ.copy()
-    git_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
-    remote = subprocess.run(
-        ["git", "-C", str(source), "remote", "get-url", "origin"],
-        text=True,
-        capture_output=True,
-        check=False,
-        env=git_environment,
-    )
-    remote_url = remote.stdout.strip()
-    if remote.returncode != 0 or remote_url != MEMSEARCH_REPOSITORY:
-        return reject(
-            t(
-                f"MemSearch 源码来源不是官方仓库: {remote_url or '无法读取'}",
-                f"MemSearch source is not from the official repository: {remote_url or 'unreadable'}",
-            )
-        )
-    status = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(source),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignore-submodules=none",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-        env=git_environment,
-    )
-    if status.returncode != 0 or status.stdout:
-        return reject(t("MemSearch 源码工作树不干净, 拒绝执行插件安装器.", "The MemSearch source worktree is dirty; refusing to run the plugin installer."))
-    return True
-
-
-def print_claude_memsearch_install() -> None:
-    print("  /plugin marketplace add zilliztech/memsearch", file=sys.stderr)
-    print("  /plugin marketplace update memsearch-plugins", file=sys.stderr)
-    print("  /plugin install memsearch@memsearch-plugins", file=sys.stderr)
-
-
-def print_memsearch_manual_install(agent: str | None = None) -> None:
-    """提示用户自行安装 MemSearch; 失败时调用, 不阻断 welcome/工具包安装."""
-    print(t(
-        "请自行安装 MemSearch (不影响 Onevoke 其它配置与工具包安装):",
-        "Install MemSearch manually (this does not affect other Onevoke configuration or tools):",
-    ), file=sys.stderr)
-    print(f"  uv tool install -U {MEMSEARCH_PACKAGE}", file=sys.stderr)
-    if agent in (None, "codex"):
-        print(
-            f"  {t('Codex 插件', 'Codex plugin')}: git clone --depth 1 "
-            f"{MEMSEARCH_REPOSITORY} "
-            "&& bash memsearch/plugins/codex/scripts/install.sh",
-            file=sys.stderr,
-        )
-    if agent in (None, "claude"):
-        print(
-            t("  Claude 插件 (在 Claude Code 内):", "  Claude plugin (in Claude Code):"),
-            file=sys.stderr,
-        )
-        print_claude_memsearch_install()
-    print(t("完成后可运行 onevoke doctor 查看接入状态.", "Run onevoke doctor afterward to check integration status."), file=sys.stderr)
-
-
-def install_memsearch_cli() -> bool:
-    """执行 CLI 安装命令. 以命令是否跑完为准; 异常与失败只返回 False, 不抛错."""
-    try:
-        command, version, _ = memsearch_cli_state()
-        if command:
-            print(
-                t(
-                    f"现有 MemSearch CLI 版本为 {version or '无法识别'}, 将升级到 PyPI 最新版.",
-                    f"Current MemSearch CLI version is {version or 'unknown'}; upgrading to the latest PyPI release.",
-                ),
-                file=sys.stderr,
-            )
-        if not shutil.which("uv"):
-            warning(t("未找到 uv, 无法自动安装 MemSearch CLI.", "uv was not found; cannot install the MemSearch CLI automatically."))
-            return False
+def install_memsearch_for(agent: str) -> None:
+    if agent == "claude":
         print(
             t(
-                f"即将通过 PyPI 安装最新版 {MEMSEARCH_PACKAGE}, 首次使用会下载 ONNX 模型.",
-                f"Installing the latest {MEMSEARCH_PACKAGE} from PyPI; first use will download the ONNX model.",
+                "请在 Claude Code 内安装 MemSearch:",
+                "Install MemSearch in Claude Code:",
             ),
             file=sys.stderr,
         )
-        result = subprocess.run(
-            ["uv", "tool", "install", "-U", MEMSEARCH_PACKAGE], check=False
+        print("  /plugin marketplace add zilliztech/memsearch", file=sys.stderr)
+        print("  /plugin install memsearch", file=sys.stderr)
+        return
+
+    source = Path(
+        os.environ.get(
+            "ONEVOKE_MEMSEARCH_SOURCE",
+            Path.home() / ".local" / "share" / "onevoke" / "memsearch",
         )
-        if result.returncode != 0:
-            warning(t("MemSearch CLI 安装命令未成功退出.", "The MemSearch CLI installation command failed."))
-            return False
-        success(t(
-            f"已执行 MemSearch CLI 安装命令: uv tool install -U {MEMSEARCH_PACKAGE}",
-            f"Ran the MemSearch CLI installation command: uv tool install -U {MEMSEARCH_PACKAGE}",
-        ))
-        return True
-    except (OSError, UnicodeError, subprocess.SubprocessError) as error:
-        warning(t(f"MemSearch CLI 安装过程异常: {error}", f"MemSearch CLI installation failed: {error}"))
-        return False
-
-
-def path_exists(path: Path) -> bool:
-    return path.exists() or path.is_symlink()
-
-
-def remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    elif path.is_dir():
-        shutil.rmtree(path)
-
-
-def cleanup_committed_temporary_roots(*roots: Path) -> None:
-    for root in roots:
-        try:
-            remove_path(root)
-        except BaseException as error:
-            warning(
-                t(
-                    f"MemSearch 已安装, 但临时目录清理失败: {root}: {error}",
-                    f"MemSearch was installed, but temporary directory cleanup failed: {root}: {error}",
-                )
-            )
-
-
-def prepare_staged_memsearch_home(staged_home: Path) -> bool:
-    home = Path.home()
-    staged_home.mkdir()
-    for relative in MEMSEARCH_CODEX_FILES:
-        source = home / relative
-        if not path_exists(source):
-            continue
-        if source.is_symlink() or not source.is_file():
-            return False
-        target = staged_home / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-    return True
-
-
-def staged_memsearch_targets(staged_home: Path) -> tuple[Path, ...] | None:
-    required_files = {Path(".codex/config.toml")}
-    optional_files = {
-        Path(".codex/hooks.json"),
-        Path(".codex/hooks.json.bak"),
-    }
-    skill_roots = {
-        Path(".agents/skills") / skill_name for skill_name in MEMSEARCH_SKILLS
-    }
-    allowed_files = required_files | optional_files
-
+    ).expanduser()
+    source.parent.mkdir(parents=True, exist_ok=True)
+    installer = source / "plugins" / "codex" / "scripts" / "install.sh"
     try:
-        for entry in staged_home.rglob("*"):
-            relative = entry.relative_to(staged_home)
-            if entry.is_symlink() or not (entry.is_file() or entry.is_dir()):
-                return None
-            if entry.is_file() and relative in allowed_files:
-                continue
-            if any(relative == root or root in relative.parents for root in skill_roots):
-                continue
-            if entry.is_dir() and any(relative in root.parents for root in skill_roots):
-                continue
-            if entry.is_dir() and any(relative in path.parents for path in allowed_files):
-                continue
-            return None
-    except OSError:
-        return None
-
-    if any(not (staged_home / relative).is_file() for relative in required_files):
-        return None
-    if any(not (staged_home / relative).is_dir() for relative in skill_roots):
-        return None
-    targets = [*required_files, *skill_roots]
-    targets.extend(
-        relative
-        for relative in optional_files
-        if path_exists(staged_home / relative)
-    )
-    return tuple(sorted(targets, key=str))
-
-
-def replace_path_transactionally(
-    source: Path,
-    target: Path,
-    backup: Path,
-    journal: list[PathReplacement],
-) -> None:
-    replacement = PathReplacement(target, backup, path_exists(target))
-    journal.append(replacement)
-    if replacement.had_target:
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(target, backup)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(source, target)
-
-
-def rollback_path_replacements(journal: list[PathReplacement]) -> None:
-    while journal:
-        replacement = journal[-1]
-        if replacement.had_target and path_exists(replacement.backup):
-            remove_path(replacement.target)
-            replacement.target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(replacement.backup, replacement.target)
-        elif not replacement.had_target:
-            remove_path(replacement.target)
-        journal.pop()
-
-
-def memsearch_target_paths_are_real() -> bool:
-    home = Path.home()
-    targets = tuple(home / relative for relative in MEMSEARCH_CODEX_FILES) + tuple(
-        home / ".agents" / "skills" / skill for skill in MEMSEARCH_SKILLS
-    )
-    commit = codex_memsearch_commit_path()
-    if commit.is_relative_to(home):
-        targets += (commit,)
-    elif not path_components_are_real(Path(commit.anchor), commit):
-        return False
-    return all(path_components_are_real(home, target) for target in targets)
-
-
-def commit_staged_memsearch_home(
-    staged_home: Path,
-    backup_root: Path,
-    targets: tuple[Path, ...],
-    journal: list[PathReplacement] | None = None,
-) -> bool:
-    home = Path.home()
-    owns_journal = journal is None
-    active_journal = [] if journal is None else journal
-    try:
-        for relative in targets:
-            replace_path_transactionally(
-                staged_home / relative,
-                home / relative,
-                backup_root / relative,
-                active_journal,
-            )
-    except BaseException:
-        if owns_journal:
-            rollback_path_replacements(active_journal)
-        raise
-    if owns_journal:
-        active_journal.clear()
-    return True
-
-
-def install_memsearch_for(agent: str) -> bool:
-    """帮用户执行当前 Agent 的可自动安装步骤.
-
-    返回 True 仅表示该 Agent 可自动完成的步骤已做完, 且足以标 enabled:
-    - Codex: CLI 命令与插件 install.sh 都执行成功 (不做 hooks 二次门禁)
-    - Claude: CLI 命令成功, 且 Claude 插件在安装前/后已接入
-      (插件只能手工装; 仅 CLI 成功不算接入完成)
-    源码校验失败、安装器缺失/跳过、Claude 插件未接入时返回 False,
-    即使 CLI 已装好也不把配置标为启用. doctor 仍检查实际状态.
-    失败只返回 False, 由调用方提示自行安装, 不中断 welcome.
-    """
-    try:
-        cli_ok = install_memsearch_cli()
-        if agent == "codex":
-            if not cli_ok:
-                warning(t("CLI 安装未完成, 已跳过 Codex 插件安装.", "CLI installation did not complete; skipped the Codex plugin installation."))
-                return False
-            source = Path(
-                os.environ.get(
-                    "ONEVOKE_MEMSEARCH_SOURCE",
-                    Path.home() / ".local" / "share" / "onevoke" / "memsearch",
-                )
-            ).expanduser()
-            cached_source = source.exists() or source.is_symlink()
-            if cached_source and not verify_memsearch_source(source):
-                warning(
-                    t(
-                        "缓存的 MemSearch 源码未通过来源或工作树校验, 已跳过 Codex 插件安装器.",
-                        "Cached MemSearch source failed repository or worktree verification; skipped the Codex plugin installer.",
-                    )
-                )
-                return False
-            if not memsearch_target_paths_are_real():
-                warning(t(
-                    "Codex 配置或 MemSearch commit 锚点路径包含符号链接, 已跳过插件安装.",
-                    "A Codex configuration or MemSearch commit-anchor path contains a symlink; skipped plugin installation.",
-                ))
-                return False
-            if not shutil.which("git"):
-                warning(t("未找到 git, 无法下载 MemSearch Codex 插件源码.", "git was not found; cannot download the MemSearch Codex plugin source."))
-                return False
-            source.parent.mkdir(parents=True, exist_ok=True)
-            print(
-                t(
-                    f"正在把 MemSearch 默认分支最新版克隆到 {source}.",
-                    f"Cloning the latest MemSearch default branch to {source}.",
-                ),
-                file=sys.stderr,
-            )
-            temporary_root_path = Path(
-                tempfile.mkdtemp(prefix="memsearch.", dir=source.parent)
-            )
-            environment_root_path: Path | None = None
-            transaction: list[PathReplacement] = []
-            committed = False
-            try:
-                temporary_source = temporary_root_path / "source"
-                result = subprocess.run(
-                    [
-                        "git",
-                        "clone",
-                        "--depth",
-                        "1",
-                        MEMSEARCH_REPOSITORY,
-                        str(temporary_source),
-                    ],
-                    check=False,
-                )
-                if result.returncode != 0:
-                    warning(t("MemSearch 源码下载命令未成功退出.", "The MemSearch source download command failed."))
-                    return False
-                if not verify_memsearch_source(temporary_source):
-                    warning(t("最新源码未通过来源或工作树校验, 已跳过 Codex 插件安装器.", "The latest source failed repository or worktree verification; skipped the Codex plugin installer."))
-                    return False
-                temporary_revision = git_revision(temporary_source)
-                if temporary_revision is None:
-                    warning(t("无法读取最新 MemSearch commit, 已跳过 Codex 插件安装器.", "Could not read the latest MemSearch commit; skipped the Codex plugin installer."))
-                    return False
-                temporary_installer = (
-                    temporary_source
-                    / "plugins"
-                    / "codex"
-                    / "scripts"
-                    / "install.sh"
-                )
-                if not temporary_installer.is_file():
-                    warning(t(f"找不到 MemSearch Codex 安装器: {temporary_installer}", f"MemSearch Codex installer not found: {temporary_installer}"))
-                    return False
-                previous_source = temporary_root_path / "previous"
-                try:
-                    replace_path_transactionally(
-                        temporary_source,
-                        source,
-                        previous_source,
-                        transaction,
-                    )
-                    installer = source / "plugins" / "codex" / "scripts" / "install.sh"
-                    print(
-                        t(
-                            "Codex 插件会修改 ~/.codex 配置并替换 MemSearch skills.",
-                            "The Codex plugin will modify ~/.codex configuration and replace MemSearch skills.",
-                        ),
-                        file=sys.stderr,
-                    )
-                    environment_root_path = Path(
-                        tempfile.mkdtemp(prefix=".onevoke-memsearch.", dir=Path.home())
-                    )
-                    staged_home = environment_root_path / "home"
-                    if not prepare_staged_memsearch_home(staged_home):
-                        rollback_path_replacements(transaction)
-                        warning(t(
-                            "Codex 配置目标不是普通文件, 已取消插件安装并恢复原缓存.",
-                            "A Codex configuration target is not a regular file; cancelled the plugin installation and restored the previous cache.",
-                        ))
-                        return False
-                    installer_environment = os.environ.copy()
-                    installer_environment["HOME"] = str(staged_home)
-                    result = subprocess.run(
-                        ["bash", str(installer)],
-                        check=False,
-                        env=installer_environment,
-                    )
-                    if result.returncode != 0:
-                        rollback_path_replacements(transaction)
-                        warning(
-                            t(
-                                "Codex 插件安装命令未成功退出; 已恢复原缓存."
-                                if cached_source
-                                else "Codex 插件安装命令未成功退出; 未保留失败缓存.",
-                                "The Codex plugin installation command failed; restored the previous cache."
-                                if cached_source
-                                else "The Codex plugin installation command failed; discarded the failed cache.",
-                            )
-                        )
-                        return False
-                    targets = staged_memsearch_targets(staged_home)
-                    if targets is None:
-                        rollback_path_replacements(transaction)
-                        warning(t(
-                            "Codex 插件安装器生成了不受支持的文件布局; 已恢复原缓存且未修改真实 Agent 环境.",
-                            "The Codex plugin installer produced an unsupported file layout; restored the previous cache without modifying the real Agent environment.",
-                        ))
-                        return False
-                    commit_staged_memsearch_home(
-                        staged_home,
-                        environment_root_path / "backup",
-                        targets,
-                        transaction,
-                    )
-                    staged_commit = environment_root_path / "memsearch-codex-commit"
-                    staged_commit.write_text(temporary_revision + "\n", encoding="ascii")
-                    replace_path_transactionally(
-                        staged_commit,
-                        codex_memsearch_commit_path(),
-                        environment_root_path / "backup-commit",
-                        transaction,
-                    )
-                    committed = True
-                except BaseException:
-                    if not committed:
-                        rollback_path_replacements(transaction)
-                    raise
-                success(t("已执行 MemSearch Codex 插件安装命令.", "Ran the MemSearch Codex plugin installation command."))
-                return True
-            finally:
-                temporary_roots = tuple(
-                    root
-                    for root in (environment_root_path, temporary_root_path)
-                    if root is not None
-                )
-                if committed:
-                    cleanup_committed_temporary_roots(*temporary_roots)
-                elif transaction:
-                    warning(t(
-                        "MemSearch 回滚未完成, 已保留临时目录和恢复记录.",
-                        "MemSearch rollback did not complete; preserved temporary directories and recovery records.",
-                    ))
-                else:
-                    for root in temporary_roots:
-                        remove_path(root)
-        if agent == "claude":
-            # 插件只能在 Claude Code 内手工装; 仅 CLI 成功不算接入完成.
-            if not cli_ok:
-                warning(t("CLI 安装命令未完成; 仍给出 Claude 插件接入步骤.", "CLI installation did not complete; Claude plugin setup steps follow."))
-                print(
-                    t(
-                        "Claude 的 MemSearch 插件需在 Claude Code 内手动安装 (Onevoke 只代跑 CLI):",
-                        "Install Claude's MemSearch plugin manually in Claude Code (Onevoke only runs the CLI installation):",
-                    ),
-                    file=sys.stderr,
-                )
-                print_claude_memsearch_install()
-                return False
-            if claude_memsearch_ready():
-                success(t("MemSearch CLI 已就绪, 且 Claude 插件已接入.", "MemSearch CLI is ready and the Claude plugin is connected."))
-                return True
-            print(
-                t(
-                    "Claude 的 MemSearch 插件需在 Claude Code 内手动安装 (Onevoke 只代跑 CLI):",
-                    "Install Claude's MemSearch plugin manually in Claude Code (Onevoke only runs the CLI installation):",
-                ),
-                file=sys.stderr,
-            )
-            print_claude_memsearch_install()
-            return False
-        return cli_ok
-    except (OSError, UnicodeError, subprocess.SubprocessError) as error:
-        warning(t(f"MemSearch 安装过程异常: {error}", f"MemSearch installation failed: {error}"))
-        return False
+        subprocess.run(
+            ["git", "clone", MEMSEARCH_REPOSITORY, str(source)],
+            check=True,
+        )
+        subprocess.run(["bash", str(installer)], check=True)
+        success(t("MemSearch 安装命令已执行.", "The MemSearch installation commands completed."))
+    except (OSError, subprocess.CalledProcessError) as error:
+        warning(t(f"MemSearch 安装命令无法执行: {error}", f"Could not run the MemSearch installation commands: {error}"))
 
 
 def install_tmux() -> bool:
@@ -1413,70 +570,13 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
             "Follow the README integration section; welcome will not overwrite your global rules file.",
         ), file=sys.stderr)
 
-    memory = memsearch_state()
     memory_agent = selected_agent if selected_agent in ("codex", "claude") else None
-    memory_ready = bool(
-        memory_agent
-        and memory["cli_ready"]
-        and memory.get(f"{memory_agent}_plugin", False)
-    )
     config["memsearch"]["enabled"] = False
-    if memory_ready:
+    if memory_agent and ask_yes_no(
+        t("是否使用 MemSearch?", "Use MemSearch?"), default=False
+    ):
         config["memsearch"]["enabled"] = True
-        success(t(f"MemSearch CLI 和 {AGENT_LABELS[memory_agent]} 插件均可用.", f"MemSearch CLI and the {AGENT_LABELS[memory_agent]} plugin are ready."))
-    elif memory_agent:
-        print(
-            t(
-                "MemSearch 未完整安装. 若确认, Onevoke 将代为执行安装命令 ",
-                "MemSearch is not fully installed. With confirmation, Onevoke will run the installation commands ",
-            )
-            + f"(CLI: uv tool install -U {MEMSEARCH_PACKAGE}"
-            + (
-                t("; 另会 clone 默认分支最新版并运行 Codex 插件 install.sh", "; it will also clone the latest default branch and run the Codex plugin install.sh")
-                if memory_agent == "codex"
-                else t("; Claude 插件仍须在 Claude Code 内手动装", "; the Claude plugin must still be installed manually in Claude Code")
-            )
-            + t("). 拒绝或安装失败时仅提示自行安装, 不中断其它配置.", "). If declined or unsuccessful, manual steps are shown and other configuration continues."),
-            file=sys.stderr,
-        )
-        if ask_yes_no(t("确认现在由 Onevoke 执行 MemSearch 安装过程?", "Allow Onevoke to install MemSearch now?"), default=False):
-            # 失败不抛错、不中断 welcome; 只提示自行安装.
-            installed = install_memsearch_for(memory_agent)
-            if installed:
-                config["memsearch"]["enabled"] = True
-                print(
-                    t(
-                        "已按确认执行安装步骤. doctor 仍可检查实际就绪状态.",
-                        "Ran the confirmed installation steps. doctor can still check actual readiness.",
-                    ),
-                    file=sys.stderr,
-                )
-            else:
-                warning(t("MemSearch 安装未完成.", "MemSearch installation did not complete."))
-                print_memsearch_manual_install(memory_agent)
-        else:
-            print(t("已跳过 MemSearch 安装.", "Skipped MemSearch installation."), file=sys.stderr)
-            print_memsearch_manual_install(memory_agent)
-    else:
-        warning(t("当前可用 Agent 没有 Onevoke 支持的 MemSearch 插件.", "The current Agent has no MemSearch plugin supported by Onevoke."))
-        cli_prompt = (
-            t("MemSearch CLI 未安装, 是否确认执行 CLI 安装命令?", "MemSearch CLI is not installed; run its installation command?")
-            if not memory["cli"]
-            else (
-                t(
-                    "MemSearch CLI 无法正常报告版本, 是否确认安装 PyPI 最新版?",
-                    "MemSearch CLI could not report a valid version; install the latest PyPI release?",
-                )
-            )
-        )
-        if not memory["cli_ready"] and ask_yes_no(cli_prompt, default=False):
-            if install_memsearch_cli():
-                success(t("已执行 MemSearch CLI 安装命令; 当前 Agent 无对应插件.", "Ran the MemSearch CLI installation command; the current Agent has no matching plugin."))
-            else:
-                warning(t("MemSearch CLI 安装未完成.", "MemSearch CLI installation did not complete."))
-                print_memsearch_manual_install(None)
-        elif not memory["cli_ready"]:
-            print_memsearch_manual_install(None)
+        install_memsearch_for(memory_agent)
 
     print(t("\n配置摘要:", "\nConfiguration summary:"), file=sys.stderr)
     print(f"  {t('执行 Agent', 'Execution Agent')}: {config['kanban_agent']}", file=sys.stderr)

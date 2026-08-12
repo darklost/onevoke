@@ -34,7 +34,7 @@
 
 ## 记忆管理
 
-- 本节只在 `onevoke doctor` 确认 MemSearch CLI 可正常报告版本, 且当前 Agent 的 MemSearch 插件或 hook 已有效接入时适用. 只有 CLI、只有残留插件目录、当前 Agent 不支持或 hook 失效时整节不适用: 不搭替代记忆系统, 不手写记忆文件, 任务结束照常按「任务完成」节总结.
+- 本节只在用户已完成 MemSearch 接入并在 Onevoke 配置中选择启用时适用. Onevoke 不检查 CLI、插件或 hook 状态; 安装和故障由用户自行处理.
 - 适用时 `memsearch` 为唯一记忆系统. 会话流水由当前 Agent 的 hook 自动写入 `.memsearch/memory/*.md`; 不手写记忆文件, 不手动跑 `memsearch index`.
 - 任务完成, PR 合并或阶段目标完成时, 确认自动记录含任务摘要, 关键决策, 适用 commit hash. 记录缺失只报告用户, 不自行补写.
 - 确认记录完整后提示用户: "建议开新会话, 历史已存 memsearch".

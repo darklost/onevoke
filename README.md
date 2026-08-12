@@ -25,9 +25,8 @@ Onevoke - One person. Many agents.
 - Codex、Claude 或 Grok 至少一个, 用于执行看板任务
 - Codex CLI (`codex`) 或 Grok CLI (`grok`) 至少一个, 用于审核
 - tmux 可选; 不安装时 `kanban start` 可在当前终端前台运行
-- uv 可选; 仅 Onevoke 自动安装或修正 MemSearch CLI 版本时需要
 
-memsearch 是可选依赖. welcome/`doctor` 可检查 CLI 与当前执行 Agent 的插件接入状态; 缺失时**先询问用户确认**, 确认后才代跑安装命令 (Codex: CLI + 插件安装器; Claude: CLI + 打印 marketplace 步骤). 仅当该 Agent 的可自动步骤完成且插件已接入时才把配置标为启用: Codex 需 CLI 与 install.sh 都执行成功; Claude 需 CLI 成功且插件已接入. 安装失败或插件未接入只提示自行安装, **不阻断** Onevoke 工具包安装与 welcome 其它配置. CLI 或当前 Agent 插件任一未就绪时, `BASE-RULES.md` 的「记忆管理」不适用. 源 worktree 没有 `.memsearch/memory` 时记忆合并命令以成功空操作退出; 来源在合并窗口内仍被写入且无法证明稳定时必须失败并阻止清理 worktree.
+memsearch 是可选依赖. welcome 只询问是否使用; 选择后 Codex 路径执行 `git clone` 和上游 `install.sh`, Claude 路径打印官方插件命令. Onevoke 不检查仓库、CLI、插件、hook 或安装结果; 命令失败只报告, 由用户自行处理, 不阻断 welcome 其它配置. 配置中的 `enabled` 只记录用户选择. 源 worktree 没有 `.memsearch/memory` 时记忆合并命令以成功空操作退出; 来源在合并窗口内仍被写入且无法证明稳定时必须失败并阻止清理 worktree.
 
 ## 安装
 
@@ -46,12 +45,17 @@ memsearch 是可选依赖. welcome/`doctor` 可检查 CLI 与当前执行 Agent 
 - 选择 `kanban` 默认执行 Agent.
 - 分别选择 `PM`、`CSA`、`Hacker`、`QA` 的 Reviewer.
 - 选择 tmux window 或当前终端前台 launcher; tmux 缺失时询问安装, 拒绝后写入前台模式.
-- 检查 MemSearch CLI 是否能按稳定版 `X.Y.Z` 格式正常报告版本及当前执行 Agent 的有效插件, 缺失或异常时询问安装.
+- 询问是否使用 MemSearch; 选择后代跑最小安装命令, 不检查安装状态.
 - 检查所选 Agent 是否已经接入 Onevoke 规则, 但不覆盖用户的 Agent 全局配置.
 
-Codex 的 MemSearch 自动安装不固定版本: CLI 使用 `uv tool install -U "memsearch[onnx]"` 获取 PyPI 最新版, 插件每次安装都从官方仓库默认分支重新浅克隆最新版. 只对来源匹配且工作树 clean 的插件源码执行安装命令; CLI 与 Codex 插件 install.sh 都执行成功才把配置标为启用, 不做安装后 hooks 完整就绪二次校验. 插件安装器先在隔离的临时 HOME 中运行, 成功后才把真实 hooks、config、MemSearch skills 和配置目录中的 checkout commit 锚点放进同一事务发布; 非零退出、启动异常或发布失败均恢复真实 Agent 环境. `doctor` 只把 HEAD 与该可信锚点一致的 clean cache 判为已接入; 无锚点的旧 cache 可由下一次安装重新克隆并建立锚点. 既有缓存被修改、来源不符或出现未跟踪文件时会跳过插件安装器; clean 旧缓存会保留到最新版安装和环境发布成功, 安装器缺失或失败时恢复. 这些失败均不把配置标为启用.
+Codex 的 MemSearch 自动安装只执行以下两步, 不固定版本, 不校验源码或安装状态:
 
-Claude 的 MemSearch 接入不固定插件版本. 手动安装步骤先刷新 `memsearch-plugins` Marketplace, 再安装其当前稳定最新版. `doctor` 校验 Marketplace 来自 `zilliztech/memsearch` 且 checkout clean, 并把标准 cache 路径、安装记录的版本和 commit、插件 manifest 及完整文件树动态绑定; 同时检查启用记录、hook 注册和目录内无符号链接. 该校验不固定版本、commit 或文件摘要, 可接受上游最新版新增或修改组件.
+```sh
+git clone https://github.com/zilliztech/memsearch.git ~/.local/share/onevoke/memsearch
+bash ~/.local/share/onevoke/memsearch/plugins/codex/scripts/install.sh
+```
+
+Claude 只打印在 Claude Code 内执行的官方 marketplace 安装命令. 安装失败由用户自行处理.
 
 welcome 只在 stdin 和 stderr 都是 tty 时提问. CI、管道或 hook 中仍完成文件安装, 输出诊断并提示之后在终端运行:
 
