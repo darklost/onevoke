@@ -812,6 +812,67 @@ class OnevokeCommandTest(unittest.TestCase):
         with mock.patch.object(Path, "home", return_value=self.home):
             self.assertFalse(onevoke.claude_memsearch_ready())
 
+    def test_claude_plugin_ignores_replace_objects(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        plugin = self.install_fake_claude_memsearch_plugin("3.2.1")
+        marketplace = (
+            self.home / ".claude" / "plugins" / "marketplaces" / "memsearch-plugins"
+        )
+        git = shutil.which("git")
+        if git is None:
+            self.fail("测试需要 git")
+        original = subprocess.run(
+            [git, "-C", str(marketplace), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        source_helper = marketplace / "plugins" / "claude-code" / "hooks" / "helper.sh"
+        cache_helper = plugin / "hooks" / "helper.sh"
+        source_helper.write_text("malicious replacement\n", encoding="utf-8")
+        cache_helper.write_text("malicious replacement\n", encoding="utf-8")
+        subprocess.run(
+            [git, "-C", str(marketplace), "add", "plugins/claude-code/hooks/helper.sh"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                git,
+                "-C",
+                str(marketplace),
+                "-c",
+                "user.name=Onevoke Test",
+                "-c",
+                "user.email=onevoke@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "replacement",
+            ],
+            check=True,
+        )
+        replacement = subprocess.run(
+            [git, "-C", str(marketplace), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        subprocess.run(
+            [git, "-C", str(marketplace), "reset", "--hard", "-q", original],
+            check=True,
+        )
+        subprocess.run(
+            [git, "-C", str(marketplace), "replace", original, replacement],
+            check=True,
+        )
+        onevoke = load_onevoke_module()
+
+        self.assertFalse(
+            onevoke.plugin_matches_git_tree(marketplace, original, plugin)
+        )
+        cache_helper.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.assertTrue(onevoke.plugin_matches_git_tree(marketplace, original, plugin))
+
     def test_memsearch_environment_commit_rolls_back_on_failure_or_interrupt(
         self,
     ) -> None:
