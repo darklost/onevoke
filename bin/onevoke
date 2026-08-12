@@ -450,9 +450,9 @@ def install_memsearch_for(agent: str) -> None:
             Path.home() / ".local" / "share" / "onevoke" / "memsearch",
         )
     ).expanduser()
-    source.parent.mkdir(parents=True, exist_ok=True)
     installer = source / "plugins" / "codex" / "scripts" / "install.sh"
     try:
+        source.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["git", "clone", MEMSEARCH_REPOSITORY, str(source)],
             check=True,

@@ -213,7 +213,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.env["ONEVOKE_LANG"] = "en"
 
         returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n2\n1\n", "welcome"
+            "1\n1\n1\n1\n1\n2\n1\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -238,7 +238,7 @@ class OnevokeCommandTest(unittest.TestCase):
         # Codex 执行; PM/CSA/Hacker/QA 依次选 Codex/Grok/Codex/Grok;
         # 拒绝安装 tmux; 选择使用 MemSearch; 最后确认保存.
         returncode, output = self.run_on_tty(
-            "1\n1\n2\n1\n2\n2\n1\n", "welcome"
+            "1\n1\n2\n1\n2\n2\n1\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -338,6 +338,23 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_memsearch_clone_failure_does_not_block_welcome(self) -> None:
         self.install_fake_environment(tmux=True)
         _, bash_log = self.install_fake_memsearch_tools(git_exit=1)
+
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 安装命令无法执行", output)
+        self.assertFalse(bash_log.exists())
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_memsearch_destination_failure_does_not_block_welcome(self) -> None:
+        self.install_fake_environment(tmux=True)
+        _, bash_log = self.install_fake_memsearch_tools()
+        blocked_parent = self.root / "blocked"
+        blocked_parent.write_text("not a directory\n", encoding="utf-8")
+        self.env["ONEVOKE_MEMSEARCH_SOURCE"] = str(blocked_parent / "memsearch")
 
         returncode, output = self.run_on_tty(
             "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
