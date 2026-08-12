@@ -893,6 +893,45 @@ class OnevokeCommandTest(unittest.TestCase):
         for root in failed_roots:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_memsearch_interrupt_at_commit_point_rolls_back_install(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_memsearch_tools()
+        source = self.root / "memsearch-source"
+        installer = source / "plugins" / "codex" / "scripts" / "install.sh"
+        installer.parent.mkdir(parents=True)
+        installer.write_text("#!/bin/sh\n", encoding="utf-8")
+        marker = source / "old-cache"
+        marker.write_text("keep\n", encoding="utf-8")
+        hooks = self.home / ".codex" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text('{"original": true}\n', encoding="utf-8")
+        config_file = self.home / ".codex" / "config.toml"
+        config_file.write_text("original = true\n", encoding="utf-8")
+        skill = self.home / ".agents" / "skills" / "memory-recall" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("original skill\n", encoding="utf-8")
+        onevoke = load_onevoke_module()
+        original_commit = onevoke.commit_staged_memsearch_home
+
+        def interrupt_after_publish(*args, **kwargs):
+            original_commit(*args, **kwargs)
+            raise KeyboardInterrupt()
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(Path, "home", return_value=self.home):
+                with mock.patch.object(
+                    onevoke,
+                    "commit_staged_memsearch_home",
+                    side_effect=interrupt_after_publish,
+                ):
+                    with self.assertRaises(KeyboardInterrupt):
+                        onevoke.install_memsearch_for("codex")
+
+        self.assertTrue(marker.is_file())
+        self.assertEqual('{"original": true}\n', hooks.read_text(encoding="utf-8"))
+        self.assertEqual("original = true\n", config_file.read_text(encoding="utf-8"))
+        self.assertEqual("original skill\n", skill.read_text(encoding="utf-8"))
+
     def test_doctor_rejects_invalid_claude_plugin_version(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
         self.fake_command(

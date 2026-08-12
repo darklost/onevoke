@@ -1032,7 +1032,7 @@ def commit_staged_memsearch_home(
     backup_root: Path,
     targets: tuple[Path, ...],
     journal: list[PathReplacement] | None = None,
-) -> None:
+) -> bool:
     home = Path.home()
     owns_journal = journal is None
     active_journal = [] if journal is None else journal
@@ -1050,6 +1050,7 @@ def commit_staged_memsearch_home(
         raise
     if owns_journal:
         active_journal.clear()
+    return True
 
 
 def install_memsearch_for(agent: str) -> bool:
@@ -1185,16 +1186,15 @@ def install_memsearch_for(agent: str) -> bool:
                             "The Codex plugin installer produced an unsupported file layout; restored the previous cache without modifying the real Agent environment.",
                         ))
                         return False
-                    commit_staged_memsearch_home(
+                    committed = commit_staged_memsearch_home(
                         staged_home,
                         environment_root_path / "backup",
                         targets,
                         transaction,
                     )
-                    transaction.clear()
-                    committed = True
                 except BaseException:
-                    rollback_path_replacements(transaction)
+                    if not committed:
+                        rollback_path_replacements(transaction)
                     raise
                 success(t("已执行 MemSearch Codex 插件安装命令.", "Ran the MemSearch Codex plugin installation command."))
                 return True
