@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 import re
@@ -11,7 +10,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any, NoReturn
@@ -394,45 +392,58 @@ def claude_plugin_identified(root: Path) -> bool:
 
 def plugin_matches_git_tree(repository: Path, revision: str, installed: Path) -> bool:
     prefix = Path("plugins/claude-code")
+    git_environment = os.environ.copy()
+    git_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     try:
-        archive = subprocess.run(
+        tree = subprocess.run(
             [
                 "git",
                 "-C",
                 str(repository),
-                "archive",
-                "--format=tar",
+                "ls-tree",
+                "-rz",
+                "--full-tree",
                 revision,
+                "--",
                 str(prefix),
             ],
             capture_output=True,
             check=False,
+            env=git_environment,
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    if archive.returncode != 0:
+    if tree.returncode != 0:
         return False
 
     expected: dict[Path, tuple[bytes, bool]] = {}
     try:
-        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as stream:
-            for member in stream.getmembers():
-                path = Path(member.name)
-                if member.isdir() and path in prefix.parents:
-                    continue
-                try:
-                    relative = path.relative_to(prefix)
-                except ValueError:
-                    return False
-                if relative == Path(".") or member.isdir():
-                    continue
-                if not member.isfile():
-                    return False
-                extracted = stream.extractfile(member)
-                if extracted is None:
-                    return False
-                expected[relative] = (extracted.read(), bool(member.mode & 0o111))
-    except (OSError, tarfile.TarError):
+        for raw_entry in tree.stdout.split(b"\0"):
+            if not raw_entry:
+                continue
+            metadata, raw_path = raw_entry.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ", 2)
+            if object_type != b"blob" or mode not in (b"100644", b"100755"):
+                return False
+            path = Path(raw_path.decode("utf-8"))
+            relative = path.relative_to(prefix)
+            blob = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "cat-file",
+                    "blob",
+                    object_id.decode("ascii"),
+                ],
+                capture_output=True,
+                check=False,
+                env=git_environment,
+            )
+            if blob.returncode != 0:
+                return False
+            expected[relative] = (blob.stdout, mode == b"100755")
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
         return False
 
     actual: dict[Path, tuple[bytes, bool]] = {}

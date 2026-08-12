@@ -129,6 +129,7 @@ class OnevokeCommandTest(unittest.TestCase):
         hooks_dir = source_plugin / "hooks"
         hooks_dir.mkdir()
         (hooks_dir / "common.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        (hooks_dir / "helper.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         hooks = {}
         for event, name in {
             "SessionStart": "session-start.sh",
@@ -249,7 +250,8 @@ class OnevokeCommandTest(unittest.TestCase):
             "  printf '%s\\n' 'https://github.com/zilliztech/memsearch.git'\n"
             "elif [ \"$1\" = '-C' ] && [ \"$3\" = 'rev-parse' ]; then\n"
             f"  printf '%s\\n' '{revision}'\n"
-            "elif [ \"$1\" = '-C' ] && [ \"$3\" = 'archive' ]; then\n"
+            "elif [ \"$1\" = '-C' ] && "
+            "{ [ \"$3\" = 'ls-tree' ] || [ \"$3\" = 'cat-file' ]; }; then\n"
             f"  exec '{git}' \"$@\"\n"
             "fi\n",
         )
@@ -788,6 +790,23 @@ class OnevokeCommandTest(unittest.TestCase):
         cache_skill = plugin / "skills" / "local" / "SKILL.md"
         cache_skill.parent.mkdir(parents=True)
         cache_skill.write_text("injected skill\n", encoding="utf-8")
+        onevoke = load_onevoke_module()
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertFalse(onevoke.claude_memsearch_ready())
+
+    def test_claude_plugin_ignores_local_export_attributes(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        plugin = self.install_fake_claude_memsearch_plugin("3.2.1")
+        marketplace = (
+            self.home / ".claude" / "plugins" / "marketplaces" / "memsearch-plugins"
+        )
+        attributes = marketplace / ".git" / "info" / "attributes"
+        attributes.write_text(
+            "plugins/claude-code/hooks/helper.sh export-ignore\n",
+            encoding="utf-8",
+        )
+        (plugin / "hooks" / "helper.sh").unlink()
         onevoke = load_onevoke_module()
 
         with mock.patch.object(Path, "home", return_value=self.home):
