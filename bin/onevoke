@@ -932,6 +932,19 @@ def remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def cleanup_committed_temporary_roots(*roots: Path) -> None:
+    for root in roots:
+        try:
+            remove_path(root)
+        except BaseException as error:
+            warning(
+                t(
+                    f"MemSearch 已安装, 但临时目录清理失败: {root}: {error}",
+                    f"MemSearch was installed, but temporary directory cleanup failed: {root}: {error}",
+                )
+            )
+
+
 def prepare_staged_memsearch_home(staged_home: Path) -> bool:
     home = Path.home()
     staged_home.mkdir()
@@ -1082,10 +1095,13 @@ def install_memsearch_for(agent: str) -> bool:
                 ),
                 file=sys.stderr,
             )
-            with tempfile.TemporaryDirectory(
-                prefix="memsearch.", dir=source.parent
-            ) as temporary_root:
-                temporary_root_path = Path(temporary_root)
+            temporary_root_path = Path(
+                tempfile.mkdtemp(prefix="memsearch.", dir=source.parent)
+            )
+            environment_root_path: Path | None = None
+            transaction: list[PathReplacement] = []
+            committed = False
+            try:
                 temporary_source = temporary_root_path / "source"
                 result = subprocess.run(
                     [
@@ -1115,7 +1131,6 @@ def install_memsearch_for(agent: str) -> bool:
                     warning(t(f"找不到 MemSearch Codex 安装器: {temporary_installer}", f"MemSearch Codex installer not found: {temporary_installer}"))
                     return False
                 previous_source = temporary_root_path / "previous"
-                transaction: list[PathReplacement] = []
                 try:
                     replace_path_transactionally(
                         temporary_source,
@@ -1131,58 +1146,69 @@ def install_memsearch_for(agent: str) -> bool:
                         ),
                         file=sys.stderr,
                     )
-                    with tempfile.TemporaryDirectory(
-                        prefix=".onevoke-memsearch.", dir=Path.home()
-                    ) as environment_root:
-                        environment_root_path = Path(environment_root)
-                        staged_home = environment_root_path / "home"
-                        if not prepare_staged_memsearch_home(staged_home):
-                            rollback_path_replacements(transaction)
-                            warning(t(
-                                "Codex 配置目标不是普通文件, 已取消插件安装并恢复原缓存.",
-                                "A Codex configuration target is not a regular file; cancelled the plugin installation and restored the previous cache.",
-                            ))
-                            return False
-                        installer_environment = os.environ.copy()
-                        installer_environment["HOME"] = str(staged_home)
-                        result = subprocess.run(
-                            ["bash", str(installer)],
-                            check=False,
-                            env=installer_environment,
-                        )
-                        if result.returncode != 0:
-                            rollback_path_replacements(transaction)
-                            warning(
-                                t(
-                                    "Codex 插件安装命令未成功退出; 已恢复原缓存."
-                                    if cached_source
-                                    else "Codex 插件安装命令未成功退出; 未保留失败缓存.",
-                                    "The Codex plugin installation command failed; restored the previous cache."
-                                    if cached_source
-                                    else "The Codex plugin installation command failed; discarded the failed cache.",
-                                )
+                    environment_root_path = Path(
+                        tempfile.mkdtemp(prefix=".onevoke-memsearch.", dir=Path.home())
+                    )
+                    staged_home = environment_root_path / "home"
+                    if not prepare_staged_memsearch_home(staged_home):
+                        rollback_path_replacements(transaction)
+                        warning(t(
+                            "Codex 配置目标不是普通文件, 已取消插件安装并恢复原缓存.",
+                            "A Codex configuration target is not a regular file; cancelled the plugin installation and restored the previous cache.",
+                        ))
+                        return False
+                    installer_environment = os.environ.copy()
+                    installer_environment["HOME"] = str(staged_home)
+                    result = subprocess.run(
+                        ["bash", str(installer)],
+                        check=False,
+                        env=installer_environment,
+                    )
+                    if result.returncode != 0:
+                        rollback_path_replacements(transaction)
+                        warning(
+                            t(
+                                "Codex 插件安装命令未成功退出; 已恢复原缓存."
+                                if cached_source
+                                else "Codex 插件安装命令未成功退出; 未保留失败缓存.",
+                                "The Codex plugin installation command failed; restored the previous cache."
+                                if cached_source
+                                else "The Codex plugin installation command failed; discarded the failed cache.",
                             )
-                            return False
-                        targets = staged_memsearch_targets(staged_home)
-                        if targets is None:
-                            rollback_path_replacements(transaction)
-                            warning(t(
-                                "Codex 插件安装器生成了不受支持的文件布局; 已恢复原缓存且未修改真实 Agent 环境.",
-                                "The Codex plugin installer produced an unsupported file layout; restored the previous cache without modifying the real Agent environment.",
-                            ))
-                            return False
-                        commit_staged_memsearch_home(
-                            staged_home,
-                            environment_root_path / "backup",
-                            targets,
-                            transaction,
                         )
-                        transaction.clear()
+                        return False
+                    targets = staged_memsearch_targets(staged_home)
+                    if targets is None:
+                        rollback_path_replacements(transaction)
+                        warning(t(
+                            "Codex 插件安装器生成了不受支持的文件布局; 已恢复原缓存且未修改真实 Agent 环境.",
+                            "The Codex plugin installer produced an unsupported file layout; restored the previous cache without modifying the real Agent environment.",
+                        ))
+                        return False
+                    commit_staged_memsearch_home(
+                        staged_home,
+                        environment_root_path / "backup",
+                        targets,
+                        transaction,
+                    )
+                    transaction.clear()
+                    committed = True
                 except BaseException:
                     rollback_path_replacements(transaction)
                     raise
                 success(t("已执行 MemSearch Codex 插件安装命令.", "Ran the MemSearch Codex plugin installation command."))
                 return True
+            finally:
+                temporary_roots = tuple(
+                    root
+                    for root in (environment_root_path, temporary_root_path)
+                    if root is not None
+                )
+                if committed:
+                    cleanup_committed_temporary_roots(*temporary_roots)
+                else:
+                    for root in temporary_roots:
+                        remove_path(root)
         if agent == "claude":
             # 插件只能在 Claude Code 内手工装; 仅 CLI 成功不算接入完成.
             if not cli_ok:

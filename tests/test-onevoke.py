@@ -864,6 +864,35 @@ class OnevokeCommandTest(unittest.TestCase):
                     (skill / "SKILL.md").read_text(encoding="utf-8"),
                 )
 
+    def test_memsearch_cleanup_failure_does_not_reverse_committed_install(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_memsearch_tools()
+        onevoke = load_onevoke_module()
+        original_remove = onevoke.remove_path
+        failed_roots: list[Path] = []
+
+        def fail_temporary_cleanup(path: Path) -> None:
+            if path.name.startswith(("memsearch.", ".onevoke-memsearch.")):
+                failed_roots.append(path)
+                raise OSError("cleanup failed")
+            original_remove(path)
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(Path, "home", return_value=self.home):
+                with mock.patch.object(
+                    onevoke, "remove_path", side_effect=fail_temporary_cleanup
+                ):
+                    self.assertTrue(onevoke.install_memsearch_for("codex"))
+
+        self.assertEqual(2, len(failed_roots))
+        self.assertTrue((self.root / "memsearch-source").is_dir())
+        self.assertIn(
+            "hooks = true",
+            (self.home / ".codex" / "config.toml").read_text(encoding="utf-8"),
+        )
+        for root in failed_roots:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_doctor_rejects_invalid_claude_plugin_version(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
         self.fake_command(
