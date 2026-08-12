@@ -84,11 +84,18 @@ class OnevokeCommandTest(unittest.TestCase):
                 "memsearch", "#!/bin/sh\nprintf '%s\\n' 'memsearch, version 0.4.15'\n"
             )
             self.install_fake_codex_memsearch_hooks()
+            revision = "1" * 40
+            self.config.parent.mkdir(parents=True, exist_ok=True)
+            self.config.with_name("memsearch-codex-commit").write_text(
+                revision + "\n", encoding="ascii"
+            )
             self.fake_command(
                 "git",
                 "#!/bin/sh\n"
                 "if [ \"$1\" = '-C' ] && [ \"$3\" = 'remote' ]; then\n"
                 "  printf '%s\\n' 'https://github.com/zilliztech/memsearch.git'\n"
+                "elif [ \"$1\" = '-C' ] && [ \"$3\" = 'rev-parse' ]; then\n"
+                f"  printf '%s\\n' \"${{MEMSEARCH_REVISION:-{revision}}}\"\n"
                 "fi\n",
             )
 
@@ -341,6 +348,8 @@ class OnevokeCommandTest(unittest.TestCase):
             "  elif [ \"$3\" = 'status' ] && "
             "[ -n \"$MEMSEARCH_SOURCE_STATUS\" ]; then\n"
             "    printf '%s\\n' \"$MEMSEARCH_SOURCE_STATUS\"\n"
+            "  elif [ \"$3\" = 'rev-parse' ]; then\n"
+            "    printf '%s\\n' \"${MEMSEARCH_CLONE_REVISION:-2222222222222222222222222222222222222222}\"\n"
             "  fi\n"
             "  exit 0\n"
             "fi\n"
@@ -874,6 +883,46 @@ class OnevokeCommandTest(unittest.TestCase):
             cache_helper.write_text("#!/bin/sh\n", encoding="utf-8")
             self.assertTrue(onevoke.claude_memsearch_ready())
 
+    def test_claude_plugin_requires_owner_execute_bit(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        plugin = self.install_fake_claude_memsearch_plugin("3.2.1")
+        marketplace = (
+            self.home / ".claude" / "plugins" / "marketplaces" / "memsearch-plugins"
+        )
+        source = marketplace / "plugins" / "claude-code" / "hooks" / "helper.sh"
+        cached = plugin / "hooks" / "helper.sh"
+        source.chmod(0o755)
+        cached.chmod(0o055)
+        git = shutil.which("git")
+        if git is None:
+            self.fail("测试需要 git")
+        subprocess.run([git, "-C", str(marketplace), "add", str(source)], check=True)
+        subprocess.run(
+            [
+                git,
+                "-C",
+                str(marketplace),
+                "-c",
+                "user.name=Onevoke Test",
+                "-c",
+                "user.email=onevoke@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "executable",
+            ],
+            check=True,
+        )
+        revision = subprocess.run(
+            [git, "-C", str(marketplace), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        onevoke = load_onevoke_module()
+
+        self.assertFalse(onevoke.plugin_matches_git_tree(marketplace, revision, plugin))
+
     def test_memsearch_environment_commit_rolls_back_on_failure_or_interrupt(
         self,
     ) -> None:
@@ -926,6 +975,47 @@ class OnevokeCommandTest(unittest.TestCase):
                     (skill / "SKILL.md").read_text(encoding="utf-8"),
                 )
 
+    def test_memsearch_rollback_failure_preserves_journal_and_backup(self) -> None:
+        onevoke = load_onevoke_module()
+        for raised in (OSError("restore failed"), KeyboardInterrupt()):
+            with self.subTest(exception=type(raised).__name__):
+                target = self.root / f"target-{type(raised).__name__}"
+                backup = self.root / f"backup-{type(raised).__name__}"
+                target.write_text("new\n", encoding="utf-8")
+                backup.write_text("old\n", encoding="utf-8")
+                journal = [onevoke.PathReplacement(target, backup, True)]
+
+                with mock.patch.object(onevoke.os, "replace", side_effect=raised):
+                    with self.assertRaises(type(raised)):
+                        onevoke.rollback_path_replacements(journal)
+
+                self.assertEqual(1, len(journal))
+                self.assertTrue(backup.is_file())
+
+    def test_memsearch_rejects_symlinked_agent_parent(self) -> None:
+        self.install_fake_environment(tmux=True, memsearch=False)
+        self.install_fake_memsearch_tools()
+        external = self.root / "external-codex"
+        external.mkdir()
+        (self.home / ".codex").symlink_to(external, target_is_directory=True)
+        onevoke = load_onevoke_module()
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(Path, "home", return_value=self.home):
+                self.assertFalse(onevoke.install_memsearch_for("codex"))
+
+        self.assertEqual([], list(external.iterdir()))
+
+    def test_codex_readiness_requires_recorded_checkout_commit(self) -> None:
+        self.install_fake_environment(tmux=True)
+        onevoke = load_onevoke_module()
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(Path, "home", return_value=self.home):
+                self.assertTrue(onevoke.codex_memsearch_ready())
+                os.environ["MEMSEARCH_REVISION"] = "2" * 40
+                self.assertFalse(onevoke.codex_memsearch_ready())
+
     def test_memsearch_cleanup_failure_does_not_reverse_committed_install(self) -> None:
         self.install_fake_environment(tmux=True, memsearch=False)
         self.install_fake_memsearch_tools()
@@ -948,6 +1038,12 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(2, len(failed_roots))
         self.assertTrue((self.root / "memsearch-source").is_dir())
+        self.assertEqual(
+            "2" * 40,
+            self.config.with_name("memsearch-codex-commit")
+            .read_text(encoding="ascii")
+            .strip(),
+        )
         self.assertIn(
             "hooks = true",
             (self.home / ".codex" / "config.toml").read_text(encoding="utf-8"),
@@ -1108,7 +1204,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "reviewers": {role: "codex" for role in ROLES},
             "memsearch": {"enabled": True},
         }
-        self.config.parent.mkdir(parents=True)
+        self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(json.dumps(config), encoding="utf-8")
 
         result = self.run_command("doctor")
@@ -1155,7 +1251,7 @@ class OnevokeCommandTest(unittest.TestCase):
                     self.assertFalse(onevoke.claude_memsearch_ready())
 
     def test_invalid_config_is_reported_without_fallback(self) -> None:
-        self.config.parent.mkdir(parents=True)
+        self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text("not json\n", encoding="utf-8")
 
         result = self.run_command("config")
@@ -1346,7 +1442,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "reviewers": {role: "grok" for role in ROLES},
             "memsearch": {"enabled": True},
         }
-        self.config.parent.mkdir(parents=True)
+        self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(
             json.dumps(existing, ensure_ascii=False, indent=4) + "\n",
             encoding="utf-8",
@@ -1379,7 +1475,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "memsearch": {"enabled": False},
         }
         config["reviewers"]["QA"] = "grok"
-        self.config.parent.mkdir(parents=True)
+        self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(json.dumps(config), encoding="utf-8")
 
         result = subprocess.run(
@@ -1421,7 +1517,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "reviewers": {role: "grok" for role in ROLES},
             "memsearch": {"enabled": True},
         }
-        self.config.parent.mkdir(parents=True)
+        self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(json.dumps(config), encoding="utf-8")
 
         result = self.run_command(
@@ -1649,7 +1745,7 @@ class OnevokeCommandTest(unittest.TestCase):
             },
             "memsearch": {"enabled": False},
         }
-        self.config.parent.mkdir(parents=True)
+        self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(json.dumps(config), encoding="utf-8")
         # Remove configured execution agent and one reviewer wrapper.
         (self.fake_bin / "claude").unlink()
@@ -1671,7 +1767,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "reviewers": {role: "codex" for role in ROLES},
             "memsearch": {"enabled": False},
         }
-        self.config.parent.mkdir(parents=True)
+        self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(json.dumps(config), encoding="utf-8")
 
         result = self.run_command("doctor")

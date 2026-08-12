@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -459,7 +460,7 @@ def plugin_matches_git_tree(repository: Path, revision: str, installed: Path) ->
             if entry.is_file():
                 actual[relative] = (
                     entry.read_bytes(),
-                    bool(entry.stat().st_mode & 0o111),
+                    bool(entry.stat().st_mode & stat.S_IXUSR),
                 )
             elif not entry.is_dir():
                 return False
@@ -484,12 +485,15 @@ def path_components_are_real(base: Path, target: Path) -> bool:
 
 
 def git_revision(source: Path) -> str | None:
+    git_environment = os.environ.copy()
+    git_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     try:
         result = subprocess.run(
             ["git", "-C", str(source), "rev-parse", "HEAD"],
             text=True,
             capture_output=True,
             check=False,
+            env=git_environment,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -497,6 +501,21 @@ def git_revision(source: Path) -> str | None:
     if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", revision):
         return None
     return revision
+
+
+def codex_memsearch_commit_path() -> Path:
+    return config_path().with_name("memsearch-codex-commit")
+
+
+def read_codex_memsearch_commit() -> str | None:
+    path = codex_memsearch_commit_path()
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        revision = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    return revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None
 
 
 def codex_memsearch_ready() -> bool:
@@ -510,7 +529,12 @@ def codex_memsearch_ready() -> bool:
     ):
         return False
     source = hooks_dir.parent.parent.parent
-    return verify_memsearch_source(source, quiet=True)
+    expected_revision = read_codex_memsearch_commit()
+    return bool(
+        expected_revision
+        and verify_memsearch_source(source, quiet=True)
+        and git_revision(source) == expected_revision
+    )
 
 
 def claude_memsearch_ready() -> bool:
@@ -1021,14 +1045,28 @@ def replace_path_transactionally(
 
 
 def rollback_path_replacements(journal: list[PathReplacement]) -> None:
-    for replacement in reversed(journal):
+    while journal:
+        replacement = journal[-1]
         if replacement.had_target and path_exists(replacement.backup):
             remove_path(replacement.target)
             replacement.target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(replacement.backup, replacement.target)
         elif not replacement.had_target:
             remove_path(replacement.target)
-    journal.clear()
+        journal.pop()
+
+
+def memsearch_target_paths_are_real() -> bool:
+    home = Path.home()
+    targets = tuple(home / relative for relative in MEMSEARCH_CODEX_FILES) + tuple(
+        home / ".agents" / "skills" / skill for skill in MEMSEARCH_SKILLS
+    )
+    commit = codex_memsearch_commit_path()
+    if commit.is_relative_to(home):
+        targets += (commit,)
+    elif not path_components_are_real(Path(commit.anchor), commit):
+        return False
+    return all(path_components_are_real(home, target) for target in targets)
 
 
 def commit_staged_memsearch_home(
@@ -1089,6 +1127,12 @@ def install_memsearch_for(agent: str) -> bool:
                     )
                 )
                 return False
+            if not memsearch_target_paths_are_real():
+                warning(t(
+                    "Codex 配置或 MemSearch commit 锚点路径包含符号链接, 已跳过插件安装.",
+                    "A Codex configuration or MemSearch commit-anchor path contains a symlink; skipped plugin installation.",
+                ))
+                return False
             if not shutil.which("git"):
                 warning(t("未找到 git, 无法下载 MemSearch Codex 插件源码.", "git was not found; cannot download the MemSearch Codex plugin source."))
                 return False
@@ -1124,6 +1168,10 @@ def install_memsearch_for(agent: str) -> bool:
                     return False
                 if not verify_memsearch_source(temporary_source):
                     warning(t("最新源码未通过来源或工作树校验, 已跳过 Codex 插件安装器.", "The latest source failed repository or worktree verification; skipped the Codex plugin installer."))
+                    return False
+                temporary_revision = git_revision(temporary_source)
+                if temporary_revision is None:
+                    warning(t("无法读取最新 MemSearch commit, 已跳过 Codex 插件安装器.", "Could not read the latest MemSearch commit; skipped the Codex plugin installer."))
                     return False
                 temporary_installer = (
                     temporary_source
@@ -1190,12 +1238,21 @@ def install_memsearch_for(agent: str) -> bool:
                             "The Codex plugin installer produced an unsupported file layout; restored the previous cache without modifying the real Agent environment.",
                         ))
                         return False
-                    committed = commit_staged_memsearch_home(
+                    commit_staged_memsearch_home(
                         staged_home,
                         environment_root_path / "backup",
                         targets,
                         transaction,
                     )
+                    staged_commit = environment_root_path / "memsearch-codex-commit"
+                    staged_commit.write_text(temporary_revision + "\n", encoding="ascii")
+                    replace_path_transactionally(
+                        staged_commit,
+                        codex_memsearch_commit_path(),
+                        environment_root_path / "backup-commit",
+                        transaction,
+                    )
+                    committed = True
                 except BaseException:
                     if not committed:
                         rollback_path_replacements(transaction)
@@ -1210,6 +1267,11 @@ def install_memsearch_for(agent: str) -> bool:
                 )
                 if committed:
                     cleanup_committed_temporary_roots(*temporary_roots)
+                elif transaction:
+                    warning(t(
+                        "MemSearch 回滚未完成, 已保留临时目录和恢复记录.",
+                        "MemSearch rollback did not complete; preserved temporary directories and recovery records.",
+                    ))
                 else:
                     for root in temporary_roots:
                         remove_path(root)

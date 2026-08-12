@@ -49,7 +49,7 @@ memsearch 是可选依赖. welcome/`doctor` 可检查 CLI 与当前执行 Agent 
 - 检查 MemSearch CLI 是否能按稳定版 `X.Y.Z` 格式正常报告版本及当前执行 Agent 的有效插件, 缺失或异常时询问安装.
 - 检查所选 Agent 是否已经接入 Onevoke 规则, 但不覆盖用户的 Agent 全局配置.
 
-Codex 的 MemSearch 自动安装不固定版本: CLI 使用 `uv tool install -U "memsearch[onnx]"` 获取 PyPI 最新版, 插件每次安装都从官方仓库默认分支重新浅克隆最新版. 只对来源匹配且工作树 clean 的插件源码执行安装命令; CLI 与 Codex 插件 install.sh 都执行成功才把配置标为启用, 不做安装后 hooks 完整就绪二次校验. 插件安装器先在隔离的临时 HOME 中运行, 成功后才事务性替换真实 hooks、config 和 MemSearch skills; 非零退出、启动异常或发布失败均不改真实 Agent 环境. `doctor` 仍可检查 CLI 与 hooks 的实际状态. 既有缓存被修改、来源不符或出现未跟踪文件时会跳过插件安装器; clean 旧缓存会保留到最新版安装和环境发布成功, 安装器缺失或失败时恢复. 这些失败均不把配置标为启用.
+Codex 的 MemSearch 自动安装不固定版本: CLI 使用 `uv tool install -U "memsearch[onnx]"` 获取 PyPI 最新版, 插件每次安装都从官方仓库默认分支重新浅克隆最新版. 只对来源匹配且工作树 clean 的插件源码执行安装命令; CLI 与 Codex 插件 install.sh 都执行成功才把配置标为启用, 不做安装后 hooks 完整就绪二次校验. 插件安装器先在隔离的临时 HOME 中运行, 成功后才把真实 hooks、config、MemSearch skills 和配置目录中的 checkout commit 锚点放进同一事务发布; 非零退出、启动异常或发布失败均恢复真实 Agent 环境. `doctor` 只把 HEAD 与该可信锚点一致的 clean cache 判为已接入; 无锚点的旧 cache 可由下一次安装重新克隆并建立锚点. 既有缓存被修改、来源不符或出现未跟踪文件时会跳过插件安装器; clean 旧缓存会保留到最新版安装和环境发布成功, 安装器缺失或失败时恢复. 这些失败均不把配置标为启用.
 
 Claude 的 MemSearch 接入不固定插件版本. 手动安装步骤先刷新 `memsearch-plugins` Marketplace, 再安装其当前稳定最新版. `doctor` 校验 Marketplace 来自 `zilliztech/memsearch` 且 checkout clean, 并把标准 cache 路径、安装记录的版本和 commit、插件 manifest 及完整文件树动态绑定; 同时检查启用记录、hook 注册和目录内无符号链接. 该校验不固定版本、commit 或文件摘要, 可接受上游最新版新增或修改组件.
 
