@@ -247,9 +247,11 @@ class OnevokeCommandTest(unittest.TestCase):
             "git",
             "#!/bin/sh\n"
             "if [ \"$1\" = '-C' ] && [ \"$3\" = 'remote' ]; then\n"
-            "  printf '%s\\n' 'https://github.com/zilliztech/memsearch.git'\n"
+            f"  exec '{git}' \"$@\"\n"
+            "elif [ \"$1\" = '-C' ] && [ \"$3\" = 'status' ]; then\n"
+            f"  exec '{git}' \"$@\"\n"
             "elif [ \"$1\" = '-C' ] && [ \"$3\" = 'rev-parse' ]; then\n"
-            f"  printf '%s\\n' '{revision}'\n"
+            f"  exec '{git}' \"$@\"\n"
             "elif [ \"$1\" = '-C' ] && "
             "{ [ \"$3\" = 'ls-tree' ] || [ \"$3\" = 'cat-file' ]; }; then\n"
             f"  exec '{git}' \"$@\"\n"
@@ -867,11 +869,10 @@ class OnevokeCommandTest(unittest.TestCase):
         )
         onevoke = load_onevoke_module()
 
-        self.assertFalse(
-            onevoke.plugin_matches_git_tree(marketplace, original, plugin)
-        )
-        cache_helper.write_text("#!/bin/sh\n", encoding="utf-8")
-        self.assertTrue(onevoke.plugin_matches_git_tree(marketplace, original, plugin))
+        with mock.patch.object(Path, "home", return_value=self.home):
+            self.assertFalse(onevoke.claude_memsearch_ready())
+            cache_helper.write_text("#!/bin/sh\n", encoding="utf-8")
+            self.assertTrue(onevoke.claude_memsearch_ready())
 
     def test_memsearch_environment_commit_rolls_back_on_failure_or_interrupt(
         self,

@@ -821,11 +821,14 @@ def verify_memsearch_source(source: Path, *, quiet: bool = False) -> bool:
         return reject(t("MemSearch 源码目录无效.", "The MemSearch source directory is invalid."))
     if not shutil.which("git"):
         return reject(t("未找到 git, 无法校验 MemSearch 源码.", "git was not found; cannot verify the MemSearch source."))
+    git_environment = os.environ.copy()
+    git_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     remote = subprocess.run(
         ["git", "-C", str(source), "remote", "get-url", "origin"],
         text=True,
         capture_output=True,
         check=False,
+        env=git_environment,
     )
     remote_url = remote.stdout.strip()
     if remote.returncode != 0 or remote_url != MEMSEARCH_REPOSITORY:
@@ -848,6 +851,7 @@ def verify_memsearch_source(source: Path, *, quiet: bool = False) -> bool:
         text=True,
         capture_output=True,
         check=False,
+        env=git_environment,
     )
     if status.returncode != 0 or status.stdout:
         return reject(t("MemSearch 源码工作树不干净, 拒绝执行插件安装器.", "The MemSearch source worktree is dirty; refusing to run the plugin installer."))
