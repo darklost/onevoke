@@ -33,7 +33,7 @@ kanban init
 讨论完成后, 让 Agent 创建并启动任务卡:
 
 ```text
-需求已确认. 请用 kanban new 创建任务卡并启动.
+需求已确认. 请用 kanban new & start 创建任务卡并启动.
 ```
 
 Agent 会填完整任务卡, 再执行:
