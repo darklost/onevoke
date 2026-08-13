@@ -2,7 +2,7 @@
 
 - 规则集入口, 装在 `~/.agents/ONEVOKE-AGENTS.md`. 只放分册索引, 优先级和少量默认取值; 通用条款在 `~/.agents/BASE-RULES.md`.
 - 安装器每次用当前模板覆盖本文件和全部分册. 本机的执行 Agent、launcher 和各审核角色选择保存在 `~/.config/onevoke/config.json`, 用 `onevoke config` 查看, 用 `onevoke welcome --reset` 修改.
-- 本文件不是用户自己的 `~/.agents/AGENTS.md`, 两者不互相覆盖.
+- `~/.agents/AGENTS.md` 不存在时, 安装器将其符号链接到本文件; 已有同名入口时保持不变.
 
 ## 分册
 

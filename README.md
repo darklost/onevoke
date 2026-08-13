@@ -12,6 +12,8 @@
 
 安装过程会引导选择默认 Agent, Reviewer 和启动方式.
 
+如果 `~/.agents/AGENTS.md` 不存在, 安装器会将其链接到 `ONEVOKE-AGENTS.md`; 已有文件不会修改.
+
 如果 welcome 提示 Agent 尚未接入规则:
 
 - Claude: 在 `~/.claude/CLAUDE.md` 加 `@~/.agents/ONEVOKE-AGENTS.md`.

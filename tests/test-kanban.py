@@ -1048,6 +1048,10 @@ N/A
                 (install_home / ".agents" / source.name).read_bytes(),
                 source.name,
             )
+        own_rules = install_home / ".agents" / "AGENTS.md"
+        self.assertTrue(own_rules.is_symlink())
+        self.assertEqual(Path("ONEVOKE-AGENTS.md"), own_rules.readlink())
+        self.assertEqual(AGENT_RULES.read_bytes(), own_rules.read_bytes())
 
         output = subprocess.run(
             [str(command), "rules"],
@@ -1084,7 +1088,7 @@ N/A
         self.assertTrue((install_home / ".agents" / "REAL.md").is_file())
         self.assertFalse((install_home / ".agents" / "ignored.md").exists())
 
-    def test_installer_never_touches_the_users_own_agent_rules(self) -> None:
+    def test_installer_preserves_existing_agent_rules(self) -> None:
         install_home = self.root / "user-home"
         env = os.environ.copy()
         env["HOME"] = str(install_home)
@@ -1109,6 +1113,27 @@ N/A
             AGENT_RULES.read_bytes(),
             (install_home / ".agents" / "ONEVOKE-AGENTS.md").read_bytes(),
         )
+
+    def test_installer_preserves_dangling_agent_rules_symlink(self) -> None:
+        install_home = self.root / "dangling-rules-home"
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+        own_rules = install_home / ".agents" / "AGENTS.md"
+        own_rules.parent.mkdir(parents=True)
+        own_rules.symlink_to("missing-user-rules.md")
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(own_rules.is_symlink())
+        self.assertEqual(Path("missing-user-rules.md"), own_rules.readlink())
 
     def test_installer_reports_welcome_failure_without_undoing_install(self) -> None:
         install_home = self.root / "welcome-failure-home"

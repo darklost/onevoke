@@ -98,8 +98,7 @@ done
 
 mkdir -p "$bin_dir" "$agents_dir"
 
-# bin/ 和 rules/ 都由本仓库拥有, 每次安装直接覆盖. 用户自己的
-# ~/.agents/AGENTS.md 不在 rules/ 中, 不是安装目标.
+# bin/ 和 rules/ 都由本仓库拥有, 每次安装直接覆盖.
 for command in "$project_dir"/bin/*; do
   [ -f "$command" ] || continue
   install -m 0755 "$command" "$bin_dir/$(basename "$command")"
@@ -109,6 +108,12 @@ for rule in "$project_dir"/rules/*.md; do
   [ -f "$rule" ] || continue
   install -m 0644 "$rule" "$agents_dir/$(basename "$rule")"
 done
+
+agent_rules="$agents_dir/AGENTS.md"
+entry_rules="$agents_dir/ONEVOKE-AGENTS.md"
+if [ -f "$entry_rules" ] && [ ! -e "$agent_rules" ] && [ ! -L "$agent_rules" ]; then
+  ln -s "$(basename "$entry_rules")" "$agent_rules"
+fi
 
 printf '%s\n' 'Onevoke installed'
 

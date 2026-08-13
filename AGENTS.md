@@ -10,8 +10,8 @@
 
 ## Project Structure & Module Organization
 
-- `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 只放分册索引, 优先级和默认行为. 其余分册由它的分册表按需引用: `BASE-RULES.md` 跨项目通用条款, `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约, `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件; 用户自己的 `~/.agents/AGENTS.md` 不是安装目标, 任何脚本都不得写它.
-- `install.sh` 遍历 `bin/*` 和 `rules/*.md`, 把全部普通文件直接覆盖到 `~/.local/bin/` 与 `~/.agents/`, 包括 `ONEVOKE-AGENTS.md`. 唯一稳定 stdout 是 `Onevoke installed`; 最后必须用绝对路径运行 `onevoke welcome`. 同名目标是目录时须在写任何文件前拒绝, 防止 `install` 把源文件塞进错误目录.
+- `rules/ONEVOKE-AGENTS.md` 是发布规则的入口, 只放分册索引, 优先级和默认行为. 其余分册由它的分册表按需引用: `BASE-RULES.md` 跨项目通用条款, `KANBAN-RULES.md` 看板行为契约, `GIT-RULES.md` Git 工作流, `REVIEW-RULES.md` 审核契约, `CODE-RULES.md` 架构与代码质量契约. 它们是面向用户和 Agent 的对外接口, 改动前确认与 `bin/` 下实现一致. 全部装到 `~/.agents/` 下的同名文件.
+- `install.sh` 遍历 `bin/*` 和 `rules/*.md`, 把全部普通文件直接覆盖到 `~/.local/bin/` 与 `~/.agents/`, 包括 `ONEVOKE-AGENTS.md`. `~/.agents/AGENTS.md` 不存在时创建指向 `ONEVOKE-AGENTS.md` 的相对符号链接, 已有任何同名入口时保持不变. 唯一稳定 stdout 是 `Onevoke installed`; 最后必须用绝对路径运行 `onevoke welcome`. 同名目标是目录时须在写任何文件前拒绝, 防止 `install` 把源文件塞进错误目录.
 - `bin/onevoke_config.py` 是 `onevoke` 与 `kanban` 共用的配置边界, 配置默认在 `~/.config/onevoke/config.json`, 测试用 `ONEVOKE_CONFIG` 隔离. 配置写入必须校验 schema, 用同目录临时文件加 `os.replace()` 原子替换, 权限为 `0600`.
 - `bin/onevoke` 提供 `welcome`, `doctor`, `config`, `review`. welcome 只在 tty 中提问, 无 tty 时诊断后正常提示重跑; 依赖安装必须经用户明确选择. MemSearch Codex 插件只克隆官方仓库并运行上游安装脚本, 不检查仓库和安装状态. `review` 按角色配置分发到 Codex 或 Grok wrapper, 当前任务或项目明确覆盖时可直接调用对应 wrapper.
 - `bin/kanban` 的 `start` 未传 `--agent` 时读取生效的 `kanban_agent`; `--agent` 始终优先. `--launcher` 可覆盖本次启动且不改机器配置; launcher 为 `tmux` 时沿用独立 window, 为 `foreground` 时必须有交互 tty 并在当前终端等待 Agent 退出.
@@ -40,7 +40,7 @@ sh -n install.sh && bash -n bin/codex-review.sh bin/grok-review.sh
 
 测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; 两个审核测试分别用假 Codex/Grok 二进制驱动, 不调用真的 CLI, 也不产生网络请求.
 
-安装脚本复制 `bin/` 和 `rules/` 下全部普通文件, 不接受参数, 不读写用户的 `~/.agents/AGENTS.md`, 最后运行 welcome. 手工试验必须同时设置临时 `HOME`, `ONEVOKE_CONFIG` 和 `KANBAN_DIR`, 不得修改真实配置或看板.
+安装脚本复制 `bin/` 和 `rules/` 下全部普通文件, 不接受参数, 仅在 `~/.agents/AGENTS.md` 不存在时创建入口软链接, 最后运行 welcome. 手工试验必须同时设置临时 `HOME`, `ONEVOKE_CONFIG` 和 `KANBAN_DIR`, 不得修改真实配置或看板.
 
 ## Coding Style & Naming Conventions
 
