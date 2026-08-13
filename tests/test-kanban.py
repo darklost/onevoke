@@ -1114,6 +1114,28 @@ N/A
             (install_home / ".agents" / "ONEVOKE-AGENTS.md").read_bytes(),
         )
 
+    def test_installer_preserves_agent_rules_directory(self) -> None:
+        install_home = self.root / "rules-directory-home"
+        env = os.environ.copy()
+        env["HOME"] = str(install_home)
+        own_rules = install_home / ".agents" / "AGENTS.md"
+        own_rules.mkdir(parents=True)
+        marker = own_rules / "keep"
+        marker.write_text("preserved\n", encoding="utf-8")
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(own_rules.is_dir())
+        self.assertEqual("preserved\n", marker.read_text(encoding="utf-8"))
+
     def test_installer_preserves_dangling_agent_rules_symlink(self) -> None:
         install_home = self.root / "dangling-rules-home"
         env = os.environ.copy()
