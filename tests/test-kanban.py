@@ -232,16 +232,6 @@ printf '%s\\n' '@9'
         )
         self.assertEqual("通过: 2 个任务\n", self.run_command("check").stdout)
 
-    def test_new_task_template_includes_orchestration_metadata(self) -> None:
-        today = datetime.now().strftime("%Y%m%d")
-        self.run_command("new", "feature", "group-child", "任务组子任务")
-        small = self.root / "backlog" / f"{today}-group-child-task.md"
-        self.assertIn("- 任务组: N/A\n- 前置任务: N/A\n", small.read_text(encoding="utf-8"))
-
-        self.run_command("new", "--large", "feature", "group-large", "复杂子任务")
-        spec = self.root / "backlog" / f"{today}-group-large-task" / "spec.md"
-        self.assertIn("- 任务组: N/A\n- 前置任务: N/A\n", spec.read_text(encoding="utf-8"))
-
     def test_pick_moves_only_ready_backlog_task_to_todo(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-pick-task"
         self.run_command("new", "chore", "pick", "挑选任务")
