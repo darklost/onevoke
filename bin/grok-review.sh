@@ -321,7 +321,7 @@ GROK_COMMAND=(
 )
 [[ -z "$MODEL" ]] || GROK_COMMAND+=(--model "$MODEL")
 GROK_COMMAND+=(
-  --reasoning-effort "$REASONING_EFFORT"
+  --effort "$REASONING_EFFORT"
   --output-format json
   --permission-mode dontAsk
   --allow Read

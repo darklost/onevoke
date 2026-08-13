@@ -503,21 +503,10 @@ printf '%s\\n' '@9'
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn(str(fake_bin / "grok"), command)
         self.assertNotIn("--model", command)
-        self.assertNotIn("effort", command)
+        self.assertIn("--effort high", command)
+        self.assertNotIn("--effort xhigh", command)
         self.assertIn("--permission-mode bypassPermissions", command)
         self.assertIn(task_id, command)
-
-        # 大任务同样不传推理强度: Grok CLI 不接受这个参数.
-        large_id = f"{datetime.now().strftime('%Y%m%d')}-large-grok-task"
-        self.run_command("new", "--large", "chore", "large-grok", "大型任务 grok")
-        self.make_ready(self.root / "backlog" / large_id / "spec.md")
-        self.run_command("pick", large_id)
-
-        self.run_command("start", "--agent", "grok", large_id)
-
-        large_command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
-        self.assertNotIn("effort", large_command)
-        self.assertIn("--permission-mode bypassPermissions", large_command)
 
     def test_start_uses_the_configured_default_agent(self) -> None:
         task_id, _ = self.make_todo("configured-agent")
@@ -653,6 +642,7 @@ printf '%s\\n' '@9'
         for agent, expected in (
             ("codex", '--model gpt-5.6-sol --config \'model_reasoning_effort="high"\''),
             ("claude", "--model opus --effort high"),
+            ("grok", "--effort xhigh --permission-mode bypassPermissions"),
         ):
             slug = f"large-{agent}"
             task_id = f"{datetime.now().strftime('%Y%m%d')}-{slug}-task"

@@ -251,7 +251,10 @@ class GrokReviewGateTest(unittest.TestCase):
         self.assertIn("--no-subagents", argv)
         self.assertIn("--no-plan", argv)
         self.assertIn("--prompt-file", argv)
+        self.assertIn("--effort", argv)
+        self.assertEqual("high", argv[argv.index("--effort") + 1])
         self.assertNotIn("--model", argv)
+        self.assertNotIn("--reasoning-effort", argv)
 
     def test_model_override_is_forwarded(self) -> None:
         result = self.default_review(GROK_REVIEW_MODEL="grok-4.5")

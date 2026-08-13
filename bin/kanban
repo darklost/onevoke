@@ -852,8 +852,15 @@ def window_name(entry: Entry, text: str) -> str:
     return f"kb-{label}"[:50]
 
 
+def task_effort(agent: str, kind: str) -> str:
+    """按 Agent 和任务规模选推理强度. Grok 的档位比 Codex/Claude 高一档."""
+    if agent == "grok":
+        return "xhigh" if kind == "large" else "high"
+    return "high" if kind == "large" else "medium"
+
+
 def agent_command(agent: str, binary: str, effort: str) -> list[str]:
-    """拼 Agent 的 YOLO 启动参数. Grok 不锁模型也不吃推理强度, 跟随其 CLI 默认."""
+    """拼 Agent 的 YOLO 启动参数. Grok 不锁模型, 只按任务规模传 --effort."""
     if agent == "codex":
         return [
             binary,
@@ -866,7 +873,7 @@ def agent_command(agent: str, binary: str, effort: str) -> list[str]:
     if agent == "claude":
         return [binary, "--model", "opus", "--effort", effort, "--dangerously-skip-permissions"]
     if agent == "grok":
-        return [binary, "--permission-mode", "bypassPermissions"]
+        return [binary, "--effort", effort, "--permission-mode", "bypassPermissions"]
     raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
 
 
@@ -900,7 +907,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
     )
     name = window_name(entry, original)
-    effort = "high" if entry.kind == "large" else "medium"
+    effort = task_effort(agent_name, entry.kind)
     agent_argv = [*agent_command(agent_name, agent, effort), prompt]
     try:
         write_text_atomic(moved.document, updated, entry=moved)
