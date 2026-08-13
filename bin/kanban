@@ -549,6 +549,8 @@ def render_contract(title: str, task_type: str) -> str:
 
 - 类型: {TYPE_NAMES[task_type]}
 - 创建时间: {created}
+- 任务组: N/A
+- 前置任务: N/A
 - 负责人:
 - 开始时间:
 - 完成时间:
