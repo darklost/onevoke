@@ -96,6 +96,31 @@ for rule in "$project_dir"/rules/*.md; do
   fi
 done
 
+share_src="$project_dir/share/kanban-web"
+share_dir="$HOME/.local/share/onevoke/kanban-web"
+if [ -d "$share_src" ]; then
+  if [ -e "$share_dir" ] && [ ! -d "$share_dir" ]; then
+    if [ "$onevoke_zh" -eq 1 ]; then
+      printf '%s\n' "错误: 安装目标不是目录: $share_dir" >&2
+    else
+      printf '%s\n' "error: installation target is not a directory: $share_dir" >&2
+    fi
+    exit 1
+  fi
+  for asset in "$share_src"/*; do
+    [ -f "$asset" ] || continue
+    target="$share_dir/$(basename "$asset")"
+    if [ -d "$target" ]; then
+      if [ "$onevoke_zh" -eq 1 ]; then
+        printf '%s\n' "错误: 安装目标是目录: $target" >&2
+      else
+        printf '%s\n' "error: installation target is a directory: $target" >&2
+      fi
+      exit 1
+    fi
+  done
+fi
+
 mkdir -p "$bin_dir" "$agents_dir"
 
 # bin/ 和 rules/ 都由本仓库拥有, 每次安装直接覆盖.
@@ -108,6 +133,14 @@ for rule in "$project_dir"/rules/*.md; do
   [ -f "$rule" ] || continue
   install -m 0644 "$rule" "$agents_dir/$(basename "$rule")"
 done
+
+if [ -d "$share_src" ]; then
+  mkdir -p "$share_dir"
+  for asset in "$share_src"/*; do
+    [ -f "$asset" ] || continue
+    install -m 0644 "$asset" "$share_dir/$(basename "$asset")"
+  done
+fi
 
 agent_rules="$agents_dir/AGENTS.md"
 entry_rules="$agents_dir/ONEVOKE-AGENTS.md"

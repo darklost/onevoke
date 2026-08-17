@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="$lang">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>$title</title>
+  <link rel="stylesheet" href="/static/board.css">
+</head>
+<body>
+  <div class="page">
+    <header class="page-header" data-slot="page-header">
+      <h1 id="page-title">$title</h1>
+      <p class="page-description">$description</p>
+    </header>
+
+    <section
+      class="page-toolbar"
+      role="toolbar"
+      aria-labelledby="page-title"
+      data-slot="page-toolbar"
+    >
+      <div class="toolbar-group" data-align="start">
+        <input
+          id="keyword"
+          type="search"
+          class="input"
+          placeholder="$keyword_placeholder"
+          autocomplete="off"
+        >
+      </div>
+      <div class="toolbar-group" data-align="end">
+        <button type="button" id="toggle-archived" class="button outline" aria-pressed="false">
+          $show_archived
+        </button>
+        <span id="refresh-status" class="refresh-status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <div id="board-error" class="empty-state" hidden>
+      <h2>$load_failed_title</h2>
+      <p id="board-error-detail">$load_failed_description</p>
+      <button type="button" id="retry" class="button">$retry</button>
+    </div>
+
+    <div id="board" class="board" aria-busy="true"></div>
+  </div>
+
+  <dialog id="task-dialog" class="task-dialog">
+    <form method="dialog" class="task-dialog-form">
+      <header class="task-dialog-header">
+        <div>
+          <h2 id="task-dialog-title"></h2>
+          <p id="task-dialog-meta" class="task-dialog-meta"></p>
+        </div>
+        <button type="submit" class="button outline" value="close" aria-label="$close">$close</button>
+      </header>
+      <div id="task-dialog-body" class="task-dialog-body markdown-body"></div>
+    </form>
+  </dialog>
+
+  <script>
+    window.KANBAN_WEB = {
+      refreshMs: $refresh_ms,
+      showArchivedLabel: $show_archived_json,
+      showActiveLabel: $show_active_json,
+      emptyLabel: $empty_json,
+      cardCountLabel: $card_count_json,
+      unassignedLabel: $unassigned_json,
+      statusLabels: $status_labels_json,
+      sizeLabels: $size_labels_json,
+      updatedLabel: $updated_json,
+      errorLabel: $error_json
+    };
+  </script>
+  <script src="/static/markdown.js"></script>
+  <script src="/static/board.js"></script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -26,6 +27,7 @@ from onevoke_config import (
     language_text,
     load_config,
 )
+import kanban_web
 
 apply_language_argument(sys.argv[1:])
 t = language_text
@@ -981,6 +983,155 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     ))
 
 
+WEB_STATUS_LABELS = {
+    "cn": {
+        "backlog": "待办池",
+        "todo": "待处理",
+        "working": "进行中",
+        "done": "已完成",
+        "archived": "已存档",
+        "trash": "回收站",
+    },
+    "en": {
+        "backlog": "Backlog",
+        "todo": "Todo",
+        "working": "Working",
+        "done": "Done",
+        "archived": "Archived",
+        "trash": "Trash",
+    },
+}
+WEB_SIZE_LABELS = {
+    "cn": {"small": "小任务", "large": "大任务"},
+    "en": {"small": "small", "large": "large"},
+}
+
+
+def task_display_time(entry: Entry, text: str) -> str:
+    if entry.state == "working":
+        return metadata_from(text, "开始时间") or "-"
+    if entry.state == "done":
+        timestamp = metadata_from(text, "完成时间")
+        if timestamp:
+            return timestamp
+        return datetime.fromtimestamp(entry.document.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    return metadata_from(text, "创建时间") or "-"
+
+
+def web_task_summary(entry: Entry, text: Optional[str] = None) -> dict:
+    document = text if text is not None else read_document(entry)
+    return {
+        "task_id": entry.task_id,
+        "title": title_from(document),
+        "state": entry.state,
+        "kind": entry.kind,
+        "type": metadata_from(document, "类型") or "-",
+        "assignee": metadata_from(document, "负责人"),
+        "created_at": metadata_from(document, "创建时间"),
+        "started_at": metadata_from(document, "开始时间"),
+        "completed_at": metadata_from(document, "完成时间"),
+        "time": task_display_time(entry, document),
+        "result": result_from(document),
+    }
+
+
+def web_board_payload(root: Path) -> dict:
+    board = load_board(root)
+    tasks = []
+    for entry in board.entries.values():
+        try:
+            tasks.append(web_task_summary(entry))
+        except (OSError, UnicodeError, KanbanError):
+            continue
+    tasks.sort(key=lambda row: (row["time"], row["task_id"]), reverse=True)
+    tasks.sort(key=lambda row: STATES.index(row["state"]) if row["state"] in STATES else len(STATES))
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "root": str(root),
+        "tasks": tasks,
+    }
+
+
+def web_task_payload(root: Path, task_id: str) -> dict:
+    entry = locate(load_board(root), task_id)
+    text = read_document(entry)
+    payload = web_task_summary(entry, text)
+    payload["document"] = text
+    return payload
+
+
+def web_page_context(refresh_seconds: int) -> dict:
+    lang = "cn" if t("任务看板", "Task Board") == "任务看板" else "en"
+    return {
+        "lang": lang,
+        "title": t("任务看板", "Task Board"),
+        "description": t(
+            "只读查看本机文件看板; 任务状态会定时刷新.",
+            "Read-only view of the local file kanban; task status refreshes on a timer.",
+        ),
+        "keyword_placeholder": t("搜索标题或任务 ID", "Search title or task ID"),
+        "show_archived": t("显示已存档", "Show archived"),
+        "show_active": t("显示活跃", "Show active"),
+        "load_failed_title": t("加载任务失败", "Failed to load tasks"),
+        "load_failed_description": t("看板数据加载失败.", "Board data failed to load."),
+        "retry": t("重试", "Retry"),
+        "close": t("关闭", "Close"),
+        "refresh_ms": str(max(1, refresh_seconds) * 1000),
+        "show_archived_json": json.dumps(t("显示已存档", "Show archived"), ensure_ascii=False),
+        "show_active_json": json.dumps(t("显示活跃", "Show active"), ensure_ascii=False),
+        "empty_json": json.dumps(t("暂无任务", "No tasks"), ensure_ascii=False),
+        "card_count_json": json.dumps(t("{count} 个任务", "{count} tasks"), ensure_ascii=False),
+        "unassigned_json": json.dumps(t("未指派", "Unassigned"), ensure_ascii=False),
+        "status_labels_json": json.dumps(WEB_STATUS_LABELS[lang], ensure_ascii=False),
+        "size_labels_json": json.dumps(WEB_SIZE_LABELS[lang], ensure_ascii=False),
+        "updated_json": json.dumps(t("更新于", "Updated"), ensure_ascii=False),
+        "error_json": json.dumps(t("加载失败", "Load failed"), ensure_ascii=False),
+    }
+
+
+def command_web(args: argparse.Namespace, root: Path) -> None:
+    refresh = args.refresh
+    if refresh < 1:
+        raise KanbanError(t("刷新间隔必须 >= 1 秒", "refresh interval must be >= 1 second"))
+    share = Path(args.assets).expanduser() if args.assets else None
+    try:
+        share_dir = kanban_web.resolve_share_dir(share)
+    except kanban_web.KanbanWebError as error:
+        raise KanbanError(str(error)) from error
+
+    def get_board() -> dict:
+        try:
+            return web_board_payload(root)
+        except (KanbanError, OSError, UnicodeError) as error:
+            raise kanban_web.KanbanWebError(str(error)) from error
+
+    def get_task(task_id: str) -> dict:
+        try:
+            return web_task_payload(root, task_id)
+        except (KanbanError, OSError, UnicodeError) as error:
+            raise kanban_web.KanbanWebError(str(error)) from error
+
+    print(
+        t(
+            f"看板目录: {root}",
+            f"board directory: {root}",
+        ),
+        flush=True,
+    )
+    try:
+        kanban_web.serve(
+            host=args.host,
+            port=args.port,
+            share_dir=share_dir,
+            page_context=web_page_context(refresh),
+            get_board=get_board,
+            get_task=get_task,
+            open_browser=args.open,
+        )
+    except kanban_web.KanbanWebError as error:
+        raise KanbanError(str(error)) from error
+
+
 def command_check(root: Path) -> int:
     board = scan(root)
     for problem in board.problems:
@@ -1040,6 +1191,39 @@ def parser() -> argparse.ArgumentParser:
     )
 
     commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
+
+    web_parser = commands.add_parser(
+        "web",
+        help=t("启动只读看板 Web UI", "start the read-only kanban web UI"),
+    )
+    web_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=t("监听地址, 默认 127.0.0.1", "bind address; default 127.0.0.1"),
+    )
+    web_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help=t("监听端口, 默认 8080", "bind port; default 8080"),
+    )
+    web_parser.add_argument(
+        "--refresh",
+        type=int,
+        default=5,
+        metavar=t("秒", "seconds"),
+        help=t("前端刷新间隔秒数, 默认 5", "frontend refresh interval in seconds; default 5"),
+    )
+    web_parser.add_argument(
+        "--assets",
+        metavar=t("目录", "directory"),
+        help=t("覆盖 Web 资源目录", "override the web assets directory"),
+    )
+    web_parser.add_argument(
+        "--open",
+        action="store_true",
+        help=t("启动后尝试打开浏览器", "try to open a browser after start"),
+    )
     return result
 
 
@@ -1067,6 +1251,8 @@ def main() -> int:
             command_start(args, root)
         elif args.command == "check":
             return command_check(root)
+        elif args.command == "web":
+            command_web(args, root)
         return 0
     except (KanbanError, ConfigError, OSError, UnicodeError) as error:
         print(f"kanban: {error}", file=sys.stderr)

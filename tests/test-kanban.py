@@ -1022,8 +1022,6 @@ N/A
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("Onevoke installed\n", result.stdout)
-        self.assertIn("onevoke 不在 PATH", result.stderr)
-        self.assertIn("请在终端运行 onevoke welcome", result.stderr)
 
         command = install_home / ".local" / "bin" / "kanban"
         for source in sorted((PROJECT_ROOT / "bin").iterdir()):
@@ -1038,10 +1036,20 @@ N/A
                 (install_home / ".agents" / source.name).read_bytes(),
                 source.name,
             )
+        share_dir = install_home / ".local" / "share" / "onevoke" / "kanban-web"
+        for source in sorted((PROJECT_ROOT / "share" / "kanban-web").iterdir()):
+            if source.is_file():
+                self.assertEqual(
+                    source.read_bytes(),
+                    (share_dir / source.name).read_bytes(),
+                    source.name,
+                )
         own_rules = install_home / ".agents" / "AGENTS.md"
         self.assertTrue(own_rules.is_symlink())
         self.assertEqual(Path("ONEVOKE-AGENTS.md"), own_rules.readlink())
         self.assertEqual(AGENT_RULES.read_bytes(), own_rules.read_bytes())
+
+        self.assertIn("请在终端运行 onevoke welcome", result.stderr)
 
         output = subprocess.run(
             [str(command), "rules"],
@@ -1329,6 +1337,113 @@ N/A
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("--lang\ncn\nwelcome\n", welcome_args.read_text(encoding="utf-8"))
+
+    def test_web_help_and_invalid_refresh(self) -> None:
+        help_text = self.run_command("web", "--help").stdout
+        self.assertIn("--host", help_text)
+        self.assertIn("--port", help_text)
+        self.assertIn("--refresh", help_text)
+        bad = self.run_command("web", "--refresh", "0", succeeds=False)
+        self.assertIn("刷新间隔", bad.stderr)
+
+    def test_web_serves_board_and_refreshes_task_state(self) -> None:
+        import json
+        import signal
+        import socket
+        import time
+        import urllib.request
+
+        task_id, _path = self.make_todo("web-board")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "web",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--refresh",
+                "1",
+                "--assets",
+                str(PROJECT_ROOT / "share" / "kanban-web"),
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.time() + 5
+            started = False
+            while time.time() < deadline:
+                if process.poll() is not None:
+                    err = process.stderr.read() if process.stderr else ""
+                    self.fail(err or "web exited early")
+                line = process.stdout.readline() if process.stdout else ""
+                if not line:
+                    time.sleep(0.05)
+                    continue
+                if f"http://127.0.0.1:{port}/" in line:
+                    started = True
+                    break
+            self.assertTrue(started, "web server did not print listen URL")
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+                html = response.read().decode("utf-8")
+            self.assertIn("任务看板", html)
+            self.assertIn("refreshMs: 1000", html)
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/static/board.js", timeout=2
+            ) as response:
+                script = response.read().decode("utf-8")
+            self.assertIn("/api/board", script)
+            self.assertIn("setInterval", script)
+            self.assertIn("KanbanMarkdown.renderMarkdown", script)
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/static/markdown.js", timeout=2
+            ) as response:
+                markdown_js = response.read().decode("utf-8")
+            self.assertIn("function renderMarkdown", markdown_js)
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn("/static/markdown.js", page)
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/board", timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(1, len(payload["tasks"]))
+            self.assertEqual(task_id, payload["tasks"][0]["task_id"])
+            self.assertEqual("todo", payload["tasks"][0]["state"])
+
+            self.run_command("move", task_id, "working")
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/board", timeout=2) as response:
+                refreshed = json.loads(response.read().decode("utf-8"))
+            self.assertEqual("working", refreshed["tasks"][0]["state"])
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/tasks/{task_id}", timeout=2
+            ) as response:
+                detail = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(task_id, detail["task_id"])
+            self.assertIn("# ", detail["document"])
+        finally:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=3)
+
+    def test_web_rejects_invalid_port(self) -> None:
+        result = self.run_command("web", "--port", "70000", succeeds=False)
+        self.assertRegex(result.stderr.lower(), r"invalid port|无效|port")
 
 
 if __name__ == "__main__":
