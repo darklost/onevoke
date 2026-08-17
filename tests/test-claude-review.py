@@ -18,6 +18,12 @@ printf '%s\\n' "$@" > "$FAKE_CLAUDE_ARGV"
 cat > "$FAKE_CLAUDE_PROMPT"
 pwd -P > "$FAKE_CLAUDE_CWD"
 printf '%s\\n' "$CLAUDE_CONFIG_DIR" > "$FAKE_CLAUDE_HOME"
+if [ -n "${FAKE_CLAUDE_SPEC_SNAPSHOT_LOG:-}" ]; then
+    spec_path=$(sed -n 's/^Authoritative spec file: \\(.*\\)\\. Read it completely before reviewing\\.$/\\1/p' "$FAKE_CLAUDE_PROMPT")
+    if [ -n "$spec_path" ]; then
+        cat "$spec_path" > "$FAKE_CLAUDE_SPEC_SNAPSHOT_LOG"
+    fi
+fi
 
 if [ -n "${FAKE_CLAUDE_TAMPER:-}" ]; then
     printf '%s\\n' 'tampered' > "$FAKE_CLAUDE_TAMPER"
@@ -56,6 +62,7 @@ class ClaudeReviewGateTest(unittest.TestCase):
         self.prompt_log = self.root / "prompt.log"
         self.cwd_log = self.root / "cwd.log"
         self.home_log = self.root / "home.log"
+        self.spec_snapshot_log = self.root / "spec-snapshot.log"
 
         self.git("init", "-q", "-b", "main")
         self.base = self.commit("a.txt", "base\n", "基线")
@@ -74,6 +81,7 @@ class ClaudeReviewGateTest(unittest.TestCase):
             FAKE_CLAUDE_PROMPT=str(self.prompt_log),
             FAKE_CLAUDE_CWD=str(self.cwd_log),
             FAKE_CLAUDE_HOME=str(self.home_log),
+            FAKE_CLAUDE_SPEC_SNAPSHOT_LOG=str(self.spec_snapshot_log),
         )
 
     def tearDown(self) -> None:
@@ -279,14 +287,18 @@ class ClaudeReviewGateTest(unittest.TestCase):
         spec.write_text("# 任务契约\n", encoding="utf-8")
         result = self.review(str(self.repo), self.base, self.head, "PM", str(spec))
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn(f"Authoritative spec file: {spec}", self.prompt_log.read_text())
+        prompt = self.prompt_log.read_text(encoding="utf-8")
+        self.assertNotIn(str(spec), prompt)
+        self.assertIn("Authoritative spec file:", prompt)
+        self.assertEqual("# 任务契约\n", self.spec_snapshot_log.read_text(encoding="utf-8"))
         argv = self.argv_log.read_text(encoding="utf-8").splitlines()
         allowed_dirs = [
             argv[index + 1]
             for index, argument in enumerate(argv)
             if argument == "--add-dir"
         ]
-        self.assertIn(str(spec_dir.resolve()), allowed_dirs)
+        self.assertEqual([str(self.repo_real)], allowed_dirs)
+        self.assertNotIn(str(spec_dir.resolve()), allowed_dirs)
 
 
 if __name__ == "__main__":

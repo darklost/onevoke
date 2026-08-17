@@ -1097,6 +1097,41 @@ N/A
         for name in names:
             self.assertFalse((legacy_bin / name).exists(), name)
 
+    def test_installer_keeps_legacy_review_scripts_when_install_fails(self) -> None:
+        install_home = self.root / "legacy-install-failure-home"
+        legacy_bin = install_home / ".local" / "bin"
+        legacy_bin.mkdir(parents=True)
+        names = ("codex-review.sh", "claude-review.sh", "grok-review.sh")
+        for name in names:
+            (legacy_bin / name).write_text("legacy\n", encoding="utf-8")
+        fake_bin = self.root / "failing-install-bin"
+        fake_bin.mkdir()
+        fake_install = fake_bin / "install"
+        fake_install.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        fake_install.chmod(0o755)
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            input="y\n",
+            env={
+                **os.environ,
+                "HOME": str(install_home),
+                "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("已删除旧 Reviewer 脚本", result.stderr)
+        for name in names:
+            self.assertEqual(
+                "legacy\n",
+                (legacy_bin / name).read_text(encoding="utf-8"),
+                name,
+            )
+
     def test_installer_skips_non_file_rule_matches(self) -> None:
         project = self.root / "installer-project"
         (project / "bin").mkdir(parents=True)
@@ -1406,6 +1441,7 @@ N/A
         import signal
         import socket
         import time
+        import urllib.error
         import urllib.request
 
         task_id, _path = self.make_todo("web-board")
@@ -1488,6 +1524,20 @@ N/A
                 detail = json.loads(response.read().decode("utf-8"))
             self.assertEqual(task_id, detail["task_id"])
             self.assertIn("# ", detail["document"])
+
+            task_path = self.root / "working" / f"{task_id}.md"
+            task_path.write_bytes(b"\xff")
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/board", timeout=2
+                )
+            error_response = caught.exception
+            try:
+                self.assertEqual(400, error_response.code)
+                error_payload = json.loads(error_response.read().decode("utf-8"))
+                self.assertIn("UTF-8", error_payload["error"])
+            finally:
+                error_response.close()
         finally:
             process.send_signal(signal.SIGINT)
             try:

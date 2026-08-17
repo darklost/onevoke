@@ -51,7 +51,10 @@ kanban start 20260813-login-retry-task
 
 ```sh
 kanban list
+kanban web
 ```
+
+`kanban web` 默认在 `http://127.0.0.1:8080` 启动只读看板, 并定时刷新任务状态.
 
 只看某个状态:
 

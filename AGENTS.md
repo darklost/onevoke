@@ -35,7 +35,7 @@ python3 tests/test-merge-worktree-memory.py
 python3 tests/test-codex-review.py
 python3 tests/test-claude-review.py
 python3 tests/test-grok-review.py
-python3 -m py_compile bin/onevoke bin/onevoke_config.py bin/kanban bin/merge-worktree-memory.py tests/*.py
+python3 -m py_compile bin/onevoke bin/onevoke_config.py bin/kanban bin/kanban_web.py bin/merge-worktree-memory.py tests/*.py
 sh -n install.sh && bash -n bin/onevoke-review.sh
 ```
 

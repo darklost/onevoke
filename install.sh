@@ -157,6 +157,9 @@ if [ -n "$legacy_review_commands" ]; then
   if IFS= read -r legacy_answer; then
     :
   fi
+  if [ ! -t 0 ]; then
+    printf '\n' >&2
+  fi
   case "$legacy_answer" in
     y|Y|yes|YES|Yes|是)
       remove_legacy_reviews=1
@@ -174,16 +177,6 @@ fi
 mkdir -p "$bin_dir" "$agents_dir"
 
 # bin/ 和 rules/ 都由本仓库拥有, 每次安装直接覆盖.
-if [ "$remove_legacy_reviews" -eq 1 ]; then
-  for legacy_command in $legacy_review_commands; do
-    rm -f "$bin_dir/$legacy_command"
-  done
-  if [ "$onevoke_zh" -eq 1 ]; then
-    printf '%s\n' "已删除旧 Reviewer 脚本." >&2
-  else
-    printf '%s\n' "Legacy reviewer scripts were removed." >&2
-  fi
-fi
 for command in "$project_dir"/bin/*; do
   [ -f "$command" ] || continue
   install -m 0755 "$command" "$bin_dir/$(basename "$command")"
@@ -206,6 +199,25 @@ agent_rules="$agents_dir/AGENTS.md"
 entry_rules="$agents_dir/ONEVOKE-AGENTS.md"
 if [ -f "$entry_rules" ] && [ ! -e "$agent_rules" ] && [ ! -L "$agent_rules" ]; then
   ln -s "$(basename "$entry_rules")" "$agent_rules"
+fi
+
+if [ "$remove_legacy_reviews" -eq 1 ]; then
+  if [ ! -x "$bin_dir/onevoke-review.sh" ]; then
+    if [ "$onevoke_zh" -eq 1 ]; then
+      printf '%s\n' "错误: 新审核入口不可执行, 已保留旧 Reviewer 脚本: $bin_dir/onevoke-review.sh" >&2
+    else
+      printf '%s\n' "error: new review entry is not executable; legacy reviewer scripts were kept: $bin_dir/onevoke-review.sh" >&2
+    fi
+    exit 1
+  fi
+  for legacy_command in $legacy_review_commands; do
+    rm -f "$bin_dir/$legacy_command"
+  done
+  if [ "$onevoke_zh" -eq 1 ]; then
+    printf '%s\n' "已删除旧 Reviewer 脚本." >&2
+  else
+    printf '%s\n' "Legacy reviewer scripts were removed." >&2
+  fi
 fi
 
 printf '%s\n' 'Onevoke installed'

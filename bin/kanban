@@ -1039,10 +1039,7 @@ def web_board_payload(root: Path) -> dict:
     board = load_board(root)
     tasks = []
     for entry in board.entries.values():
-        try:
-            tasks.append(web_task_summary(entry))
-        except (OSError, UnicodeError, KanbanError):
-            continue
+        tasks.append(web_task_summary(entry))
     tasks.sort(key=lambda row: (row["time"], row["task_id"]), reverse=True)
     tasks.sort(key=lambda row: STATES.index(row["state"]) if row["state"] in STATES else len(STATES))
     return {

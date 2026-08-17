@@ -99,19 +99,17 @@ readonly ROLE
 REVIEW_CONTEXT_TEXT="${REVIEW_CONTEXT:-None provided.}"
 readonly REVIEW_CONTEXT_TEXT
 
-TASK_SPEC_DIR=""
+TASK_SPEC_PATH=""
 if [[ "$TASK_INPUT" == /* ]]; then
   [[ -f "$TASK_INPUT" && -r "$TASK_INPUT" ]] ||
     fail "spec path is not a readable file: $TASK_INPUT"
   TASK_SPEC_PATH=$(realpath -- "$TASK_INPUT") ||
     fail "could not resolve spec path: $TASK_INPUT"
-  TASK_SPEC_DIR=$(dirname "$TASK_SPEC_PATH")
   TASK_CONTEXT="Authoritative spec file: $TASK_SPEC_PATH. Read it completely before reviewing."
 else
   [[ -n "$TASK_INPUT" ]] || fail "task goal must not be empty"
   TASK_CONTEXT="Authoritative task goal: $TASK_INPUT"
 fi
-readonly TASK_CONTEXT TASK_SPEC_DIR
 
 [[ "$CWD" == /* ]] || fail "CWD must be an absolute path: $CWD"
 [[ "$REVIEW_HOME" == /* ]] ||
@@ -172,6 +170,15 @@ command -v "$REVIEW_BIN" >/dev/null 2>&1 ||
   fail "$REVIEWER_NAME CLI is unavailable: $REVIEW_BIN" 127
 
 RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/${AGENT}-review.XXXXXX")
+if [[ "$AGENT" == claude && -n "$TASK_SPEC_PATH" ]]; then
+  CLAUDE_TASK_SPEC="$RUNTIME_DIR/task-spec.md"
+  if ! install -m 0400 -- "$TASK_SPEC_PATH" "$CLAUDE_TASK_SPEC"; then
+    rm -rf -- "$RUNTIME_DIR"
+    fail "could not snapshot spec file for Claude: $TASK_SPEC_PATH"
+  fi
+  TASK_CONTEXT="Authoritative spec file: $CLAUDE_TASK_SPEC. Read it completely before reviewing."
+fi
+readonly TASK_CONTEXT TASK_SPEC_PATH
 OUTPUT_FILE="$RUNTIME_DIR/$OUTPUT_NAME"
 STDOUT_FILE="$RUNTIME_DIR/stdout.log"
 ERROR_FILE="$RUNTIME_DIR/error.log"
@@ -388,10 +395,6 @@ if [[ "$AGENT" == codex ]]; then
     --output-last-message "$OUTPUT_FILE" \
     - <"$PROMPT_FILE" >"$STDOUT_FILE" 2>"$ERROR_FILE" &
 elif [[ "$AGENT" == claude ]]; then
-  CLAUDE_SPEC_ARGS=()
-  if [[ -n "$TASK_SPEC_DIR" ]]; then
-    CLAUDE_SPEC_ARGS=(--add-dir "$TASK_SPEC_DIR")
-  fi
   (
     cd "$RUNTIME_DIR"
     env CLAUDE_CONFIG_DIR="$STATE_ROOT" "$REVIEW_BIN" \
@@ -401,7 +404,6 @@ elif [[ "$AGENT" == claude ]]; then
       --tools "Read,Grep,Glob" \
       --disallowedTools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,TaskOutput,TaskStop,EnterPlanMode,ExitPlanMode,AskUserQuestion" \
       --add-dir "$ROOT" \
-      "${CLAUDE_SPEC_ARGS[@]}" \
       --safe-mode \
       --disable-slash-commands \
       --no-session-persistence \
