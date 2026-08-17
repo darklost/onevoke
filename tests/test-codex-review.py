@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""codex-review.sh 的门禁测试.
+"""onevoke-review.sh 的 Codex 门禁测试.
 
 Codex CLI 用假二进制替代: 门禁的价值在于「不满足前置条件时拒绝执行」,
 而失效是静默的 —— 校验被绕过时不会报错, 只会放行. 这里逐条验证拒绝路径,
@@ -15,7 +15,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-REVIEWER = PROJECT_ROOT / "bin" / "codex-review.sh"
+REVIEWER = PROJECT_ROOT / "bin" / "onevoke-review.sh"
+REVIEWER_AGENT = "codex"
 
 FAKE_CODEX = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_CODEX_ARGV"
@@ -108,7 +109,11 @@ class CodexReviewGateTest(unittest.TestCase):
     def review(self, *args: str, **overrides: str) -> subprocess.CompletedProcess:
         env = {**self.env, **overrides}
         return subprocess.run(
-            [str(REVIEWER), *args], env=env, text=True, capture_output=True, check=False
+            [str(REVIEWER), REVIEWER_AGENT, *args],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
         )
 
     def default_review(self, **overrides: str) -> subprocess.CompletedProcess:
@@ -118,11 +123,35 @@ class CodexReviewGateTest(unittest.TestCase):
 
     # ---- 拒绝路径 ----
 
+    def test_missing_agent_reports_usage(self) -> None:
+        result = subprocess.run(
+            [str(REVIEWER)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Usage: onevoke-review.sh <agent>", result.stderr)
+
+    def test_unsupported_agent_is_rejected(self) -> None:
+        result = subprocess.run(
+            [str(REVIEWER), "other"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("unsupported reviewer agent", result.stderr)
+
     def test_missing_arguments_report_usage(self) -> None:
         result = self.review()
 
         self.assertEqual(2, result.returncode)
-        self.assertIn("Usage: codex-review.sh", result.stderr)
+        self.assertIn("Usage: onevoke-review.sh <agent>", result.stderr)
 
     def test_unsupported_role_is_rejected(self) -> None:
         result = self.review(str(self.repo), self.base, self.head, "Architect", "目标")
@@ -237,7 +266,7 @@ class CodexReviewGateTest(unittest.TestCase):
         reviewer.symlink_to(REVIEWER)
 
         result = subprocess.run(
-            [reviewer, str(self.repo), self.base, self.head, "QA", "确认改动正确"],
+            [reviewer, REVIEWER_AGENT, str(self.repo), self.base, self.head, "QA", "确认改动正确"],
             env=self.env,
             text=True,
             capture_output=True,

@@ -68,9 +68,6 @@ class OnevokeCommandTest(unittest.TestCase):
         for name in (
             "onevoke",
             "kanban",
-            "codex-review.sh",
-            "claude-review.sh",
-            "grok-review.sh",
             "onevoke-review.sh",
             "merge-worktree-memory.py",
             "codex",
@@ -372,9 +369,7 @@ class OnevokeCommandTest(unittest.TestCase):
         for name in (
             "onevoke",
             "kanban",
-            "codex-review.sh",
-            "claude-review.sh",
-            "grok-review.sh",
+            "onevoke-review.sh",
             "merge-worktree-memory.py",
         ):
             self.fake_command(name)
@@ -429,13 +424,13 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("用户取消, 配置未更改", output)
         self.assertEqual(before, self.config.read_bytes())
 
-    def test_review_dispatches_role_to_configured_wrapper(self) -> None:
+    def test_review_dispatches_role_and_agent_to_shared_entrypoint(self) -> None:
         log = self.root / "review.log"
-        wrapper = self.fake_command(
-            "claude-review.sh",
+        review_command = self.fake_command(
+            "onevoke-review.sh",
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$REVIEW_LOG\"\n",
         )
-        self.assertTrue(wrapper.exists())
+        self.assertTrue(review_command.exists())
         self.env["REVIEW_LOG"] = str(log)
         config = {
             "schema_version": 1,
@@ -468,17 +463,16 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(
-            ["/worktree", "base", "commit", "QA", "目标"],
+            ["claude", "/worktree", "base", "commit", "QA", "目标"],
             log.read_text(encoding="utf-8").splitlines(),
         )
 
     def test_review_ignores_unfinished_welcome_selections(self) -> None:
         log = self.root / "review.log"
         self.fake_command(
-            "codex-review.sh",
+            "onevoke-review.sh",
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$REVIEW_LOG\"\n",
         )
-        self.fake_command("grok-review.sh", "#!/bin/sh\nexit 99\n")
         self.env["REVIEW_LOG"] = str(log)
         config = {
             "schema_version": 1,
@@ -497,6 +491,18 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertTrue(log.exists())
+        self.assertEqual(
+            ["codex", "/worktree", "base", "commit", "QA", "目标"],
+            log.read_text(encoding="utf-8").splitlines(),
+        )
+
+    def test_review_rejects_missing_shared_entrypoint(self) -> None:
+        result = self.run_command(
+            "review", "/worktree", "base", "commit", "QA", "目标"
+        )
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("onevoke-review.sh 不在 PATH", result.stderr)
 
     def test_doctor_rejects_agent_when_version_check_fails(self) -> None:
         self.install_fake_environment(tmux=True)
@@ -701,7 +707,7 @@ class OnevokeCommandTest(unittest.TestCase):
                             ok, _ = onevoke.rules_integration(agent)
                             self.assertFalse(ok)
 
-    def test_doctor_validates_configured_agent_reviewers_wrapper_and_launcher(self) -> None:
+    def test_doctor_validates_configured_agents_review_entrypoint_and_launcher(self) -> None:
         self.install_fake_environment(tmux=True)
         config = {
             "schema_version": 1,
@@ -718,15 +724,15 @@ class OnevokeCommandTest(unittest.TestCase):
         }
         self.config.parent.mkdir(parents=True)
         self.config.write_text(json.dumps(config), encoding="utf-8")
-        # Remove configured execution agent and one reviewer wrapper.
+        # Remove the configured execution agent and the single review entrypoint.
         (self.fake_bin / "claude").unlink()
-        (self.fake_bin / "grok-review.sh").unlink()
+        (self.fake_bin / "onevoke-review.sh").unlink()
 
         result = self.run_command("doctor")
 
         self.assertEqual(1, result.returncode)
         self.assertIn("配置的执行 Agent 不可用: claude", result.stderr)
-        self.assertIn("配置的 QA wrapper 不在 PATH: grok-review.sh", result.stderr)
+        self.assertIn("onevoke-review.sh 不在 PATH", result.stderr)
 
     def test_doctor_rejects_tmux_launcher_when_tmux_missing(self) -> None:
         self.install_fake_environment(tmux=False)
@@ -747,7 +753,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("配置的 launcher 是 tmux", result.stderr)
         self.assertIn("welcome --reset", result.stderr)
 
-    def test_doctor_rejects_missing_review_shared_implementation(self) -> None:
+    def test_doctor_rejects_missing_review_entrypoint(self) -> None:
         self.install_fake_environment(tmux=True)
         (self.fake_bin / "onevoke-review.sh").unlink()
         config = {
@@ -764,7 +770,7 @@ class OnevokeCommandTest(unittest.TestCase):
         result = self.run_command("doctor")
 
         self.assertEqual(1, result.returncode)
-        self.assertIn("wrapper 共用实现不可用", result.stderr)
+        self.assertIn("onevoke-review.sh 不在 PATH", result.stderr)
 
     def test_welcome_reports_single_tmux_session_hint(self) -> None:
         """tmux 已装但当前不在 session 时, welcome/doctor 只给一次准确命令."""

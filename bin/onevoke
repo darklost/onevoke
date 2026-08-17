@@ -37,9 +37,7 @@ argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 COMMANDS = (
     "onevoke",
     "kanban",
-    "codex-review.sh",
-    "claude-review.sh",
-    "grok-review.sh",
+    "onevoke-review.sh",
     "merge-worktree-memory.py",
 )
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
@@ -339,7 +337,7 @@ def validate_configured_resources(
     config: dict[str, Any],
     agents: dict[str, dict[str, str | bool | None]],
 ) -> bool:
-    """对生效配置逐项核对执行 Agent、Reviewer、wrapper 和 launcher."""
+    """对生效配置逐项核对执行 Agent、Reviewer、审核入口和 launcher."""
     healthy = True
     effective = effective_config(config)
     selected_agent = effective["kanban_agent"]
@@ -353,6 +351,16 @@ def validate_configured_resources(
             )
         )
 
+    review_command = shutil.which("onevoke-review.sh")
+    if not review_command:
+        healthy = False
+        warning(
+            t(
+                "onevoke-review.sh 不在 PATH; 请把 ~/.local/bin 加入 PATH 或重新安装 Onevoke.",
+                "onevoke-review.sh is not in PATH; add ~/.local/bin to PATH or reinstall Onevoke.",
+            )
+        )
+
     for role in REVIEW_ROLES:
         reviewer = effective["reviewers"][role]
         reviewer_state = agents.get(reviewer, {})
@@ -362,27 +370,6 @@ def validate_configured_resources(
                 t(
                     f"配置的 {role} Reviewer 不可用: {reviewer}; 请安装后重新运行 onevoke welcome --reset.",
                     f"Configured {role} Reviewer is unavailable: {reviewer}; install it, then run onevoke welcome --reset.",
-                )
-            )
-            continue
-        wrapper_name = f"{reviewer}-review.sh"
-        wrapper = shutil.which(wrapper_name)
-        if not wrapper:
-            healthy = False
-            warning(
-                t(
-                    f"配置的 {role} wrapper 不在 PATH: {wrapper_name}; 请把 ~/.local/bin 加入 PATH 或重新安装 Onevoke.",
-                    f"Configured {role} wrapper is not in PATH: {wrapper_name}; add ~/.local/bin to PATH or reinstall Onevoke.",
-                )
-            )
-            continue
-        implementation = Path(wrapper).resolve().parent / "onevoke-review.sh"
-        if not implementation.is_file() or not os.access(implementation, os.X_OK):
-            healthy = False
-            warning(
-                t(
-                    f"配置的 {role} wrapper 共用实现不可用: {implementation}; 请重新安装 Onevoke.",
-                    f"Configured {role} wrapper shared implementation is unavailable: {implementation}; reinstall Onevoke.",
                 )
             )
 
@@ -654,11 +641,11 @@ def command_review(arguments: list[str]) -> NoReturn:
         raise OnevokeError(t(f"不支持的 Reviewer 角色: {role}", f"Unsupported Reviewer role: {role}"))
     config = effective_config(load_config())
     reviewer = config["reviewers"][normalized]
-    wrapper = shutil.which(f"{reviewer}-review.sh")
-    if not wrapper:
-        raise OnevokeError(t(f"Reviewer wrapper 不在 PATH: {reviewer}-review.sh", f"Reviewer wrapper is not in PATH: {reviewer}-review.sh"))
+    review_command = shutil.which("onevoke-review.sh")
+    if not review_command:
+        raise OnevokeError(t("onevoke-review.sh 不在 PATH", "onevoke-review.sh is not in PATH"))
     arguments[3] = normalized
-    os.execv(wrapper, [wrapper, *arguments])
+    os.execv(review_command, [review_command, reviewer, *arguments])
 
 
 def print_config(config: dict[str, Any]) -> None:
@@ -681,7 +668,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("doctor", help=t("检查 Onevoke 环境", "check the Onevoke environment"))
     config = commands.add_parser("config", help=t("输出当前配置", "print the current configuration"))
     config.add_argument("--json", action="store_true", help=t("以 JSON 输出", "output JSON"))
-    review = commands.add_parser("review", help=t("按配置选择 Reviewer wrapper", "select a Reviewer wrapper from configuration"))
+    review = commands.add_parser("review", help=t("按配置选择 Reviewer", "select a Reviewer from configuration"))
     review.add_argument("arguments", nargs=argparse.REMAINDER, metavar=t("参数", "arguments"))
     return result
 

@@ -4,8 +4,14 @@ set -euo pipefail
 umask 077
 export GIT_OPTIONAL_LOCKS=0
 
+usage() {
+  echo "Usage: onevoke-review.sh <agent> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]" >&2
+  echo "Agents: codex, claude, grok" >&2
+  echo "Roles: PM, QA, CSA, CodeSecurityAnalyst, Hacker" >&2
+}
+
 if (($# < 1)); then
-  echo "Error: reviewer agent is required" >&2
+  usage
   exit 2
 fi
 
@@ -63,11 +69,6 @@ esac
 readonly REVIEWER_NAME CHECK_INTERVAL_SECONDS MAX_RUNTIME_SECONDS REVIEW_BIN MODEL
 readonly REASONING_EFFORT REVIEW_HOME HOME_VARIABLE CHECK_INTERVAL_VARIABLE
 readonly MAX_RUNTIME_VARIABLE OUTPUT_NAME INSPECTION_RULES
-
-usage() {
-  echo "Usage: ${AGENT}-review.sh <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]" >&2
-  echo "Roles: PM, QA, CSA, CodeSecurityAnalyst, Hacker" >&2
-}
 
 fail() {
   echo "Error: $1" >&2

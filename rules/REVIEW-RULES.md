@@ -4,20 +4,20 @@
 
 ## Reviewer 选择
 
-- 支持 Codex、Claude 与 Grok 三个 reviewer. `codex-review.sh`、`claude-review.sh` 与 `grok-review.sh` 是保留原参数接口的薄包装, 都转到 `onevoke-review.sh` 的单一门禁实现; 四者都装在 `~/.local/bin/`. 除下表列出的 CLI 与隔离参数外, 本文件全部规则对三者一致.
+- 支持 Codex、Claude 与 Grok 三个 reviewer. `~/.local/bin/onevoke-review.sh` 是唯一公开审核入口, 第一个参数指定 reviewer agent. 除下表列出的 CLI 与隔离参数外, 本文件全部规则对三者一致. 新增 reviewer 时扩展该入口的 agent 适配层和配置枚举, 不新增按 agent 命名的脚本.
 
-| reviewer | wrapper | CLI | wrapper 的隔离参数 |
+| reviewer | agent 参数 | CLI | 入口的隔离参数 |
 |---|---|---|---|
-| Codex | `codex-review.sh` | `codex` | `--sandbox read-only`, `--ephemeral` |
-| Claude | `claude-review.sh` | `claude` | `--permission-mode plan`, `--tools Read,Grep,Glob`, `--safe-mode`, `--no-session-persistence` |
-| Grok | `grok-review.sh` | `grok` | `--sandbox read-only`, `--no-memory`, `--no-subagents` |
+| Codex | `codex` | `codex` | `--sandbox read-only`, `--ephemeral` |
+| Claude | `claude` | `claude` | `--permission-mode plan`, `--tools Read,Grep,Glob`, `--safe-mode`, `--no-session-persistence` |
+| Grok | `grok` | `grok` | `--sandbox read-only`, `--no-memory`, `--no-subagents` |
 
 - 共用实现中 Codex 在目标 worktree 内运行只读 shell 并从 last-message 文件取报告; Claude 在 worktree 外的 runtime 目录运行, 通过 `--add-dir` 读取目标树, 只开放 `Read,Grep,Glob`, 并从 JSON 的成功 `result` 字段取报告; Grok 在 worktree 外的 runtime 目录运行, 只开放 `read_file,grep,list_dir`, 并从 JSON 的 `text` 字段取报告. 禁为了统一实现而交换或放宽三套隔离参数.
 
 - `PM`, `CSA`, `Hacker`, `QA` 分别选择 reviewer. 按优先级取该角色第一个明确指定的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则; (4) `~/.config/onevoke/config.json` 中该角色的取值. 前三档都未指定时运行 `onevoke review`, 由它读取第 (4) 档; 配置不存在时回落到 Codex.
 - 第 (3) 档只对本节的 reviewer 取值有效, 是本分册为自身设定声明的额外来源, 不改变 `~/.agents/ONEVOKE-AGENTS.md` 的通用优先级链. 该档文件已在会话上下文里就直接判读; 未自动载入且当前任务需要判定时读取它, 读不到按未指定处理.
 - 不同角色可以使用不同 reviewer. 同一角色的修复重跑和结论确认必须继续使用该角色本轮选定的 reviewer; 中途更换时该角色已有结论作废并重跑该阶段, 已通过的其他角色不因此作废.
-- 下文的「reviewer」「reviewer CLI」「wrapper」均指当前审核角色选定的那一个.
+- 下文的「reviewer」和「reviewer CLI」均指当前审核角色选定的那一个; 「审核入口」统一指 `onevoke-review.sh`.
 
 ## 目标与边界
 
@@ -32,7 +32,7 @@
 
 - 豁免条件, 满足其一即可: (1) 相对审核 base 的全部改动文件都是 `*.md` 或 `*.markdown`, 不限文件数与行数; (2) 任务恰改 1 个文件, 且相对审核 base 的新增与删除行合计不超 10 行, 以 `git diff --numstat <base>..<commit>` 为准. 二进制文件, 拿不到数字或用户明确要求审核时一律不得豁免.
 - 走豁免路径必须在集成前明确告知用户"本次未走审核闭环", 并写出触发的豁免条件 (改了哪个文件, 新增与删除行数). 禁静默跳过. 用户随后要求审核时照常执行完整流程.
-- 选定 reviewer 的 CLI 或其 wrapper 在本机不可用时无法审核: 明确告知用户"本机未装 <reviewer> CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好该 CLI 后重试`、`2. 改用另一个 reviewer 重启审核`、`3. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`、`4. 停止集成`. 禁自行跳过, 禁未经用户明确指定就换 reviewer.
+- 选定 reviewer 的 CLI 或 `onevoke-review.sh` 在本机不可用时无法审核: 明确告知用户"本机未装 <reviewer> CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好该 CLI 后重试`、`2. 改用另一个 reviewer 重启审核`、`3. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`、`4. 停止集成`. 审核入口缺失时还须说明需重新安装 Onevoke. 禁自行跳过, 禁未经用户明确指定就换 reviewer.
 - 审核前, 把审核 base 以来全部任务改动按关注点提交, 保持 worktree 无未提交或未跟踪文件.
 - 审核 base: 专用任务分支为该分支最近一次基于 `develop` 创建或 rebase 时所基于的 `develop` commit 完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变; rebase 后 base 更新为新的所基于 commit, 是否重审按 `~/.agents/GIT-RULES.md`「集成与清理」的一次性门规则执行.
 
@@ -72,9 +72,9 @@
 - 第二阶段只把实际运行的 `CSA` 或 `Hacker` 返回且经主代理核实成立的 `blocking`、`high`、`medium` finding 交用户决策. 每项列出问题、影响、修复方法及至少三个选项: `1. 修复并重审`、`2. 确认通过并接受风险`、`3. 停止集成`. `low`、`推荐`、`建议` 和纯 defense-in-depth advisory 直接进入未处理项清单, 不触发决策.
 - 仅看板任务适用安全 finding 超时. 每项从完整信息和选项送达用户时独立计时; 同批共用发送时间, 部分回答不停止其余项. 15 分钟无明确决策即标记"超时忽略", 记录角色, 档位, 问题, 影响, 发送时间, 超时时间和理由, 再继续.
 - "超时忽略"不等于 `PASS`, 用户确认或接受风险; 卡片完成前收到决策则按最新指令处理. 非看板任务及 `PM`, `QA` finding, 无法核实项, 契约或负责人变更, 验收, 集成等确认不得超时跳过.
-- 前三档未明确 reviewer 时调用 `onevoke review <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`; 已明确 reviewer 时调用 `~/.local/bin/<reviewer>-review.sh` 的同参数接口. 两条路径最终都必须进入选定 wrapper, 禁直接调 reviewer CLI. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
+- 前三档未明确 reviewer 时调用 `onevoke review <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 由 Onevoke 读取该角色的配置并转成下述入口调用; 已明确 reviewer 时调用 `~/.local/bin/onevoke-review.sh <reviewer> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`. `<reviewer>` 必须是本文件支持的 agent 参数. 两条路径最终都必须进入 `onevoke-review.sh`, 禁直接调 reviewer CLI. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
 - 一次完整审核中每个角色使用该角色选定的 reviewer, 所有角色必须使用相同 `CWD`、base 与 task context. 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (上条安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. base 改变则全部结论失效, 从第一阶段重启. task context 是权威需求契约: 短任务可直接传单个字符串, 长任务用可读的绝对 spec 路径. 各角色第 6 参数可传 review context.
-- 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录, 禁混入日志、spec 或其他文件. 本轮审核通过、用户完成第二阶段决策或本轮终止后清理该目录; 需保留诊断先向用户说明. wrapper 自身按「Reviewer 选择」表的隔离参数跑 reviewer, 结束时校验 worktree 未被改动; 禁改其 sandbox、权限或工具参数绕过门禁.
+- 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录, 禁混入日志、spec 或其他文件. 本轮审核通过、用户完成第二阶段决策或本轮终止后清理该目录; 需保留诊断先向用户说明. 审核入口按「Reviewer 选择」表的隔离参数跑 reviewer, 结束时校验 worktree 未被改动; 禁改其 sandbox、权限或工具参数绕过门禁.
 
 ## 主代理的核实义务
 
@@ -129,6 +129,6 @@ task context 按以下五段组织, 缺哪段写哪段, 不必凑齐; 「不在�
 - 被判「无法核实」的 blocking、high、medium 视同未通过: 该阶段不得放行, 按「主代理的核实义务」交用户决策, 用户判定为不必处理后才继续.
 - 审核闭环结束时 (通过或中途终止), 必须向用户展示本轮全部未处理项, 一项都不省: 未修的 `low`、`推荐`、`建议`, 被主代理判定不成立或无法核实的 finding, 用户已确认接受的风险, 超时忽略的安全 finding, 因后端故障未完成的角色, 未提供 `NON-BLOCKING` 段的角色. 每项写明来源角色、档位、问题、影响和理由. 同一批内容写进交付说明; 看板任务还要写进任务卡. 禁只报 "审核通过" 或 "无阻塞问题". 走豁免路径时按豁免规则告知用户即可.
 - 重启轮次不设次数上限. 但同一 finding 连续多轮修复仍未通过时, 停止自转, 向用户说明卡在哪、已试过什么、下一步选项, 由用户决策.
-- wrapper 参数、认证、前置条件或本地环境错误必须先修正. 仅当参数与前置条件均正确的同一角色调用连续 3 次返回 HTTP 5xx 或明确 service unavailable 错误时, 视为该 reviewer 持续后端故障.
+- 审核入口参数、认证、前置条件或本地环境错误必须先修正. 仅当参数与前置条件均正确的同一角色调用连续 3 次返回 HTTP 5xx 或明确 service unavailable 错误时, 视为该 reviewer 持续后端故障.
 - `PM` 或 `QA` 持续后端故障时不自行换 reviewer: 保留分支和 worktree, 报告失败角色、实际错误和已完成阶段, 停止集成, 等用户决定重试、改期或明确指定另一个 reviewer. 提供换 reviewer 这个选项时必须同时写明代价: 仅该角色已有结论作废并重跑该阶段; 已通过的其他角色结论继续有效. 用户改的是整套 reviewer、审核 base 或 task context 时, 才按对应规则作废全部阶段并从 `PM` 重启.
 - `CSA` 或 `Hacker` 持续后端故障不阻塞审核: 该角色记为"因后端故障未完成", 在交付说明和给用户的汇报里写明, 审核结论由 `PM` 与 `QA` 决定. 两个安全角色都触发时其中一个故障, 另一个照常出结论并按第二阶段规则处理.

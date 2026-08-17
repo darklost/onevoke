@@ -1010,6 +1010,10 @@ N/A
 
     def test_installer_copies_command_and_rules(self) -> None:
         install_home = self.root / "install-home"
+        legacy_bin = install_home / ".local" / "bin"
+        legacy_bin.mkdir(parents=True)
+        for name in ("codex-review.sh", "claude-review.sh", "grok-review.sh"):
+            (legacy_bin / name).write_text("legacy\n", encoding="utf-8")
         env = os.environ.copy()
         env["HOME"] = str(install_home)
         result = subprocess.run(
@@ -1022,6 +1026,8 @@ N/A
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("Onevoke installed\n", result.stdout)
+        for name in ("codex-review.sh", "claude-review.sh", "grok-review.sh"):
+            self.assertFalse((legacy_bin / name).exists(), name)
 
         command = install_home / ".local" / "bin" / "kanban"
         for source in sorted((PROJECT_ROOT / "bin").iterdir()):
@@ -1211,6 +1217,25 @@ N/A
         self.assertIn("安装目标是目录", result.stderr)
         self.assertFalse((install_home / ".local" / "bin").exists())
         self.assertTrue(entry.is_dir())
+
+    def test_installer_rejects_a_directory_at_a_legacy_review_target(self) -> None:
+        install_home = self.root / "legacy-directory-home"
+        legacy_target = install_home / ".local" / "bin" / "codex-review.sh"
+        legacy_target.mkdir(parents=True)
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, "HOME": str(install_home)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("旧版安装目标是目录", result.stderr)
+        self.assertFalse((install_home / ".local" / "bin" / "onevoke").exists())
+        self.assertTrue(legacy_target.is_dir())
 
     def test_installer_rejects_arguments(self) -> None:
         chinese_help = subprocess.run(

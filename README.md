@@ -11,6 +11,7 @@
 ```
 
 安装过程会引导选择默认 Agent, Reviewer 和启动方式. Reviewer 可按角色分别选择 Codex、Claude 或 Grok.
+审核统一由 `onevoke-review.sh` 执行; 新增 Reviewer 时扩展该入口, 不新增按 Agent 命名的脚本.
 
 如果 `~/.agents/AGENTS.md` 不存在, 安装器会将其链接到 `ONEVOKE-AGENTS.md`; 已有文件不会修改.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""claude-review.sh 的门禁和 Claude 隔离适配测试."""
+"""onevoke-review.sh 的 Claude 门禁和隔离适配测试."""
 
 import os
 import subprocess
@@ -10,7 +10,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-REVIEWER = PROJECT_ROOT / "bin" / "claude-review.sh"
+REVIEWER = PROJECT_ROOT / "bin" / "onevoke-review.sh"
+REVIEWER_AGENT = "claude"
 
 FAKE_CLAUDE = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_CLAUDE_ARGV"
@@ -106,7 +107,7 @@ class ClaudeReviewGateTest(unittest.TestCase):
 
     def review(self, *args: str, **overrides: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [str(REVIEWER), *args],
+            [str(REVIEWER), REVIEWER_AGENT, *args],
             env={**self.env, **overrides},
             text=True,
             capture_output=True,
@@ -121,7 +122,7 @@ class ClaudeReviewGateTest(unittest.TestCase):
     def test_missing_arguments_report_usage(self) -> None:
         result = self.review()
         self.assertEqual(2, result.returncode)
-        self.assertIn("Usage: claude-review.sh", result.stderr)
+        self.assertIn("Usage: onevoke-review.sh <agent>", result.stderr)
 
     def test_unsupported_role_is_rejected(self) -> None:
         result = self.review(str(self.repo), self.base, self.head, "Architect", "目标")
@@ -225,7 +226,7 @@ class ClaudeReviewGateTest(unittest.TestCase):
         reviewer = link_dir / REVIEWER.name
         reviewer.symlink_to(REVIEWER)
         result = subprocess.run(
-            [reviewer, str(self.repo), self.base, self.head, "QA", "确认改动正确"],
+            [reviewer, REVIEWER_AGENT, str(self.repo), self.base, self.head, "QA", "确认改动正确"],
             env=self.env,
             text=True,
             capture_output=True,

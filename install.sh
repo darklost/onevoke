@@ -83,6 +83,17 @@ for command in "$project_dir"/bin/*; do
     exit 1
   fi
 done
+for legacy_command in codex-review.sh claude-review.sh grok-review.sh; do
+  target="$bin_dir/$legacy_command"
+  if [ -d "$target" ]; then
+    if [ "$onevoke_zh" -eq 1 ]; then
+      printf '%s\n' "错误: 旧版安装目标是目录: $target" >&2
+    else
+      printf '%s\n' "error: legacy installation target is a directory: $target" >&2
+    fi
+    exit 1
+  fi
+done
 for rule in "$project_dir"/rules/*.md; do
   [ -f "$rule" ] || continue
   target="$agents_dir/$(basename "$rule")"
@@ -124,6 +135,9 @@ fi
 mkdir -p "$bin_dir" "$agents_dir"
 
 # bin/ 和 rules/ 都由本仓库拥有, 每次安装直接覆盖.
+for legacy_command in codex-review.sh claude-review.sh grok-review.sh; do
+  rm -f "$bin_dir/$legacy_command"
+done
 for command in "$project_dir"/bin/*; do
   [ -f "$command" ] || continue
   install -m 0755 "$command" "$bin_dir/$(basename "$command")"
