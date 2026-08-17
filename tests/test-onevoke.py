@@ -69,6 +69,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "onevoke",
             "kanban",
             "codex-review.sh",
+            "claude-review.sh",
             "grok-review.sh",
             "onevoke-review.sh",
             "merge-worktree-memory.py",
@@ -236,10 +237,10 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_welcome_saves_per_role_reviewers_and_foreground_launcher(self) -> None:
         self.install_fake_environment(tmux=False)
 
-        # Codex 执行; PM/CSA/Hacker/QA 依次选 Codex/Grok/Codex/Grok;
+        # Codex 执行; PM/CSA/Hacker/QA 依次选 Claude/Grok/Codex/Claude;
         # 拒绝安装 tmux; 选择使用 MemSearch; 最后确认保存.
         returncode, output = self.run_on_tty(
-            "1\n1\n2\n1\n2\n2\n1\n1\n", "welcome"
+            "1\n2\n3\n1\n2\n2\n1\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -248,7 +249,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual("codex", config["kanban_agent"])
         self.assertEqual("foreground", config["launcher"])
         self.assertEqual(
-            {"PM": "codex", "CSA": "grok", "Hacker": "codex", "QA": "grok"},
+            {"PM": "claude", "CSA": "grok", "Hacker": "codex", "QA": "claude"},
             config["reviewers"],
         )
         self.assertTrue(config["memsearch"]["enabled"])
@@ -372,6 +373,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "onevoke",
             "kanban",
             "codex-review.sh",
+            "claude-review.sh",
             "grok-review.sh",
             "merge-worktree-memory.py",
         ):
@@ -430,7 +432,7 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_review_dispatches_role_to_configured_wrapper(self) -> None:
         log = self.root / "review.log"
         wrapper = self.fake_command(
-            "grok-review.sh",
+            "claude-review.sh",
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$REVIEW_LOG\"\n",
         )
         self.assertTrue(wrapper.exists())
@@ -443,7 +445,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "reviewers": {role: "codex" for role in ROLES},
             "memsearch": {"enabled": False},
         }
-        config["reviewers"]["QA"] = "grok"
+        config["reviewers"]["QA"] = "claude"
         self.config.parent.mkdir(parents=True)
         self.config.write_text(json.dumps(config), encoding="utf-8")
 

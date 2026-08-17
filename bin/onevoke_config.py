@@ -14,7 +14,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 EXECUTION_AGENTS = ("codex", "claude", "grok")
-REVIEW_AGENTS = ("codex", "grok")
+REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 LAUNCHERS = ("tmux", "foreground")
 LANGUAGES = ("cn", "en")

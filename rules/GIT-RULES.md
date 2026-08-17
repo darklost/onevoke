@@ -25,7 +25,7 @@
 
 ## 审核
 
-- 完整规则见 `~/.agents/REVIEW-RULES.md`; 触发审核前先读取该文件并遵循. reviewer 有 Codex 与 Grok 两个, 每个角色按该文件「Reviewer 选择」独立确定; 未指定时由 `onevoke review` 读取本机配置并分发.
+- 完整规则见 `~/.agents/REVIEW-RULES.md`; 触发审核前先读取该文件并遵循. reviewer 有 Codex、Claude 与 Grok 三个, 每个角色按该文件「Reviewer 选择」独立确定; 未指定时由 `onevoke review` 读取本机配置并分发.
 
 ## 集成与清理
 

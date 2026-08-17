@@ -38,6 +38,7 @@ COMMANDS = (
     "onevoke",
     "kanban",
     "codex-review.sh",
+    "claude-review.sh",
     "grok-review.sh",
     "merge-worktree-memory.py",
 )
@@ -537,7 +538,7 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         if agent_usable(agents[name])
     ]
     if not review_choices:
-        raise OnevokeError(t("没有发现可用 Reviewer. 请安装 Codex 或 Grok.", "No usable Reviewer found. Install Codex or Grok."))
+        raise OnevokeError(t("没有发现可用 Reviewer. 请安装 Codex、Claude 或 Grok.", "No usable Reviewer found. Install Codex, Claude, or Grok."))
     for role in REVIEW_ROLES:
         previous = existing["reviewers"][role]
         config["reviewers"][role] = ask_choice(

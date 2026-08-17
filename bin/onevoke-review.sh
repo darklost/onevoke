@@ -27,6 +27,20 @@ case "$AGENT" in
     OUTPUT_NAME="output.txt"
     INSPECTION_RULES="Use only read-only filesystem and shell operations needed to inspect code."
     ;;
+  claude)
+    REVIEWER_NAME="Claude"
+    CHECK_INTERVAL_SECONDS="${CLAUDE_REVIEW_CHECK_INTERVAL_SECONDS:-600}"
+    MAX_RUNTIME_SECONDS="${CLAUDE_REVIEW_MAX_RUNTIME_SECONDS:-1800}"
+    REVIEW_BIN="${CLAUDE_REVIEW_BIN:-claude}"
+    MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
+    REASONING_EFFORT="${CLAUDE_REVIEW_REASONING_EFFORT:-high}"
+    REVIEW_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    HOME_VARIABLE="CLAUDE_CONFIG_DIR"
+    CHECK_INTERVAL_VARIABLE="CLAUDE_REVIEW_CHECK_INTERVAL_SECONDS"
+    MAX_RUNTIME_VARIABLE="CLAUDE_REVIEW_MAX_RUNTIME_SECONDS"
+    OUTPUT_NAME="output.json"
+    INSPECTION_RULES="Use only the Read, Grep, and Glob tools to inspect code."
+    ;;
   grok)
     REVIEWER_NAME="Grok"
     CHECK_INTERVAL_SECONDS="${GROK_REVIEW_CHECK_INTERVAL_SECONDS:-600}"
@@ -368,6 +382,23 @@ if [[ "$AGENT" == codex ]]; then
     --config 'allow_login_shell=false' \
     --output-last-message "$OUTPUT_FILE" \
     - <"$PROMPT_FILE" >"$STDOUT_FILE" 2>"$ERROR_FILE" &
+elif [[ "$AGENT" == claude ]]; then
+  (
+    cd "$RUNTIME_DIR"
+    env CLAUDE_CONFIG_DIR="$STATE_ROOT" "$REVIEW_BIN" \
+      --print \
+      --output-format json \
+      --permission-mode plan \
+      --tools "Read,Grep,Glob" \
+      --disallowedTools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,TaskOutput,TaskStop,EnterPlanMode,ExitPlanMode,AskUserQuestion" \
+      --add-dir "$ROOT" \
+      --safe-mode \
+      --disable-slash-commands \
+      --no-session-persistence \
+      --model "$MODEL" \
+      --effort "$REASONING_EFFORT" \
+      <"$PROMPT_FILE" >"$OUTPUT_FILE" 2>"$ERROR_FILE"
+  ) &
 else
   REVIEW_COMMAND=(
     env "GROK_HOME=$STATE_ROOT" "$REVIEW_BIN"
@@ -440,7 +471,8 @@ if [[ "$AGENT" == codex ]]; then
     fail "Codex review did not complete with review text" 1
   fi
   cat "$OUTPUT_FILE"
-elif ! review_text=$(python3 - "$OUTPUT_FILE" <<'PY'
+elif [[ "$AGENT" == grok ]]; then
+  if ! review_text=$(python3 - "$OUTPUT_FILE" <<'PY'
 import json
 import sys
 
@@ -451,9 +483,32 @@ if result.get("stopReason") != "end_turn" or not isinstance(text, str) or not te
     raise SystemExit(1)
 print(text)
 PY
-); then
-  cat "$OUTPUT_FILE"
-  fail "Grok review did not complete with review text" 1
+  ); then
+    cat "$OUTPUT_FILE"
+    fail "Grok review did not complete with review text" 1
+  fi
+  printf '%s\n' "$review_text"
 else
+  if ! review_text=$(python3 - "$OUTPUT_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    result = json.load(stream)
+text = result.get("result")
+if (
+    result.get("type") != "result"
+    or result.get("subtype") != "success"
+    or result.get("is_error") is not False
+    or not isinstance(text, str)
+    or not text
+):
+    raise SystemExit(1)
+print(text)
+PY
+  ); then
+    cat "$OUTPUT_FILE"
+    fail "Claude review did not complete with review text" 1
+  fi
   printf '%s\n' "$review_text"
 fi
