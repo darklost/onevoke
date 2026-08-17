@@ -18,7 +18,7 @@
 - 新增分册时把它加进 `ONEVOKE-AGENTS.md` 的分册表即可; `install.sh` 和安装测试都遍历 `rules/*.md`, 不必改.
 - 本仓库根目录的 `AGENTS.md` 是本仓库自己的开发规则, 与 `rules/` 下的发布物是两回事, 不要混改.
 - `bin/kanban` 是 Python 3 CLI 的唯一实现, 包含看板定位、任务校验、状态迁移和命令解析. `bin/onevoke` 负责首次引导、环境诊断、配置展示和 Reviewer 分发.
-- `bin/codex-review.sh` 与 `bin/grok-review.sh` 是审核 wrapper, 分别只读运行 Codex CLI 与 Grok CLI 并输出角色报告. `bin/merge-worktree-memory.py` 在集成后合并 worktree 的 memsearch 记忆, 并清除合并结果中的非法 UTF-8 字节.
+- `bin/onevoke-review.sh` 是 Codex 与 Grok 审核的单一门禁实现, 集中维护 commit 校验、evidence、prompt 骨架、超时监督和 worktree 篡改检测. `bin/codex-review.sh` 与 `bin/grok-review.sh` 只保留公开参数接口并转发 agent; Codex 在目标 worktree 内以 `--sandbox read-only --ephemeral` 运行, Grok 在外部 runtime 目录以 `--sandbox read-only --no-memory --no-subagents` 运行且只开放 `read_file,grep,list_dir`. `bin/merge-worktree-memory.py` 在集成后合并 worktree 的 memsearch 记忆, 并清除合并结果中的非法 UTF-8 字节.
 - `tests/test-onevoke.py` 用临时 HOME 和伪终端覆盖 welcome、配置和 Reviewer 分发. `tests/test-kanban.py` 覆盖看板生命周期、两种 launcher、安装及初始化. `tests/test-merge-worktree-memory.py` 覆盖记忆合并; 两个审核测试覆盖 wrapper 门禁.
 - 运行时创建的 `kanban/` 是本机共享数据, 不属于仓库源码, 不得提交.
 
@@ -35,7 +35,7 @@ python3 tests/test-merge-worktree-memory.py
 python3 tests/test-codex-review.py
 python3 tests/test-grok-review.py
 python3 -m py_compile bin/onevoke bin/onevoke_config.py bin/kanban bin/merge-worktree-memory.py tests/*.py
-sh -n install.sh && bash -n bin/codex-review.sh bin/grok-review.sh
+sh -n install.sh && bash -n bin/codex-review.sh bin/grok-review.sh bin/onevoke-review.sh
 ```
 
 测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; 两个审核测试分别用假 Codex/Grok 二进制驱动, 不调用真的 CLI, 也不产生网络请求.
@@ -62,4 +62,4 @@ Shell 脚本使用 2 空格缩进, `set -eu`, 引用所有变量展开, 错误�
 
 `KANBAN_DIR` 仅用于测试、非 Git 项目或明确覆盖. 不提交 token、凭据、敏感服务地址、真实任务卡片或本机路径. 文件写入和状态迁移必须继续经过现有校验, 不得绕过 `scan()` 或 `validate_target()` 直接操作任务入口.
 
-两个审核 wrapper 的只读 sandbox、commit 校验和 worktree 篡改检测是审核门禁的一部分, 不得为方便调试而放宽.
+审核共用实现的只读 sandbox、commit 校验和 worktree 篡改检测是审核门禁的一部分; 两个公开 wrapper 不得绕过共用实现, 也不得为方便调试而放宽 agent 隔离参数.
