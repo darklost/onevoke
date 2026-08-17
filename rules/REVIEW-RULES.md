@@ -73,7 +73,7 @@
 - 仅看板任务适用安全 finding 超时. 每项从完整信息和选项送达用户时独立计时; 同批共用发送时间, 部分回答不停止其余项. 15 分钟无明确决策即标记"超时忽略", 记录角色, 档位, 问题, 影响, 发送时间, 超时时间和理由, 再继续.
 - "超时忽略"不等于 `PASS`, 用户确认或接受风险; 卡片完成前收到决策则按最新指令处理. 非看板任务及 `PM`, `QA` finding, 无法核实项, 契约或负责人变更, 验收, 集成等确认不得超时跳过.
 - 前三档未明确 reviewer 时调用 `onevoke review <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 由 Onevoke 读取该角色的配置并转成下述入口调用; 已明确 reviewer 时调用 `~/.local/bin/onevoke-review.sh <reviewer> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`. `<reviewer>` 必须是本文件支持的 agent 参数. 两条路径最终都必须进入 `onevoke-review.sh`, 禁直接调 reviewer CLI. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
-- 一次完整审核中每个角色使用该角色选定的 reviewer, 所有角色必须使用相同 `CWD`、base 与 task context. 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (上条安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. base 改变则全部结论失效, 从第一阶段重启. task context 是权威需求契约: 短任务可直接传单个字符串, 长任务用可读的绝对 spec 路径. 各角色第 6 参数可传 review context.
+- 一次完整审核中每个角色使用该角色选定的 reviewer, 所有角色必须使用相同 `CWD`、base 与 task context. 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (上条安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. base 改变则全部结论失效, 从第一阶段重启. task context 是权威需求契约: 短任务可直接传单个字符串, 长任务用可读的绝对 spec 路径. 两种调用都可在最后一项参数传 review context.
 - 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录, 禁混入日志、spec 或其他文件. 本轮审核通过、用户完成第二阶段决策或本轮终止后清理该目录; 需保留诊断先向用户说明. 审核入口按「Reviewer 选择」表的隔离参数跑 reviewer, 结束时校验 worktree 未被改动; 禁改其 sandbox、权限或工具参数绕过门禁.
 
 ## 主代理的核实义务
