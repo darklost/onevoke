@@ -272,11 +272,20 @@ class ClaudeReviewGateTest(unittest.TestCase):
         self.assertIn("Use only the Read, Grep, and Glob tools", prompt)
 
     def test_spec_file_is_passed_as_authoritative_context(self) -> None:
-        spec = self.root / "spec.md"
+        spec_dir = self.root / "specs"
+        spec_dir.mkdir()
+        spec = spec_dir / "spec.md"
         spec.write_text("# 任务契约\n", encoding="utf-8")
         result = self.review(str(self.repo), self.base, self.head, "PM", str(spec))
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn(f"Authoritative spec file: {spec}", self.prompt_log.read_text())
+        argv = self.argv_log.read_text(encoding="utf-8").splitlines()
+        allowed_dirs = [
+            argv[index + 1]
+            for index, argument in enumerate(argv)
+            if argument == "--add-dir"
+        ]
+        self.assertIn(str(spec_dir.resolve()), allowed_dirs)
 
 
 if __name__ == "__main__":

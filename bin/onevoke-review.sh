@@ -98,15 +98,19 @@ readonly ROLE
 REVIEW_CONTEXT_TEXT="${REVIEW_CONTEXT:-None provided.}"
 readonly REVIEW_CONTEXT_TEXT
 
+TASK_SPEC_DIR=""
 if [[ "$TASK_INPUT" == /* ]]; then
   [[ -f "$TASK_INPUT" && -r "$TASK_INPUT" ]] ||
     fail "spec path is not a readable file: $TASK_INPUT"
-  TASK_CONTEXT="Authoritative spec file: $TASK_INPUT. Read it completely before reviewing."
+  TASK_SPEC_PATH=$(realpath -- "$TASK_INPUT") ||
+    fail "could not resolve spec path: $TASK_INPUT"
+  TASK_SPEC_DIR=$(dirname "$TASK_SPEC_PATH")
+  TASK_CONTEXT="Authoritative spec file: $TASK_SPEC_PATH. Read it completely before reviewing."
 else
   [[ -n "$TASK_INPUT" ]] || fail "task goal must not be empty"
   TASK_CONTEXT="Authoritative task goal: $TASK_INPUT"
 fi
-readonly TASK_CONTEXT
+readonly TASK_CONTEXT TASK_SPEC_DIR
 
 [[ "$CWD" == /* ]] || fail "CWD must be an absolute path: $CWD"
 [[ "$REVIEW_HOME" == /* ]] ||
@@ -383,6 +387,10 @@ if [[ "$AGENT" == codex ]]; then
     --output-last-message "$OUTPUT_FILE" \
     - <"$PROMPT_FILE" >"$STDOUT_FILE" 2>"$ERROR_FILE" &
 elif [[ "$AGENT" == claude ]]; then
+  CLAUDE_SPEC_ARGS=()
+  if [[ -n "$TASK_SPEC_DIR" ]]; then
+    CLAUDE_SPEC_ARGS=(--add-dir "$TASK_SPEC_DIR")
+  fi
   (
     cd "$RUNTIME_DIR"
     env CLAUDE_CONFIG_DIR="$STATE_ROOT" "$REVIEW_BIN" \
@@ -392,6 +400,7 @@ elif [[ "$AGENT" == claude ]]; then
       --tools "Read,Grep,Glob" \
       --disallowedTools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,TaskOutput,TaskStop,EnterPlanMode,ExitPlanMode,AskUserQuestion" \
       --add-dir "$ROOT" \
+      "${CLAUDE_SPEC_ARGS[@]}" \
       --safe-mode \
       --disable-slash-commands \
       --no-session-persistence \
