@@ -68,6 +68,8 @@ fi
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 bin_dir="$HOME/.local/bin"
 agents_dir="$HOME/.agents"
+legacy_review_commands=
+remove_legacy_reviews=0
 
 # 同名目标若是目录, `install` 会把文件塞进目录而不是覆盖目标, 会形成看似成功的
 # 坏安装. 在写入任何文件前统一拒绝.
@@ -92,6 +94,9 @@ for legacy_command in codex-review.sh claude-review.sh grok-review.sh; do
       printf '%s\n' "error: legacy installation target is a directory: $target" >&2
     fi
     exit 1
+  fi
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    legacy_review_commands="${legacy_review_commands}${legacy_review_commands:+ }$legacy_command"
   fi
 done
 for rule in "$project_dir"/rules/*.md; do
@@ -132,12 +137,53 @@ if [ -d "$share_src" ]; then
   done
 fi
 
+if [ -n "$legacy_review_commands" ]; then
+  if [ "$onevoke_zh" -eq 1 ]; then
+    printf '%s\n' \
+      "检测到已退役的 Reviewer 脚本:" \
+      "  $legacy_review_commands" \
+      "审核入口现已统一为 onevoke-review.sh." \
+      >&2
+    printf '%s' "是否删除这些旧脚本? [y/N] " >&2
+  else
+    printf '%s\n' \
+      "Retired reviewer scripts were detected:" \
+      "  $legacy_review_commands" \
+      "The review entry point is now unified as onevoke-review.sh." \
+      >&2
+    printf '%s' "Delete these legacy scripts? [y/N] " >&2
+  fi
+  legacy_answer=
+  if IFS= read -r legacy_answer; then
+    :
+  fi
+  case "$legacy_answer" in
+    y|Y|yes|YES|Yes|是)
+      remove_legacy_reviews=1
+      ;;
+    *)
+      if [ "$onevoke_zh" -eq 1 ]; then
+        printf '%s\n' "已保留旧 Reviewer 脚本." >&2
+      else
+        printf '%s\n' "Legacy reviewer scripts were kept." >&2
+      fi
+      ;;
+  esac
+fi
+
 mkdir -p "$bin_dir" "$agents_dir"
 
 # bin/ 和 rules/ 都由本仓库拥有, 每次安装直接覆盖.
-for legacy_command in codex-review.sh claude-review.sh grok-review.sh; do
-  rm -f "$bin_dir/$legacy_command"
-done
+if [ "$remove_legacy_reviews" -eq 1 ]; then
+  for legacy_command in $legacy_review_commands; do
+    rm -f "$bin_dir/$legacy_command"
+  done
+  if [ "$onevoke_zh" -eq 1 ]; then
+    printf '%s\n' "已删除旧 Reviewer 脚本." >&2
+  else
+    printf '%s\n' "Legacy reviewer scripts were removed." >&2
+  fi
+fi
 for command in "$project_dir"/bin/*; do
   [ -f "$command" ] || continue
   install -m 0755 "$command" "$bin_dir/$(basename "$command")"

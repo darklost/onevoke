@@ -1027,7 +1027,13 @@ N/A
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("Onevoke installed\n", result.stdout)
         for name in ("codex-review.sh", "claude-review.sh", "grok-review.sh"):
-            self.assertFalse((legacy_bin / name).exists(), name)
+            self.assertEqual(
+                "legacy\n",
+                (legacy_bin / name).read_text(encoding="utf-8"),
+                name,
+            )
+        self.assertIn("检测到已退役的 Reviewer 脚本", result.stderr)
+        self.assertIn("已保留旧 Reviewer 脚本", result.stderr)
 
         command = install_home / ".local" / "bin" / "kanban"
         for source in sorted((PROJECT_ROOT / "bin").iterdir()):
@@ -1066,6 +1072,30 @@ N/A
         )
         self.assertEqual(0, output.returncode, output.stderr)
         self.assertEqual(RULES.read_text(encoding="utf-8"), output.stdout)
+
+    def test_installer_deletes_legacy_review_scripts_after_confirmation(self) -> None:
+        install_home = self.root / "legacy-confirm-home"
+        legacy_bin = install_home / ".local" / "bin"
+        legacy_bin.mkdir(parents=True)
+        names = ("codex-review.sh", "claude-review.sh", "grok-review.sh")
+        for name in names:
+            (legacy_bin / name).write_text("legacy\n", encoding="utf-8")
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            input="y\n",
+            env={**os.environ, "HOME": str(install_home)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertIn("是否删除这些旧脚本", result.stderr)
+        self.assertIn("已删除旧 Reviewer 脚本", result.stderr)
+        for name in names:
+            self.assertFalse((legacy_bin / name).exists(), name)
 
     def test_installer_skips_non_file_rule_matches(self) -> None:
         project = self.root / "installer-project"
