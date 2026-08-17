@@ -233,6 +233,23 @@ class GrokReviewGateTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("QA-1 没有发现问题", result.stdout)
 
+    def test_review_can_be_invoked_through_an_external_symlink(self) -> None:
+        link_dir = self.root / "links"
+        link_dir.mkdir()
+        reviewer = link_dir / REVIEWER.name
+        reviewer.symlink_to(REVIEWER)
+
+        result = subprocess.run(
+            [reviewer, str(self.repo), self.base, self.head, "QA", "确认改动正确"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("REPORT BODY", result.stdout)
+
     def test_incomplete_grok_output_is_rejected(self) -> None:
         result = self.default_review(FAKE_GROK_BAD_OUTPUT="1")
 

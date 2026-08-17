@@ -70,6 +70,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "kanban",
             "codex-review.sh",
             "grok-review.sh",
+            "onevoke-review.sh",
             "merge-worktree-memory.py",
             "codex",
             "claude",
@@ -743,6 +744,25 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("配置的 launcher 是 tmux", result.stderr)
         self.assertIn("welcome --reset", result.stderr)
+
+    def test_doctor_rejects_missing_review_shared_implementation(self) -> None:
+        self.install_fake_environment(tmux=True)
+        (self.fake_bin / "onevoke-review.sh").unlink()
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("wrapper 共用实现不可用", result.stderr)
 
     def test_welcome_reports_single_tmux_session_hint(self) -> None:
         """tmux 已装但当前不在 session 时, welcome/doctor 只给一次准确命令."""

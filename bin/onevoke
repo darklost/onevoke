@@ -365,12 +365,23 @@ def validate_configured_resources(
             )
             continue
         wrapper_name = f"{reviewer}-review.sh"
-        if not shutil.which(wrapper_name):
+        wrapper = shutil.which(wrapper_name)
+        if not wrapper:
             healthy = False
             warning(
                 t(
                     f"配置的 {role} wrapper 不在 PATH: {wrapper_name}; 请把 ~/.local/bin 加入 PATH 或重新安装 Onevoke.",
                     f"Configured {role} wrapper is not in PATH: {wrapper_name}; add ~/.local/bin to PATH or reinstall Onevoke.",
+                )
+            )
+            continue
+        implementation = Path(wrapper).resolve().parent / "onevoke-review.sh"
+        if not implementation.is_file() or not os.access(implementation, os.X_OK):
+            healthy = False
+            warning(
+                t(
+                    f"配置的 {role} wrapper 共用实现不可用: {implementation}; 请重新安装 Onevoke.",
+                    f"Configured {role} wrapper shared implementation is unavailable: {implementation}; reinstall Onevoke.",
                 )
             )
 

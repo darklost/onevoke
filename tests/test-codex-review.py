@@ -230,6 +230,23 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("QA-1 没有发现问题", result.stdout)
 
+    def test_review_can_be_invoked_through_an_external_symlink(self) -> None:
+        link_dir = self.root / "links"
+        link_dir.mkdir()
+        reviewer = link_dir / REVIEWER.name
+        reviewer.symlink_to(REVIEWER)
+
+        result = subprocess.run(
+            [reviewer, str(self.repo), self.base, self.head, "QA", "确认改动正确"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("REPORT BODY", result.stdout)
+
     def test_codex_is_invoked_with_the_isolation_flags(self) -> None:
         self.assertEqual(0, self.default_review().returncode)
 
