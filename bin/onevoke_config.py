@@ -136,10 +136,8 @@ def _validate_choice(value: object, choices: tuple[str, ...], name: str) -> str:
 
 
 def _validate_models(raw: object) -> dict[str, Any]:
-    """校验 models 段; 缺失的层级和字段用默认值补齐, 未知键一律拒绝."""
+    """校验 models 段; 缺失的层级和字段用默认值补齐, 未知键和显式 null 一律拒绝."""
     models = default_models()
-    if raw is None:
-        return models
     if not isinstance(raw, dict):
         raise ConfigError(language_text("models 必须是 JSON object", "models must be a JSON object"))
     unknown = set(raw) - {"kanban", "review"}
@@ -149,9 +147,9 @@ def _validate_models(raw: object) -> dict[str, Any]:
             f"models has unknown keys: {', '.join(sorted(unknown))}",
         ))
     for section, agents in (("kanban", EXECUTION_AGENTS), ("review", REVIEW_AGENTS)):
-        provided = raw.get(section)
-        if provided is None:
+        if section not in raw:
             continue
+        provided = raw[section]
         if not isinstance(provided, dict):
             raise ConfigError(language_text(
                 f"models.{section} 必须是 JSON object", f"models.{section} must be a JSON object"
@@ -182,6 +180,12 @@ def _validate_models(raw: object) -> dict[str, Any]:
                         f"models.{section}.{agent}.{field} must be a "
                         f"{'string' if field == 'model' else 'non-empty string'}",
                     ))
+                # 值会拼进命令行并经 review-model 按行输出, 换行会破坏两行协议.
+                if "\n" in value or "\r" in value:
+                    raise ConfigError(language_text(
+                        f"models.{section}.{agent}.{field} 不得包含换行",
+                        f"models.{section}.{agent}.{field} must not contain line breaks",
+                    ))
                 fields[field] = value
     return models
 
@@ -209,7 +213,7 @@ def validate_config(raw: object) -> dict[str, Any]:
         for role in REVIEW_ROLES
     }
 
-    models = _validate_models(raw.get("models"))
+    models = _validate_models(raw["models"]) if "models" in raw else default_models()
 
     memsearch = raw.get("memsearch")
     if not isinstance(memsearch, dict) or not isinstance(memsearch.get("enabled"), bool):

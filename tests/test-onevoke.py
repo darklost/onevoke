@@ -494,22 +494,32 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(2, rejected.returncode)
 
     def test_config_rejects_invalid_models_section(self) -> None:
-        config = {
+        base = {
             "schema_version": 1,
             "welcome_complete": True,
             "kanban_agent": "codex",
             "launcher": "tmux",
             "reviewers": {role: "codex" for role in ROLES},
-            "models": {"review": {"codex": {"model": "x", "effort": ""}}},
             "memsearch": {"enabled": False},
         }
         self.config.parent.mkdir(parents=True)
-        self.config.write_text(json.dumps(config), encoding="utf-8")
-
-        result = self.run_command("config")
-
-        self.assertEqual(1, result.returncode)
-        self.assertIn("models.review.codex.effort", result.stderr)
+        cases = (
+            ({"review": {"codex": {"model": "x", "effort": ""}}}, "models.review.codex.effort"),
+            ({"review": {"codex": {"model": "a\nb"}}}, "models.review.codex.model"),
+            ({"review": {"codex": {"effort": "hi\rgh"}}}, "models.review.codex.effort"),
+            (None, "models 必须是 JSON object"),
+            ({"review": None}, "models.review 必须是 JSON object"),
+            ({"review": {"other": {}}}, "models.review 含未知 agent"),
+            ({"extra": {}}, "models 含未知键"),
+        )
+        for models, expected in cases:
+            with self.subTest(models=models):
+                self.config.write_text(
+                    json.dumps({**base, "models": models}), encoding="utf-8"
+                )
+                result = self.run_command("config")
+                self.assertEqual(1, result.returncode)
+                self.assertIn(expected, result.stderr)
 
     def test_review_dispatches_role_and_agent_to_shared_entrypoint(self) -> None:
         log = self.root / "review.log"

@@ -77,9 +77,10 @@ CONFIG_MODEL=""
 CONFIG_EFFORT=""
 CONFIG_READ=0
 # 输出固定两行: 第 1 行 model (可为空), 第 2 行 effort. 不用 read 按 tab 拆分,
-# 因为 IFS 空白符会吞掉空 model 产生的行首分隔符.
+# 因为 IFS 空白符会吞掉空 model 产生的行首分隔符. 恰好一个换行才接受,
+# 多于两行说明协议被破坏, 按读取失败回落内置默认.
 if CONFIG_OUTPUT="$(python3 "$SCRIPT_DIR/onevoke_config.py" review-model "$AGENT" 2>/dev/null)" \
-  && [[ "$CONFIG_OUTPUT" == *$'\n'* ]]; then
+  && [[ "$CONFIG_OUTPUT" == *$'\n'* && "${CONFIG_OUTPUT#*$'\n'}" != *$'\n'* ]]; then
   CONFIG_MODEL="${CONFIG_OUTPUT%%$'\n'*}"
   CONFIG_EFFORT="${CONFIG_OUTPUT#*$'\n'}"
   CONFIG_READ=1
