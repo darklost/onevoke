@@ -71,17 +71,26 @@ case "$AGENT" in
 esac
 # 模型与推理档位: 环境变量 > Onevoke 配置 > 内置默认. 配置经 onevoke_config.py 读取,
 # 读取失败 (缺 python3, 配置损坏) 时回落到内置默认, 不阻塞审核.
+# 配置读取成功时空 model 原样生效 (表示用 CLI 默认模型), 不回落内置默认.
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 CONFIG_MODEL=""
 CONFIG_EFFORT=""
+CONFIG_READ=0
 # 输出固定两行: 第 1 行 model (可为空), 第 2 行 effort. 不用 read 按 tab 拆分,
 # 因为 IFS 空白符会吞掉空 model 产生的行首分隔符.
 if CONFIG_OUTPUT="$(python3 "$SCRIPT_DIR/onevoke_config.py" review-model "$AGENT" 2>/dev/null)" \
   && [[ "$CONFIG_OUTPUT" == *$'\n'* ]]; then
   CONFIG_MODEL="${CONFIG_OUTPUT%%$'\n'*}"
   CONFIG_EFFORT="${CONFIG_OUTPUT#*$'\n'}"
+  CONFIG_READ=1
 fi
-MODEL="${MODEL_OVERRIDE:-${CONFIG_MODEL:-$DEFAULT_MODEL}}"
+if [[ -n "$MODEL_OVERRIDE" ]]; then
+  MODEL="$MODEL_OVERRIDE"
+elif ((CONFIG_READ)); then
+  MODEL="$CONFIG_MODEL"
+else
+  MODEL="$DEFAULT_MODEL"
+fi
 REASONING_EFFORT="${EFFORT_OVERRIDE:-${CONFIG_EFFORT:-high}}"
 readonly REVIEWER_NAME CHECK_INTERVAL_SECONDS MAX_RUNTIME_SECONDS REVIEW_BIN MODEL
 readonly REASONING_EFFORT REVIEW_HOME HOME_VARIABLE CHECK_INTERVAL_VARIABLE
@@ -400,10 +409,13 @@ printf '%s\n' "$RULES" >"$PROMPT_FILE"
 : >"$ERROR_FILE"
 
 set -m
+MODEL_ARGS=()
+[[ -z "$MODEL" ]] || MODEL_ARGS=(--model "$MODEL")
+readonly -a MODEL_ARGS
 if [[ "$AGENT" == codex ]]; then
   env CODEX_HOME="$STATE_ROOT" "$REVIEW_BIN" exec \
     --cd "$ROOT" \
-    --model "$MODEL" \
+    "${MODEL_ARGS[@]}" \
     --sandbox read-only \
     --ephemeral \
     --config "model_reasoning_effort=\"$REASONING_EFFORT\"" \
@@ -424,7 +436,7 @@ elif [[ "$AGENT" == claude ]]; then
       --safe-mode \
       --disable-slash-commands \
       --no-session-persistence \
-      --model "$MODEL" \
+      "${MODEL_ARGS[@]}" \
       --effort "$REASONING_EFFORT" \
       <"$PROMPT_FILE" >"$OUTPUT_FILE" 2>"$ERROR_FILE"
   ) &
@@ -433,7 +445,7 @@ else
     env "GROK_HOME=$STATE_ROOT" "$REVIEW_BIN"
     --cwd "$RUNTIME_DIR"
   )
-  [[ -z "$MODEL" ]] || REVIEW_COMMAND+=(--model "$MODEL")
+  REVIEW_COMMAND+=("${MODEL_ARGS[@]}")
   REVIEW_COMMAND+=(
     --effort "$REASONING_EFFORT"
     --output-format json

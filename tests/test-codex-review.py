@@ -321,6 +321,30 @@ class CodexReviewGateTest(unittest.TestCase):
         argv = self.argv_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual("env-model", argv[argv.index("--model") + 1])
 
+    def test_empty_config_model_omits_model_flag(self) -> None:
+        """配置里的空 model 表示用 CLI 默认模型, 不回落 Onevoke 内置默认."""
+        Path(self.env["ONEVOKE_CONFIG"]).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "codex",
+                    "launcher": "tmux",
+                    "reviewers": {
+                        role: "codex" for role in ("PM", "CSA", "Hacker", "QA")
+                    },
+                    "models": {"review": {"codex": {"model": ""}}},
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(0, self.default_review().returncode)
+        argv = self.argv_log.read_text(encoding="utf-8").splitlines()
+        self.assertNotIn("--model", argv)
+        self.assertIn('model_reasoning_effort="high"', argv)
+
     def test_prompt_carries_role_task_and_scope(self) -> None:
         self.assertEqual(0, self.default_review().returncode)
 
