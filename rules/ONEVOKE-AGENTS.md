@@ -27,10 +27,8 @@
 
 ### 分支
 
-- 仓库固定两条长期分支: `main` 稳定分支, `develop` 集成分支. 不使用其他长期分支模型.
-- 唯一集成分支是 `develop`. 任务分支从最新 `origin/develop` 切, 完成后合回 `develop`.
+- 分支模型与初始化机制见 `~/.agents/GIT-RULES.md`「分支与 worktree」: 固定 `main` + `develop`, 缺 `develop` 时自动初始化, 没有 `main` 时停止并报告.
 - `main` 只从 `develop` 前进, 且必须用户明确确认. Agent 不自动推 `main`.
-- 仓库有 `main` 但没有 `develop` 时, Agent 按 `~/.agents/GIT-RULES.md` 从最新 `main` 自动初始化 `develop`, 不询问分支选择, 不回落到其他分支. 没有 `main` 时停止并报告.
 
 ### Reviewer
 

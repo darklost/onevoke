@@ -1,6 +1,6 @@
 # Git 工作流规则
 
-本文件是 `~/.agents/BASE-RULES.md`「Git 工作流」的完整契约, 装在 `~/.agents/GIT-RULES.md`. 优先级: 当前任务明确用户指令 > 项目级 `AGENTS.md` 或 `CLAUDE.md` > `~/.agents/ONEVOKE-AGENTS.md`「默认取值」 > 本文件.
+本文件是 `~/.agents/BASE-RULES.md`「Git 工作流」的完整契约, 装在 `~/.agents/GIT-RULES.md`. 优先级见 `~/.agents/ONEVOKE-AGENTS.md`「优先级」.
 
 本文件只适用 Git 仓库. 非 Git 目录无分支, worktree, 审核, 集成, 直接改文件.
 
@@ -10,8 +10,11 @@
 - 初始化分支时, 有 `origin` 就先 fetch 并要求 `origin/main` 存在. `origin/develop` 不存在时: 本地也没有 `develop` 就从最新 `origin/main` 创建; 本地已有 `develop` 就先确认 `origin/main` 是它的祖先; 通过后普通 push 到 `origin/develop`, 不通过则停止并报告. 无 `origin` 或用户明确要求仅本地时, 要求本地 `main` 存在; 本地 `develop` 不存在时从 `main` 创建. `main` 不存在时停止并报告, 不猜测替代分支, 不重写历史.
 - 除下述 Markdown 直改路径外, 所有改文件任务都用独立任务分支和 `<仓库根目录>/worktrees/<task-name>/` 专用 worktree. `<task-name>` 同分支名, 短 kebab-case; 任务分支不得是 `develop` 或 detached `HEAD`. 已在当前任务专用 worktree 和任务分支时直接复用.
 - 有 `origin` 且用户未要求仅本地集成时, 先 fetch, 再基于最新 `origin/develop` 建任务分支; fetch 失败则停止创建并报告. 无 `origin` 或用户明确要求仅本地集成时, 基于本地 `develop` 建任务分支, 报告未同步远端.
-- Markdown 直改路径须同时满足: 任务只改 Markdown 文件; 当前分支是 `develop` 或用户明确指定目标分支; 任务开始时工作树无未提交或未跟踪文件. 任一不满足用专用 worktree.
-- Markdown 直改分支有 upstream 且用户未要求仅本地集成时, 改前必须 fetch 并 fast-forward, 确认 `HEAD` 等于 upstream. 本地领先, 分叉或无法同步时改用专用 worktree.
+## Markdown 直改路径
+
+- 须同时满足: 任务只改 Markdown 文件; 当前分支是 `develop` 或用户明确指定目标分支; 任务开始时工作树无未提交或未跟踪文件. 任一不满足用专用 worktree.
+- 有 upstream 且用户未要求仅本地集成时, 改前必须 fetch 并 fast-forward, 确认 `HEAD` 等于 upstream. 本地领先, 分叉或无法同步时改用专用 worktree.
+- 先完成验证和必要审核再普通 push; 此路径不走「集成与清理」流程. 审核 base 为改前 `HEAD`, 见 `~/.agents/REVIEW-RULES.md`.
 
 ## 本地改动保护
 
@@ -23,7 +26,6 @@
 
 - 每个已完成并通过对应验证的独立关注点单独提交, 不混无关改动. 提交 subject 默认中文动宾短语, 如 "修复登录竞态"; 项目规则另有格式从项目规则.
 - 专用任务分支有可写 `origin` 且用户未要求仅本地集成时, 每个关注点提交后普通 push, 首次用 `git push -u origin <branch>`.
-- Markdown 直改路径先完成验证和必要审核再普通 push; 此路径不走「集成与清理」流程.
 - 用户要求 push 时, 检查全部未提交和未 push 状态, 但只提交当前任务明确授权的改动, 保留并报告其他用户改动.
 - 无 `origin` 或用户明确要求仅本地集成时, 保留本地提交, 跳过 push 并报告. 有 `origin` 但无法访问, 不可写或用户禁 push, 且用户未要求仅本地集成时, 保留任务分支和 worktree, 报告后停止集成.
 - push 因 non-fast-forward 被拒时, 先 fetch 查远端改动, rebase 后重新验证, 审核按本文件「审核」确定的分册处理. 专用任务分支随后可用 `--force-with-lease`; Markdown 直改分支仍普通 push; `main` 和 `develop` 永不 force-push. 其他拒绝按项目 PR 流程处理, 无适用流程则停止并报告.
