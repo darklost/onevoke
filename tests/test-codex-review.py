@@ -321,6 +321,25 @@ class CodexReviewGateTest(unittest.TestCase):
         argv = self.argv_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual("env-model", argv[argv.index("--model") + 1])
 
+    def test_malformed_review_model_output_falls_back_to_builtin_default(self) -> None:
+        """配置查询输出不是恰好两行时按读取失败处理, 回落内置默认."""
+        fake_bin = self.root / "fake-python-bin"
+        fake_bin.mkdir()
+        fake_python = fake_bin / "python3"
+        fake_python.write_text(
+            "#!/bin/sh\nprintf 'cfg-model\\nmedium\\n\\n'\n", encoding="utf-8"
+        )
+        fake_python.chmod(0o755)
+
+        result = self.default_review(
+            PATH=f"{fake_bin}{os.pathsep}{self.env['PATH']}"
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        argv = self.argv_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual("gpt-5.6-sol", argv[argv.index("--model") + 1])
+        self.assertIn('model_reasoning_effort="high"', argv)
+
     def test_empty_config_model_omits_model_flag(self) -> None:
         """配置里的空 model 表示用 CLI 默认模型, 不回落 Onevoke 内置默认."""
         Path(self.env["ONEVOKE_CONFIG"]).write_text(

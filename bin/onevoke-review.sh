@@ -77,13 +77,17 @@ CONFIG_MODEL=""
 CONFIG_EFFORT=""
 CONFIG_READ=0
 # 输出固定两行: 第 1 行 model (可为空), 第 2 行 effort. 不用 read 按 tab 拆分,
-# 因为 IFS 空白符会吞掉空 model 产生的行首分隔符. 恰好一个换行才接受,
-# 多于两行说明协议被破坏, 按读取失败回落内置默认.
-if CONFIG_OUTPUT="$(python3 "$SCRIPT_DIR/onevoke_config.py" review-model "$AGENT" 2>/dev/null)" \
-  && [[ "$CONFIG_OUTPUT" == *$'\n'* && "${CONFIG_OUTPUT#*$'\n'}" != *$'\n'* ]]; then
-  CONFIG_MODEL="${CONFIG_OUTPUT%%$'\n'*}"
-  CONFIG_EFFORT="${CONFIG_OUTPUT#*$'\n'}"
-  CONFIG_READ=1
+# 因为 IFS 空白符会吞掉空 model 产生的行首分隔符. 末尾拼哨兵字符保留尾部换行,
+# 严格要求恰好两个以换行结尾的行, 否则按读取失败回落内置默认.
+if CONFIG_OUTPUT="$(python3 "$SCRIPT_DIR/onevoke_config.py" review-model "$AGENT" 2>/dev/null && printf x)"; then
+  CONFIG_OUTPUT="${CONFIG_OUTPUT%x}"
+  CONFIG_REST="${CONFIG_OUTPUT#*$'\n'}"
+  if [[ "$CONFIG_OUTPUT" == *$'\n'* && "$CONFIG_REST" == *$'\n' \
+    && "${CONFIG_REST%$'\n'}" != *$'\n'* ]]; then
+    CONFIG_MODEL="${CONFIG_OUTPUT%%$'\n'*}"
+    CONFIG_EFFORT="${CONFIG_REST%$'\n'}"
+    CONFIG_READ=1
+  fi
 fi
 if [[ -n "$MODEL_OVERRIDE" ]]; then
   MODEL="$MODEL_OVERRIDE"
