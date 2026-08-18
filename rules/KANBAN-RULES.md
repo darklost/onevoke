@@ -35,16 +35,9 @@ kanban check
 kanban web [--host HOST] [--port PORT] [--refresh SECONDS] [--assets DIR] [--open]
 ```
 
-- `init` 幂等创建看板和 6 个状态目录; Git 项目只写本地 `.git/info/exclude`; 最后输出全局规则路径. `rules` 输出该规则, 不要求已有看板.
-- `list` 按状态分组, 组内按显示时间倒序; 同时或缺失时按任务 ID 倒序. 默认输出彩色表格并标出规模; `--mobile` 输出竖屏布局. `working` 显示开始时间, `done` 显示完成时间; 旧卡缺完成时间时用任务文档最后修改时间.
-- `new` 在 `backlog/` 创建小任务; `--large` 创建含 `spec.md` 的大任务目录.
-- `pick` 执行 `backlog -> todo` 及完整性校验; 不给 ID 时只列候选. `move` 只执行「状态模型」允许且满足目标要求的迁移.
-- `start` 只接受 `todo` 卡片. 它原子执行 `todo -> working`, 写负责人和开始时间, 再启动执行 Agent.
-- `start` 的 Agent 默认取 Onevoke 配置 `kanban_agent`, welcome 未完成时回落到 Codex; `--agent` 只覆盖本次. 大任务用 Codex `gpt-5.6-sol/high` 或 Claude `opus/high`, 小任务用对应 `medium`; Grok 不锁模型, 大任务 `--effort xhigh`, 小任务 `--effort high`.
-- `start` 默认使用 Agent 的免确认模式. launcher 默认取 Onevoke 配置, `--launcher` 只覆盖本次. 两种模式的 cwd 都是项目根: `tmux` 只在当前 session 建 `kb-<任务标题>` window, 不建 session; `foreground` 要求三个标准流都是 TTY 并等待 Agent 退出.
-- `check` 列出全部无效入口并以非零退出. 其他命令忽略无关的无效入口, 只在目标任务违规时失败; 状态目录缺失或不可写时全部失败.
-- `web` 启动只读 Web UI, 默认监听 `127.0.0.1:8080`. `--host` / `--port` 可覆盖监听地址; `--refresh` 控制服务端扫描秒数, 默认 60; `--assets` 覆盖资源目录; `--open` 尝试打开浏览器. UI 用 Python 标准库模板渲染; 服务端仅在任务数据变化时通过 SSE 推送, 客户端按任务 ID 原位更新看板; 不提供创建, 迁移或启动 Agent.
-- 命令只做结构和机械校验; 授权, 依赖, 验收和终止理由由 Agent 按本文件判断.
+- `start` 的 Agent 和 launcher 默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式.
+- `check` 列出全部无效入口并以非零退出. `web` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
+- 命令只做结构和机械校验; 授权, 依赖, 验收和终止理由由 Agent 按本文件判断. 各命令的详细行为契约随实现维护在 Onevoke 仓库的开发规则中.
 
 ## 状态模型
 
