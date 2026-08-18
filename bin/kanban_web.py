@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import queue
 import re
 import socket
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -67,8 +69,14 @@ def json_bytes(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def board_fingerprint(payload: dict) -> str:
+    stable = {key: value for key, value in payload.items() if key != "generated_at"}
+    return json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 class KanbanWebHandler(BaseHTTPRequestHandler):
     server_version = "KanbanWeb/1.0"
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return
@@ -104,7 +112,10 @@ class KanbanWebHandler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.OK, body, "text/html; charset=utf-8")
                 return
             if path == "/api/board":
-                self._send_json(HTTPStatus.OK, self.server.get_board())
+                self._send_json(HTTPStatus.OK, self.server.current_board())
+                return
+            if path == "/api/events":
+                self._serve_events()
                 return
             match = re.fullmatch(r"/api/tasks/([^/]+)", path)
             if match:
@@ -120,10 +131,40 @@ class KanbanWebHandler(BaseHTTPRequestHandler):
         except FileNotFoundError as error:
             self._send_error_message(HTTPStatus.NOT_FOUND, str(error))
             return
-        except Exception as error:  # noqa: BLE001 - keep the server alive for UI polls
+        except Exception as error:  # noqa: BLE001 - keep the server alive for later requests
             self._send_error_message(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
             return
         self._send_error_message(HTTPStatus.NOT_FOUND, "not found")
+
+    def _serve_events(self) -> None:
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+
+        subscriber = self.server.subscribe()
+        try:
+            while not self.server.monitor_stopped():
+                try:
+                    event_name, revision, payload = subscriber.get(timeout=15)
+                    data = json_bytes(payload).decode("utf-8")
+                    message = (
+                        f"id: {revision}\n"
+                        f"event: {event_name}\n"
+                        f"data: {data}\n\n"
+                    ).encode("utf-8")
+                except queue.Empty:
+                    message = b": keep-alive\n\n"
+                self.wfile.write(message)
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            self.server.unsubscribe(subscriber)
 
     def _serve_static(self, relative: str) -> None:
         if not relative or Path(relative).name != relative or ".." in relative:
@@ -144,6 +185,7 @@ class KanbanWebHandler(BaseHTTPRequestHandler):
 
 class KanbanWebServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
 
     def __init__(
         self,
@@ -152,12 +194,118 @@ class KanbanWebServer(ThreadingHTTPServer):
         page_context: dict,
         get_board: BoardPayload,
         get_task: TaskPayload,
+        scan_interval: int = 60,
     ) -> None:
+        if scan_interval < 1:
+            raise KanbanWebError("scan interval must be >= 1 second")
         super().__init__(server_address, KanbanWebHandler)
         self.share_dir = share_dir
         self.page_context = page_context
         self.get_board = get_board
         self.get_task = get_task
+        self.scan_interval = scan_interval
+        self._board_payload: Optional[dict] = None
+        self._board_error: Optional[str] = None
+        self._state_key: Optional[tuple[str, str]] = None
+        self._revision = 0
+        self._subscribers: set[queue.Queue] = set()
+        self._state_lock = threading.Lock()
+        self._monitor_stop = threading.Event()
+        self._monitor_thread: Optional[threading.Thread] = None
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        self._refresh_board(force=True)
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_board,
+            name="kanban-web-monitor",
+            daemon=True,
+        )
+        self._monitor_thread.start()
+        try:
+            super().serve_forever(poll_interval=poll_interval)
+        finally:
+            self._monitor_stop.set()
+            self._monitor_thread.join(timeout=1)
+
+    def _monitor_board(self) -> None:
+        while not self._monitor_stop.wait(self.scan_interval):
+            self._refresh_board()
+
+    def _refresh_board(self, *, force: bool = False) -> None:
+        try:
+            payload = self.get_board()
+            state_key = ("board", board_fingerprint(payload))
+            event_name = "board"
+        except Exception as error:  # noqa: BLE001 - publish scan failures to clients
+            payload = {"error": str(error)}
+            state_key = ("board-error", str(error))
+            event_name = "board-error"
+
+        with self._state_lock:
+            changed = force or state_key != self._state_key
+            self._state_key = state_key
+            if event_name == "board":
+                self._board_payload = payload
+                self._board_error = None
+            else:
+                self._board_error = payload["error"]
+            if not changed:
+                return
+            self._revision += 1
+            revision = self._revision
+            subscribers = tuple(self._subscribers)
+
+        for subscriber in subscribers:
+            self._enqueue(subscriber, event_name, revision, payload)
+
+    @staticmethod
+    def _enqueue(
+        subscriber: queue.Queue,
+        event_name: str,
+        revision: int,
+        payload: dict,
+    ) -> None:
+        item = (event_name, revision, payload)
+        try:
+            subscriber.put_nowait(item)
+        except queue.Full:
+            try:
+                subscriber.get_nowait()
+            except queue.Empty:
+                pass
+            subscriber.put_nowait(item)
+
+    def subscribe(self) -> queue.Queue:
+        subscriber: queue.Queue = queue.Queue(maxsize=1)
+        with self._state_lock:
+            revision = self._revision
+            if self._board_error is not None:
+                initial = ("board-error", revision, {"error": self._board_error})
+            elif self._board_payload is not None:
+                initial = ("board", revision, self._board_payload)
+            else:
+                initial = None
+            if initial is not None:
+                self._enqueue(subscriber, *initial)
+            self._subscribers.add(subscriber)
+        return subscriber
+
+    def unsubscribe(self, subscriber: queue.Queue) -> None:
+        with self._state_lock:
+            self._subscribers.discard(subscriber)
+
+    def current_board(self) -> dict:
+        with self._state_lock:
+            error = self._board_error
+            payload = self._board_payload
+        if error is not None:
+            raise KanbanWebError(error)
+        if payload is None:
+            raise KanbanWebError("board data is not available")
+        return payload
+
+    def monitor_stopped(self) -> bool:
+        return self._monitor_stop.is_set()
 
 
 def validate_bind(host: str, port: int) -> None:
@@ -175,12 +323,20 @@ def serve(
     page_context: dict,
     get_board: BoardPayload,
     get_task: TaskPayload,
+    scan_interval: int = 60,
     open_browser: bool = False,
 ) -> None:
     validate_bind(host, port)
     share_dir = resolve_share_dir(share_dir)
     try:
-        server = KanbanWebServer((host, port), share_dir, page_context, get_board, get_task)
+        server = KanbanWebServer(
+            (host, port),
+            share_dir,
+            page_context,
+            get_board,
+            get_task,
+            scan_interval=scan_interval,
+        )
     except OSError as error:
         raise KanbanWebError(f"failed to bind {host}:{port}: {error}") from error
     display_host = "localhost" if host in {"0.0.0.0", "::", "[::]"} else host

@@ -1433,8 +1433,63 @@ N/A
         self.assertIn("--host", help_text)
         self.assertIn("--port", help_text)
         self.assertIn("--refresh", help_text)
+        self.assertIn("默认 60", help_text)
         bad = self.run_command("web", "--refresh", "0", succeeds=False)
-        self.assertIn("刷新间隔", bad.stderr)
+        self.assertIn("扫描间隔", bad.stderr)
+
+    def test_web_sse_only_publishes_content_changes(self) -> None:
+        import queue
+
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_web
+        finally:
+            sys.path.pop(0)
+
+        state = {"generated": 0, "title": "first"}
+
+        def get_board():
+            state["generated"] += 1
+            return {
+                "generated_at": str(state["generated"]),
+                "tasks": [{"task_id": "task", "title": state["title"]}],
+            }
+
+        server = kanban_web.KanbanWebServer(
+            ("127.0.0.1", 0),
+            PROJECT_ROOT / "share" / "kanban-web",
+            {},
+            get_board,
+            lambda _task_id: {},
+        )
+        subscriber = None
+        try:
+            server._refresh_board(force=True)
+            subscriber = server.subscribe()
+            event_name, revision, initial = subscriber.get_nowait()
+            self.assertEqual(("board", 1, "first"), (
+                event_name,
+                revision,
+                initial["tasks"][0]["title"],
+            ))
+
+            server._refresh_board()
+            self.assertEqual("2", server.current_board()["generated_at"])
+            with self.assertRaises(queue.Empty):
+                subscriber.get_nowait()
+
+            state["title"] = "second"
+            server._refresh_board()
+            event_name, revision, changed = subscriber.get_nowait()
+            self.assertEqual(("board", 2, "second"), (
+                event_name,
+                revision,
+                changed["tasks"][0]["title"],
+            ))
+        finally:
+            if subscriber is not None:
+                server.unsubscribe(subscriber)
+            server.server_close()
 
     def test_web_serves_board_and_refreshes_task_state(self) -> None:
         import json
@@ -1443,6 +1498,24 @@ N/A
         import time
         import urllib.error
         import urllib.request
+
+        def read_sse_event(response):
+            event_name = ""
+            data_lines = []
+            while True:
+                raw_line = response.readline()
+                self.assertTrue(raw_line, "SSE stream closed before an event")
+                line = raw_line.decode("utf-8").rstrip("\r\n")
+                if not line:
+                    if data_lines:
+                        return event_name, json.loads("\n".join(data_lines))
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event_name = line.partition(":")[2].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line.partition(":")[2].lstrip())
 
         task_id, _path = self.make_todo("web-board")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -1487,14 +1560,17 @@ N/A
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
                 html = response.read().decode("utf-8")
             self.assertIn("任务看板", html)
-            self.assertIn("refreshMs: 1000", html)
+            self.assertIn("SSE", html)
 
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/static/board.js", timeout=2
             ) as response:
                 script = response.read().decode("utf-8")
             self.assertIn("/api/board", script)
-            self.assertIn("setInterval", script)
+            self.assertIn('new EventSource("/api/events")', script)
+            self.assertIn("insertBefore", script)
+            self.assertNotIn("boardEl.innerHTML", script)
+            self.assertNotIn("setInterval", script)
             self.assertIn("KanbanMarkdown.renderMarkdown", script)
 
             with urllib.request.urlopen(
@@ -1513,31 +1589,42 @@ N/A
             self.assertEqual(task_id, payload["tasks"][0]["task_id"])
             self.assertEqual("todo", payload["tasks"][0]["state"])
 
-            self.run_command("move", task_id, "working")
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/board", timeout=2) as response:
-                refreshed = json.loads(response.read().decode("utf-8"))
-            self.assertEqual("working", refreshed["tasks"][0]["state"])
-
             with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/tasks/{task_id}", timeout=2
-            ) as response:
-                detail = json.loads(response.read().decode("utf-8"))
-            self.assertEqual(task_id, detail["task_id"])
-            self.assertIn("# ", detail["document"])
+                f"http://127.0.0.1:{port}/api/events", timeout=4
+            ) as events:
+                event_name, initial = read_sse_event(events)
+                self.assertEqual("board", event_name)
+                self.assertEqual("todo", initial["tasks"][0]["state"])
 
-            task_path = self.root / "working" / f"{task_id}.md"
-            task_path.write_bytes(b"\xff")
-            with self.assertRaises(urllib.error.HTTPError) as caught:
-                urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/api/board", timeout=2
-                )
-            error_response = caught.exception
-            try:
-                self.assertEqual(400, error_response.code)
-                error_payload = json.loads(error_response.read().decode("utf-8"))
-                self.assertIn("UTF-8", error_payload["error"])
-            finally:
-                error_response.close()
+                self.run_command("move", task_id, "working")
+                event_name, refreshed = read_sse_event(events)
+                self.assertEqual("board", event_name)
+                self.assertEqual("working", refreshed["tasks"][0]["state"])
+
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/tasks/{task_id}", timeout=2
+                ) as response:
+                    detail = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(task_id, detail["task_id"])
+                self.assertIn("# ", detail["document"])
+
+                task_path = self.root / "working" / f"{task_id}.md"
+                task_path.write_bytes(b"\xff")
+                event_name, error_event = read_sse_event(events)
+                self.assertEqual("board-error", event_name)
+                self.assertIn("UTF-8", error_event["error"])
+
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/api/board", timeout=2
+                    )
+                error_response = caught.exception
+                try:
+                    self.assertEqual(400, error_response.code)
+                    error_payload = json.loads(error_response.read().decode("utf-8"))
+                    self.assertIn("UTF-8", error_payload["error"])
+                finally:
+                    error_response.close()
         finally:
             process.send_signal(signal.SIGINT)
             try:

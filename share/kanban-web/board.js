@@ -19,16 +19,9 @@
 
   let tasks = [];
   let showArchived = false;
-  let timer = null;
-
-  function escapeHtml(value) {
-    return String(value)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
+  let eventSource = null;
+  const cards = new Map();
+  const columns = new Map();
 
   function statusLabel(state) {
     return (config.statusLabels && config.statusLabels[state]) || state;
@@ -68,59 +61,154 @@
     });
   }
 
-  function renderCard(task) {
-    const assignee = task.assignee || config.unassignedLabel || "";
-    const badges = [
-      `<span class="badge type">${escapeHtml(task.type || "-")}</span>`,
-      `<span class="badge ${task.kind === "large" ? "large" : "secondary"}">${escapeHtml(sizeLabel(task.kind))}</span>`,
-    ];
-    if (task.state === "working" || task.state === "done" || task.state === "archived" || task.state === "trash") {
-      badges.push(
-        `<span class="badge ${escapeHtml(task.state)}">${escapeHtml(statusLabel(task.state))}</span>`,
-      );
+  function makeElement(tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) {
+      element.className = className;
     }
-    return `
-      <button type="button" class="task-card" data-task-id="${escapeHtml(task.task_id)}">
-        <p class="task-title">${escapeHtml(task.title)}</p>
-        <p class="task-id">${escapeHtml(task.task_id)}</p>
-        <div class="task-meta">
-          <div class="task-badges">${badges.join("")}</div>
-          <span class="task-assignee">${escapeHtml(assignee)}</span>
-        </div>
-        <div class="task-footer">
-          <span class="task-time">${escapeHtml(task.time || "-")}</span>
-        </div>
-      </button>
-    `;
+    if (text !== undefined) {
+      element.textContent = text;
+    }
+    return element;
   }
 
-  function renderBoard() {
-    const grouped = Object.fromEntries(ALL_STATES.map((state) => [state, []]));
-    for (const task of filteredTasks()) {
-      if (grouped[task.state]) {
-        grouped[task.state].push(task);
+  function createCard(task) {
+    const card = makeElement("button", "task-card");
+    card.type = "button";
+    card.dataset.taskId = task.task_id;
+    card.append(makeElement("p", "task-title"), makeElement("p", "task-id"));
+
+    const meta = makeElement("div", "task-meta");
+    const badges = makeElement("div", "task-badges");
+    badges.append(
+      makeElement("span", "badge type"),
+      makeElement("span", "badge task-size"),
+      makeElement("span", "badge task-state"),
+    );
+    meta.append(badges, makeElement("span", "task-assignee"));
+    card.append(meta);
+
+    const footer = makeElement("div", "task-footer");
+    footer.append(makeElement("span", "task-time"));
+    card.append(footer);
+    updateCard(card, task);
+    return card;
+  }
+
+  function updateCard(card, task) {
+    card.dataset.state = task.state;
+    card.querySelector(".task-title").textContent = task.title;
+    card.querySelector(".task-id").textContent = task.task_id;
+    card.querySelector(".badge.type").textContent = task.type || "-";
+
+    const sizeBadge = card.querySelector(".task-size");
+    sizeBadge.className = `badge task-size ${task.kind === "large" ? "large" : "secondary"}`;
+    sizeBadge.textContent = sizeLabel(task.kind);
+
+    const stateBadge = card.querySelector(".task-state");
+    const showState = ["working", "done", "archived", "trash"].includes(task.state);
+    stateBadge.className = `badge task-state ${task.state}`;
+    stateBadge.textContent = statusLabel(task.state);
+    stateBadge.hidden = !showState;
+
+    card.querySelector(".task-assignee").textContent =
+      task.assignee || config.unassignedLabel || "";
+    card.querySelector(".task-time").textContent = task.time || "-";
+  }
+
+  function ensureBoardStructure() {
+    for (const state of ALL_STATES) {
+      const section = makeElement("section", "column");
+      section.dataset.testid = `task-column-${state}`;
+      section.dataset.state = state;
+
+      const header = makeElement("div", "column-header");
+      header.append(
+        makeElement("h2", "", statusLabel(state)),
+        makeElement("span", "column-count", cardCount(0)),
+      );
+
+      const body = makeElement("div", "column-body");
+      const empty = makeElement("p", "column-empty", config.emptyLabel || "");
+      body.append(empty);
+      section.append(header, body);
+      boardEl.append(section);
+      columns.set(state, {
+        section,
+        body,
+        count: header.querySelector(".column-count"),
+        empty,
+      });
+    }
+  }
+
+  function orderColumnCards(state, orderedCards) {
+    const { body, empty } = columns.get(state);
+    let cursor = body.firstElementChild;
+    for (const card of orderedCards) {
+      if (card === cursor) {
+        cursor = cursor.nextElementSibling;
+        continue;
+      }
+      body.insertBefore(card, cursor || empty);
+    }
+  }
+
+  function patchBoard(nextTasks) {
+    const nextIds = new Set(nextTasks.map((task) => task.task_id));
+    for (const [taskId, card] of cards) {
+      if (!nextIds.has(taskId)) {
+        card.remove();
+        cards.delete(taskId);
       }
     }
-    const states = visibleStates();
-    boardEl.dataset.columns = String(states.length);
-    boardEl.innerHTML = states
-      .map((state) => {
-        const items = grouped[state] || [];
-        const body =
-          items.length === 0
-            ? `<p class="column-empty">${escapeHtml(config.emptyLabel || "")}</p>`
-            : items.map(renderCard).join("");
-        return `
-          <section class="column" data-testid="task-column-${escapeHtml(state)}">
-            <div class="column-header">
-              <h2>${escapeHtml(statusLabel(state))}</h2>
-              <span class="column-count">${escapeHtml(cardCount(items.length))}</span>
-            </div>
-            <div class="column-body">${body}</div>
-          </section>
-        `;
-      })
-      .join("");
+
+    const grouped = Object.fromEntries(ALL_STATES.map((state) => [state, []]));
+    for (const task of nextTasks) {
+      const column = columns.get(task.state);
+      if (!column) {
+        continue;
+      }
+      let card = cards.get(task.task_id);
+      if (!card) {
+        card = createCard(task);
+        cards.set(task.task_id, card);
+      } else {
+        updateCard(card, task);
+      }
+      if (card.parentElement !== column.body) {
+        column.body.insertBefore(card, column.empty);
+      }
+      grouped[task.state].push(card);
+    }
+    for (const state of ALL_STATES) {
+      orderColumnCards(state, grouped[state]);
+    }
+    tasks = nextTasks;
+    applyFilters();
+  }
+
+  function applyFilters() {
+    const visibleIds = new Set(filteredTasks().map((task) => task.task_id));
+    const counts = Object.fromEntries(ALL_STATES.map((state) => [state, 0]));
+    for (const task of tasks) {
+      const card = cards.get(task.task_id);
+      if (!card) {
+        continue;
+      }
+      card.hidden = !visibleIds.has(task.task_id);
+      if (!card.hidden) {
+        counts[task.state] += 1;
+      }
+    }
+    for (const state of ALL_STATES) {
+      const column = columns.get(state);
+      const stateVisible = showArchived || !["archived", "trash"].includes(state);
+      column.section.hidden = !stateVisible;
+      column.count.textContent = cardCount(counts[state]);
+      column.empty.hidden = counts[state] !== 0;
+    }
+    boardEl.dataset.columns = String(visibleStates().length);
   }
 
   function setError(message) {
@@ -143,16 +231,21 @@
         throw new Error(`HTTP ${response.status}`);
       }
       const payload = await response.json();
-      tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
-      clearError();
-      renderBoard();
-      const stamp = payload.generated_at || new Date().toISOString();
-      refreshStatusEl.textContent = `${config.updatedLabel || "updated"} ${stamp}`;
+      applyBoardPayload(payload);
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     } finally {
       boardEl.setAttribute("aria-busy", "false");
     }
+  }
+
+  function applyBoardPayload(payload) {
+    const nextTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+    patchBoard(nextTasks);
+    clearError();
+    const stamp = payload.generated_at || new Date().toISOString();
+    refreshStatusEl.textContent = `${config.updatedLabel || "updated"} ${stamp}`;
+    boardEl.setAttribute("aria-busy", "false");
   }
 
   async function openTask(taskId) {
@@ -186,14 +279,35 @@
       : config.showArchivedLabel;
   }
 
-  function scheduleRefresh() {
-    if (timer !== null) {
-      window.clearInterval(timer);
-    }
-    const refreshMs = Number(config.refreshMs) || 5000;
-    timer = window.setInterval(() => {
+  function connectEvents() {
+    if (!window.EventSource) {
       void loadBoard();
-    }, refreshMs);
+      return;
+    }
+    if (eventSource !== null) {
+      eventSource.close();
+    }
+    eventSource = new EventSource("/api/events");
+    eventSource.addEventListener("board", (event) => {
+      try {
+        applyBoardPayload(JSON.parse(event.data));
+      } catch (error) {
+        setError(error instanceof Error ? error.message : String(error));
+      }
+    });
+    eventSource.addEventListener("board-error", (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        setError(payload.error || config.errorLabel || "");
+      } catch (error) {
+        setError(error instanceof Error ? error.message : String(error));
+      }
+    });
+    eventSource.onerror = () => {
+      if (tasks.length === 0) {
+        setError(config.errorLabel || "");
+      }
+    };
   }
 
   boardEl.addEventListener("click", (event) => {
@@ -207,20 +321,21 @@
   });
 
   keywordEl.addEventListener("input", () => {
-    renderBoard();
+    applyFilters();
   });
 
   toggleArchivedEl.addEventListener("click", () => {
     showArchived = !showArchived;
     syncArchiveToggle();
-    renderBoard();
+    applyFilters();
   });
 
   retryEl.addEventListener("click", () => {
     void loadBoard();
   });
 
+  ensureBoardStructure();
   syncArchiveToggle();
-  void loadBoard();
-  scheduleRefresh();
+  applyFilters();
+  connectEvents();
 })();

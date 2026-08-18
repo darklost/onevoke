@@ -1057,14 +1057,14 @@ def web_task_payload(root: Path, task_id: str) -> dict:
     return payload
 
 
-def web_page_context(refresh_seconds: int) -> dict:
+def web_page_context() -> dict:
     lang = "cn" if t("任务看板", "Task Board") == "任务看板" else "en"
     return {
         "lang": lang,
         "title": t("任务看板", "Task Board"),
         "description": t(
-            "只读查看本机文件看板; 任务状态会定时刷新.",
-            "Read-only view of the local file kanban; task status refreshes on a timer.",
+            "只读查看本机文件看板; 任务变化通过 SSE 推送.",
+            "Read-only view of the local file kanban; task changes are pushed over SSE.",
         ),
         "keyword_placeholder": t("搜索标题或任务 ID", "Search title or task ID"),
         "show_archived": t("显示已存档", "Show archived"),
@@ -1073,7 +1073,6 @@ def web_page_context(refresh_seconds: int) -> dict:
         "load_failed_description": t("看板数据加载失败.", "Board data failed to load."),
         "retry": t("重试", "Retry"),
         "close": t("关闭", "Close"),
-        "refresh_ms": str(max(1, refresh_seconds) * 1000),
         "show_archived_json": json.dumps(t("显示已存档", "Show archived"), ensure_ascii=False),
         "show_active_json": json.dumps(t("显示活跃", "Show active"), ensure_ascii=False),
         "empty_json": json.dumps(t("暂无任务", "No tasks"), ensure_ascii=False),
@@ -1087,9 +1086,9 @@ def web_page_context(refresh_seconds: int) -> dict:
 
 
 def command_web(args: argparse.Namespace, root: Path) -> None:
-    refresh = args.refresh
-    if refresh < 1:
-        raise KanbanError(t("刷新间隔必须 >= 1 秒", "refresh interval must be >= 1 second"))
+    scan_interval = args.refresh
+    if scan_interval < 1:
+        raise KanbanError(t("扫描间隔必须 >= 1 秒", "scan interval must be >= 1 second"))
     share = Path(args.assets).expanduser() if args.assets else None
     try:
         share_dir = kanban_web.resolve_share_dir(share)
@@ -1120,9 +1119,10 @@ def command_web(args: argparse.Namespace, root: Path) -> None:
             host=args.host,
             port=args.port,
             share_dir=share_dir,
-            page_context=web_page_context(refresh),
+            page_context=web_page_context(),
             get_board=get_board,
             get_task=get_task,
+            scan_interval=scan_interval,
             open_browser=args.open,
         )
     except kanban_web.KanbanWebError as error:
@@ -1207,9 +1207,9 @@ def parser() -> argparse.ArgumentParser:
     web_parser.add_argument(
         "--refresh",
         type=int,
-        default=5,
+        default=60,
         metavar=t("秒", "seconds"),
-        help=t("前端刷新间隔秒数, 默认 5", "frontend refresh interval in seconds; default 5"),
+        help=t("服务端任务扫描间隔秒数, 默认 60", "server task scan interval in seconds; default 60"),
     )
     web_parser.add_argument(
         "--assets",
