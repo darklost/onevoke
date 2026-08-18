@@ -73,6 +73,8 @@ class ClaudeReviewGateTest(unittest.TestCase):
         self.env.update(
             GIT_CEILING_DIRECTORIES=str(self.root),
             TMPDIR=str(self.tmp),
+            # 隔离 Onevoke 配置, 避免读到本机真实模型设置.
+            ONEVOKE_CONFIG=str(self.root / "onevoke-config.json"),
             CLAUDE_CONFIG_DIR=str(self.claude_home),
             CLAUDE_REVIEW_BIN=str(self.fake_claude),
             CLAUDE_REVIEW_CHECK_INTERVAL_SECONDS="1",

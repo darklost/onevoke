@@ -430,6 +430,36 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
     return selected == "yes"
 
 
+def ask_text(prompt: str, default: str) -> str:
+    shown = default if default else t("(空, 用 CLI 默认)", "(empty; CLI default)")
+    print(f"\n{color('1;36', prompt)} [{shown}]: ", end="", file=sys.stderr, flush=True)
+    answer = sys.stdin.readline()
+    if not answer:
+        raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed"))
+    answer = answer.strip()
+    return answer if answer else default
+
+
+def configure_models(config: dict[str, Any]) -> None:
+    """按需修改模型与推理档位; 只询问本次配置实际用到的 Agent."""
+    if not ask_yes_no(
+        t("是否调整模型与推理档位? (默认沿用当前配置)", "Adjust models and reasoning efforts? (defaults keep current values)"),
+        default=False,
+    ):
+        return
+    kanban_agent = config["kanban_agent"]
+    entry = config["models"]["kanban"][kanban_agent]
+    label = AGENT_LABELS[kanban_agent]
+    entry["model"] = ask_text(t(f"kanban 任务 {label} 用什么模型?", f"Which model should {label} use for kanban tasks?"), entry["model"])
+    entry["large_effort"] = ask_text(t("大任务推理档位?", "Reasoning effort for large tasks?"), entry["large_effort"])
+    entry["small_effort"] = ask_text(t("小任务推理档位?", "Reasoning effort for small tasks?"), entry["small_effort"])
+    for reviewer in dict.fromkeys(config["reviewers"].values()):
+        entry = config["models"]["review"][reviewer]
+        label = AGENT_LABELS[reviewer]
+        entry["model"] = ask_text(t(f"审核 {label} 用什么模型?", f"Which model should {label} use for reviews?"), entry["model"])
+        entry["effort"] = ask_text(t(f"审核 {label} 的推理档位?", f"Reasoning effort for {label} reviews?"), entry["effort"])
+
+
 def install_memsearch_for(agent: str) -> None:
     if agent == "claude":
         print(
@@ -513,6 +543,10 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         )
 
     config = default_config()
+    config["models"] = {
+        section: {agent: dict(entry) for agent, entry in agents.items()}
+        for section, agents in existing["models"].items()
+    }
     config["kanban_agent"] = ask_choice(
         t("kanban 默认用哪个 Agent 执行任务?", "Which Agent should kanban use by default?"),
         execution_choices,
@@ -558,6 +592,8 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
             config["launcher"] = "foreground"
             print(t("已选择当前终端前台运行模式.", "Selected foreground mode in this terminal."), file=sys.stderr)
 
+    configure_models(config)
+
     selected_agent = config["kanban_agent"]
     integrated, detail = rules_integration(selected_agent)
     if integrated:
@@ -580,8 +616,17 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
     print(t("\n配置摘要:", "\nConfiguration summary:"), file=sys.stderr)
     print(f"  {t('执行 Agent', 'Execution Agent')}: {config['kanban_agent']}", file=sys.stderr)
     print(f"  {t('启动方式', 'Launcher')}: {config['launcher']}", file=sys.stderr)
+    kanban_entry = config["models"]["kanban"][config["kanban_agent"]]
+    print(
+        f"  {t('任务模型', 'Task model')}: {kanban_entry['model'] or t('(CLI 默认)', '(CLI default)')}"
+        f" ({t('大', 'large')} {kanban_entry['large_effort']} / {t('小', 'small')} {kanban_entry['small_effort']})",
+        file=sys.stderr,
+    )
     for role in REVIEW_ROLES:
-        print(f"  {role}: {config['reviewers'][role]}", file=sys.stderr)
+        reviewer = config["reviewers"][role]
+        review_entry = config["models"]["review"][reviewer]
+        model = review_entry["model"] or t("(CLI 默认)", "(CLI default)")
+        print(f"  {role}: {reviewer} {model} ({review_entry['effort']})", file=sys.stderr)
     print(f"  MemSearch: {t('启用', 'enabled') if config['memsearch']['enabled'] else t('未启用', 'disabled')}", file=sys.stderr)
     print(
         color("1;33", t(
@@ -654,8 +699,17 @@ def print_config(config: dict[str, Any]) -> None:
     print(f"welcome: {status}")
     print(f"kanban agent: {effective['kanban_agent']}")
     print(f"launcher: {effective['launcher']}")
+    kanban_entry = effective["models"]["kanban"][effective["kanban_agent"]]
+    kanban_model = kanban_entry["model"] or t("(CLI 默认)", "(CLI default)")
+    print(
+        f"kanban model: {kanban_model}"
+        f" (large {kanban_entry['large_effort']} / small {kanban_entry['small_effort']})"
+    )
     for role in REVIEW_ROLES:
-        print(f"{role}: {effective['reviewers'][role]}")
+        reviewer = effective["reviewers"][role]
+        review_entry = effective["models"]["review"][reviewer]
+        model = review_entry["model"] or t("(CLI 默认)", "(CLI default)")
+        print(f"{role}: {reviewer} {model} ({review_entry['effort']})")
     print(f"MemSearch: {t('启用', 'enabled') if effective['memsearch']['enabled'] else t('未启用', 'disabled')}")
 
 

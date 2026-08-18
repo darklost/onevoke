@@ -35,7 +35,7 @@ kanban check
 kanban web [--host HOST] [--port PORT] [--refresh SECONDS] [--assets DIR] [--open]
 ```
 
-- `start` 的 Agent 和 launcher 默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式.
+- `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式.
 - `check` 列出全部无效入口并以非零退出. `web` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
 - 命令只做结构和机械校验; 授权, 依赖, 验收和终止理由由 Agent 按本文件判断. 各命令的详细行为契约随实现维护在 Onevoke 仓库的开发规则中.
 

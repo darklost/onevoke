@@ -1,7 +1,7 @@
 # Onevoke 全局工作流规则
 
 - 规则集入口, 装在 `~/.agents/ONEVOKE-AGENTS.md`. 只放分册索引, 优先级和少量默认取值; 通用条款在 `~/.agents/BASE-RULES.md`.
-- 安装器每次用当前模板覆盖本文件和全部分册. 本机的执行 Agent、launcher 和各审核角色选择保存在 `~/.config/onevoke/config.json`, 用 `onevoke config` 查看, 用 `onevoke welcome --reset` 修改.
+- 安装器每次用当前模板覆盖本文件和全部分册. 本机的执行 Agent、launcher、各审核角色及各 Agent 的模型档位保存在 `~/.config/onevoke/config.json`, 用 `onevoke config` 查看, 用 `onevoke welcome --reset` 修改.
 - `~/.agents/AGENTS.md` 不存在时, 安装器将其符号链接到本文件; 已有同名入口时保持不变.
 
 ## 分册
@@ -27,7 +27,7 @@
 
 ### 分支
 
-- 分支模型与初始化机制见 `~/.agents/GIT-RULES.md`「分支与 worktree」: 固定 `main` + `develop`, 缺 `develop` 时自动初始化, 没有 `main` 时停止并报告.
+- 分支模型与初始化机制见 `~/.agents/GIT-RULES.md`「分支与 worktree」: 固定 `main` + `develop`, 不使用其他长期分支模型; 缺 `develop` 时自动初始化, 没有 `main` 时停止并报告.
 - `main` 只从 `develop` 前进, 且必须用户明确确认. Agent 不自动推 `main`.
 
 ### Reviewer

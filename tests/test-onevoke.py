@@ -212,7 +212,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.env["ONEVOKE_LANG"] = "en"
 
         returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n2\n1\n1\n", "welcome"
+            "1\n1\n1\n1\n1\n2\n2\n1\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -235,9 +235,9 @@ class OnevokeCommandTest(unittest.TestCase):
         self.install_fake_environment(tmux=False)
 
         # Codex 执行; PM/CSA/Hacker/QA 依次选 Claude/Grok/Codex/Claude;
-        # 拒绝安装 tmux; 选择使用 MemSearch; 最后确认保存.
+        # 拒绝安装 tmux; 跳过模型调整; 选择使用 MemSearch; 最后确认保存.
         returncode, output = self.run_on_tty(
-            "1\n2\n3\n1\n2\n2\n1\n1\n", "welcome"
+            "1\n2\n3\n1\n2\n2\n2\n1\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -260,7 +260,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
     def test_welcome_colors_question_titles_and_honors_no_color(self) -> None:
         self.install_fake_environment(tmux=True)
-        answers = "1\n1\n1\n1\n1\n1\n2\n1\n"
+        answers = "1\n1\n1\n1\n1\n1\n2\n2\n1\n"
         prompts = (
             "kanban 默认用哪个 Agent 执行任务?",
             "PM 使用哪个 Reviewer?",
@@ -268,6 +268,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "Hacker 使用哪个 Reviewer?",
             "QA 使用哪个 Reviewer?",
             "kanban start 使用哪种启动方式?",
+            "是否调整模型与推理档位? (默认沿用当前配置)",
             "是否使用 MemSearch?",
             "保存以上配置?",
         )
@@ -307,9 +308,9 @@ class OnevokeCommandTest(unittest.TestCase):
             "/bin/cp \"$TMUX_TEMPLATE\" \"$FAKE_BIN/tmux\"\n",
         )
 
-        # Codex 执行和四个 Reviewer; 同意安装 tmux; 不使用 MemSearch; 保存.
+        # Codex 执行和四个 Reviewer; 同意安装 tmux; 跳过模型调整; 不使用 MemSearch; 保存.
         returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n2\n1\n", "welcome"
+            "1\n1\n1\n1\n1\n1\n2\n2\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -339,7 +340,7 @@ class OnevokeCommandTest(unittest.TestCase):
         _, bash_log = self.install_fake_memsearch_tools(git_exit=1)
 
         returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+            "1\n1\n1\n1\n1\n1\n2\n1\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -356,7 +357,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.env["ONEVOKE_MEMSEARCH_SOURCE"] = str(blocked_parent / "memsearch")
 
         returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n1\n1\n", "welcome"
+            "1\n1\n1\n1\n1\n1\n2\n1\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -415,14 +416,100 @@ class OnevokeCommandTest(unittest.TestCase):
         )
         before = self.config.read_bytes()
 
-        # 重选所有项目, 不使用 MemSearch, 最后拒绝保存.
+        # 重选所有项目, 跳过模型调整, 不使用 MemSearch, 最后拒绝保存.
         returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n2\n2\n", "welcome", "--reset"
+            "1\n1\n1\n1\n1\n1\n2\n2\n2\n", "welcome", "--reset"
         )
 
         self.assertEqual(1, returncode, output)
         self.assertIn("用户取消, 配置未更改", output)
         self.assertEqual(before, self.config.read_bytes())
+
+    def test_welcome_customizes_models_only_for_agents_in_use(self) -> None:
+        self.install_fake_environment(tmux=True)
+
+        # Codex 执行与四个 Reviewer; tmux 启动; 调整模型: kanban 模型 gpt-7,
+        # 大档位回车沿用默认, 小档位 low; 审核模型 gpt-7-mini, 档位回车沿用;
+        # 不使用 MemSearch; 保存.
+        returncode, output = self.run_on_tty(
+            "1\n1\n1\n1\n1\n1\n1\ngpt-7\n\nlow\ngpt-7-mini\n\n2\n1\n", "welcome"
+        )
+
+        self.assertEqual(0, returncode, output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {"model": "gpt-7", "large_effort": "high", "small_effort": "low"},
+            config["models"]["kanban"]["codex"],
+        )
+        self.assertEqual(
+            {"model": "gpt-7-mini", "effort": "high"},
+            config["models"]["review"]["codex"],
+        )
+        # 未被本次配置使用的 Agent 保持默认, 不被询问.
+        self.assertEqual(
+            {"model": "", "large_effort": "xhigh", "small_effort": "high"},
+            config["models"]["kanban"]["grok"],
+        )
+        self.assertNotIn("审核 Grok", output)
+
+    def test_config_cli_prints_review_model_from_effective_config(self) -> None:
+        config_module = str(PROJECT_ROOT / "bin" / "onevoke_config.py")
+
+        def query(agent: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [sys.executable, config_module, "review-model", agent],
+                env=self.env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        missing = query("codex")
+        self.assertEqual(0, missing.returncode, missing.stderr)
+        self.assertEqual("gpt-5.6-sol\nhigh", missing.stdout.strip("\n"))
+
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "models": {"review": {"codex": {"model": "custom-model", "effort": "medium"}}},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        custom = query("codex")
+        self.assertEqual(0, custom.returncode, custom.stderr)
+        self.assertEqual("custom-model\nmedium", custom.stdout.strip("\n"))
+        # 空 model 输出空首行; 未覆盖的 agent 仍用默认.
+        self.assertEqual("\nhigh", query("grok").stdout.rstrip("\n"))
+        self.assertEqual("opus\nhigh", query("claude").stdout.strip("\n"))
+        config["welcome_complete"] = False
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        self.assertEqual("gpt-5.6-sol\nhigh", query("codex").stdout.strip("\n"))
+
+        rejected = query("other")
+        self.assertEqual(2, rejected.returncode)
+
+    def test_config_rejects_invalid_models_section(self) -> None:
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "models": {"review": {"codex": {"model": "x", "effort": ""}}},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("config")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("models.review.codex.effort", result.stderr)
 
     def test_review_dispatches_role_and_agent_to_shared_entrypoint(self) -> None:
         log = self.root / "review.log"
@@ -521,8 +608,8 @@ class OnevokeCommandTest(unittest.TestCase):
         self.fake_command("claude", "#!/bin/sh\nexit 1\n")
         # Only grok reports a version; four reviewers must also be usable.
 
-        # 仅 Grok 可用: 执行 1; 四个 Reviewer 各 1; 拒绝装 tmux 2; 保存 1.
-        returncode, output = self.run_on_tty("1\n1\n1\n1\n1\n2\n1\n", "welcome")
+        # 仅 Grok 可用: 执行 1; 四个 Reviewer 各 1; 拒绝装 tmux 2; 跳过模型 2; 保存 1.
+        returncode, output = self.run_on_tty("1\n1\n1\n1\n1\n2\n2\n1\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("--version 失败", output)
@@ -777,9 +864,9 @@ class OnevokeCommandTest(unittest.TestCase):
         self.install_fake_environment(tmux=True)
         self.env.pop("TMUX", None)
 
-        # agent + 4 reviewers + launcher + MemSearch + save.
+        # agent + 4 reviewers + launcher + 跳过模型 + MemSearch + save.
         returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n2\n1\n", "welcome"
+            "1\n1\n1\n1\n1\n1\n2\n2\n1\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)

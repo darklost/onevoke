@@ -854,28 +854,23 @@ def window_name(entry: Entry, text: str) -> str:
     return f"kb-{label}"[:50]
 
 
-def task_effort(agent: str, kind: str) -> str:
-    """按 Agent 和任务规模选推理强度. Grok 的档位比 Codex/Claude 高一档."""
-    if agent == "grok":
-        return "xhigh" if kind == "large" else "high"
-    return "high" if kind == "large" else "medium"
-
-
-def agent_command(agent: str, binary: str, effort: str) -> list[str]:
-    """拼 Agent 的 YOLO 启动参数. Grok 不锁模型, 只按任务规模传 --effort."""
+def agent_command(agent: str, binary: str, model_entry: Dict[str, str], kind: str) -> list[str]:
+    """按 Onevoke 配置的模型档位拼 Agent 的 YOLO 启动参数. model 为空时用 CLI 默认模型."""
+    model = model_entry["model"]
+    effort = model_entry["large_effort" if kind == "large" else "small_effort"]
+    model_args = ["--model", model] if model else []
     if agent == "codex":
         return [
             binary,
-            "--model",
-            "gpt-5.6-sol",
+            *model_args,
             "--config",
             f'model_reasoning_effort="{effort}"',
             "--dangerously-bypass-approvals-and-sandbox",
         ]
     if agent == "claude":
-        return [binary, "--model", "opus", "--effort", effort, "--dangerously-skip-permissions"]
+        return [binary, *model_args, "--effort", effort, "--dangerously-skip-permissions"]
     if agent == "grok":
-        return [binary, "--effort", effort, "--permission-mode", "bypassPermissions"]
+        return [binary, *model_args, "--effort", effort, "--permission-mode", "bypassPermissions"]
     raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
 
 
@@ -909,8 +904,8 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
     )
     name = window_name(entry, original)
-    effort = task_effort(agent_name, entry.kind)
-    agent_argv = [*agent_command(agent_name, agent, effort), prompt]
+    model_entry = config["models"]["kanban"][agent_name]
+    agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind), prompt]
     try:
         write_text_atomic(moved.document, updated, entry=moved)
         if launcher == "tmux":

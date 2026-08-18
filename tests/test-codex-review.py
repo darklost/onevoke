@@ -7,6 +7,7 @@ Codex CLI 用假二进制替代: 门禁的价值在于「不满足前置条件�
 外加一条放行路径确认传给 Codex 的隔离参数没有丢.
 """
 
+import json
 import os
 import subprocess
 import tempfile
@@ -75,6 +76,8 @@ class CodexReviewGateTest(unittest.TestCase):
             # 用例走进别的分支. 限制向上搜索范围.
             GIT_CEILING_DIRECTORIES=str(self.root),
             TMPDIR=str(self.tmp),
+            # 隔离 Onevoke 配置, 避免读到本机真实模型设置.
+            ONEVOKE_CONFIG=str(self.root / "onevoke-config.json"),
             CODEX_HOME=str(self.codex_home),
             CODEX_REVIEW_BIN=str(self.fake_codex),
             CODEX_REVIEW_CHECK_INTERVAL_SECONDS="1",
@@ -287,6 +290,36 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertIn("--ephemeral", argv)
         self.assertEqual(str(self.repo_real), argv[argv.index("--cd") + 1])
         self.assertIn("--model", argv)
+
+    def test_model_config_is_read_and_env_still_overrides(self) -> None:
+        Path(self.env["ONEVOKE_CONFIG"]).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "codex",
+                    "launcher": "tmux",
+                    "reviewers": {
+                        role: "codex" for role in ("PM", "CSA", "Hacker", "QA")
+                    },
+                    "models": {
+                        "review": {"codex": {"model": "config-model", "effort": "medium"}}
+                    },
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(0, self.default_review().returncode)
+        argv = self.argv_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual("config-model", argv[argv.index("--model") + 1])
+        self.assertIn('model_reasoning_effort="medium"', argv)
+
+        result = self.default_review(CODEX_REVIEW_MODEL="env-model")
+        self.assertEqual(0, result.returncode, result.stderr)
+        argv = self.argv_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual("env-model", argv[argv.index("--model") + 1])
 
     def test_prompt_carries_role_task_and_scope(self) -> None:
         self.assertEqual(0, self.default_review().returncode)

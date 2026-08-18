@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,17 @@ REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 LAUNCHERS = ("tmux", "foreground")
 LANGUAGES = ("cn", "en")
+# model 允许空字符串, 表示用对应 CLI 自己的默认模型.
+KANBAN_MODEL_DEFAULTS = {
+    "codex": {"model": "gpt-5.6-sol", "large_effort": "high", "small_effort": "medium"},
+    "claude": {"model": "opus", "large_effort": "high", "small_effort": "medium"},
+    "grok": {"model": "", "large_effort": "xhigh", "small_effort": "high"},
+}
+REVIEW_MODEL_DEFAULTS = {
+    "codex": {"model": "gpt-5.6-sol", "effort": "high"},
+    "claude": {"model": "opus", "effort": "high"},
+    "grok": {"model": "", "effort": "high"},
+}
 ARGPARSE_ZH = {
     "usage: ": "用法: ",
     "positional arguments": "位置参数",
@@ -92,6 +104,13 @@ def config_path() -> Path:
     return Path.home() / ".config" / "onevoke" / "config.json"
 
 
+def default_models() -> dict[str, Any]:
+    return {
+        "kanban": {agent: dict(entry) for agent, entry in KANBAN_MODEL_DEFAULTS.items()},
+        "review": {agent: dict(entry) for agent, entry in REVIEW_MODEL_DEFAULTS.items()},
+    }
+
+
 def default_config() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -99,6 +118,7 @@ def default_config() -> dict[str, Any]:
         "kanban_agent": "codex",
         "launcher": "tmux",
         "reviewers": {role: "codex" for role in REVIEW_ROLES},
+        "models": default_models(),
         "memsearch": {"enabled": False},
     }
 
@@ -113,6 +133,57 @@ def _validate_choice(value: object, choices: tuple[str, ...], name: str) -> str:
             )
         )
     return value
+
+
+def _validate_models(raw: object) -> dict[str, Any]:
+    """校验 models 段; 缺失的层级和字段用默认值补齐, 未知键一律拒绝."""
+    models = default_models()
+    if raw is None:
+        return models
+    if not isinstance(raw, dict):
+        raise ConfigError(language_text("models 必须是 JSON object", "models must be a JSON object"))
+    unknown = set(raw) - {"kanban", "review"}
+    if unknown:
+        raise ConfigError(language_text(
+            f"models 含未知键: {', '.join(sorted(unknown))}",
+            f"models has unknown keys: {', '.join(sorted(unknown))}",
+        ))
+    for section, agents in (("kanban", EXECUTION_AGENTS), ("review", REVIEW_AGENTS)):
+        provided = raw.get(section)
+        if provided is None:
+            continue
+        if not isinstance(provided, dict):
+            raise ConfigError(language_text(
+                f"models.{section} 必须是 JSON object", f"models.{section} must be a JSON object"
+            ))
+        unknown = set(provided) - set(agents)
+        if unknown:
+            raise ConfigError(language_text(
+                f"models.{section} 含未知 agent: {', '.join(sorted(unknown))}",
+                f"models.{section} has unknown agents: {', '.join(sorted(unknown))}",
+            ))
+        for agent, entry in provided.items():
+            if not isinstance(entry, dict):
+                raise ConfigError(language_text(
+                    f"models.{section}.{agent} 必须是 JSON object",
+                    f"models.{section}.{agent} must be a JSON object",
+                ))
+            fields = models[section][agent]
+            unknown = set(entry) - set(fields)
+            if unknown:
+                raise ConfigError(language_text(
+                    f"models.{section}.{agent} 含未知字段: {', '.join(sorted(unknown))}",
+                    f"models.{section}.{agent} has unknown fields: {', '.join(sorted(unknown))}",
+                ))
+            for field, value in entry.items():
+                if not isinstance(value, str) or (field != "model" and not value.strip()):
+                    raise ConfigError(language_text(
+                        f"models.{section}.{agent}.{field} 必须是{'字符串' if field == 'model' else '非空字符串'}",
+                        f"models.{section}.{agent}.{field} must be a "
+                        f"{'string' if field == 'model' else 'non-empty string'}",
+                    ))
+                fields[field] = value
+    return models
 
 
 def validate_config(raw: object) -> dict[str, Any]:
@@ -138,6 +209,8 @@ def validate_config(raw: object) -> dict[str, Any]:
         for role in REVIEW_ROLES
     }
 
+    models = _validate_models(raw.get("models"))
+
     memsearch = raw.get("memsearch")
     if not isinstance(memsearch, dict) or not isinstance(memsearch.get("enabled"), bool):
         raise ConfigError(language_text("memsearch.enabled 必须是 boolean", "memsearch.enabled must be a boolean"))
@@ -148,6 +221,7 @@ def validate_config(raw: object) -> dict[str, Any]:
         "kanban_agent": kanban_agent,
         "launcher": launcher,
         "reviewers": validated_reviewers,
+        "models": models,
         "memsearch": {"enabled": memsearch["enabled"]},
     }
 
@@ -195,3 +269,28 @@ def save_config(config: dict[str, Any]) -> Path:
         temporary.unlink(missing_ok=True)
         raise
     return path
+
+
+def main(argv: list[str]) -> int:
+    """查询入口, 目前只供 onevoke-review.sh 读取 review 模型配置."""
+    apply_language_argument(argv)
+    parser = LocalizedArgumentParser(prog="onevoke_config.py")
+    commands = parser.add_subparsers(dest="command", required=True)
+    review = commands.add_parser(
+        "review-model",
+        help=language_text("输出两行: <model> 与 <effort>", "print two lines: <model> and <effort>"),
+    )
+    review.add_argument("agent", choices=REVIEW_AGENTS)
+    args = parser.parse_args(argv)
+    entry = effective_config()["models"]["review"][args.agent]
+    print(entry["model"])
+    print(entry["effort"])
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except ConfigError as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)

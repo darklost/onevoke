@@ -165,28 +165,31 @@ printf '%s\\n' '@9'
         self.assertEqual("ok: 0 tasks\n", checked.stdout)
 
     def write_onevoke_config(
-        self, agent: str, launcher: str, *, welcome_complete: bool = True
+        self,
+        agent: str,
+        launcher: str,
+        *,
+        welcome_complete: bool = True,
+        models: Optional[dict] = None,
     ) -> None:
         config = self.home / ".config" / "onevoke" / "config.json"
         config.parent.mkdir(parents=True)
-        config.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "welcome_complete": welcome_complete,
-                    "kanban_agent": agent,
-                    "launcher": launcher,
-                    "reviewers": {
-                        "PM": "codex",
-                        "CSA": "codex",
-                        "Hacker": "codex",
-                        "QA": "codex",
-                    },
-                    "memsearch": {"enabled": False},
-                }
-            ),
-            encoding="utf-8",
-        )
+        payload = {
+            "schema_version": 1,
+            "welcome_complete": welcome_complete,
+            "kanban_agent": agent,
+            "launcher": launcher,
+            "reviewers": {
+                "PM": "codex",
+                "CSA": "codex",
+                "Hacker": "codex",
+                "QA": "codex",
+            },
+            "memsearch": {"enabled": False},
+        }
+        if models is not None:
+            payload["models"] = models
+        config.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_small_and_large_lifecycle(self) -> None:
         today = datetime.now().strftime("%Y%m%d")
@@ -507,6 +510,38 @@ printf '%s\\n' '@9'
         self.assertNotIn("--effort xhigh", command)
         self.assertIn("--permission-mode bypassPermissions", command)
         self.assertIn(task_id, command)
+
+    def test_start_uses_configured_models_and_efforts(self) -> None:
+        task_id, _ = self.make_todo("custom-model")
+        self.install_fake_launchers()
+        self.write_onevoke_config(
+            "codex",
+            "tmux",
+            models={"kanban": {"codex": {"model": "gpt-7", "small_effort": "low"}}},
+        )
+
+        self.run_command("start", task_id)
+
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn("--model gpt-7", command)
+        self.assertIn('model_reasoning_effort="low"', command)
+        self.assertNotIn("gpt-5.6-sol", command)
+
+    def test_start_omits_model_argument_when_config_model_is_empty(self) -> None:
+        task_id, _ = self.make_todo("empty-model")
+        self.install_fake_launchers()
+        self.write_onevoke_config(
+            "claude",
+            "tmux",
+            models={"kanban": {"claude": {"model": ""}}},
+        )
+
+        self.run_command("start", task_id)
+
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertNotIn("--model", command)
+        self.assertIn("--effort medium", command)
+        self.assertIn("--dangerously-skip-permissions", command)
 
     def test_start_uses_the_configured_default_agent(self) -> None:
         task_id, _ = self.make_todo("configured-agent")
