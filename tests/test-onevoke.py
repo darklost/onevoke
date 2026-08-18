@@ -507,6 +507,8 @@ class OnevokeCommandTest(unittest.TestCase):
             ({"review": {"codex": {"model": "x", "effort": ""}}}, "models.review.codex.effort"),
             ({"review": {"codex": {"model": "a\nb"}}}, "models.review.codex.model"),
             ({"review": {"codex": {"effort": "hi\rgh"}}}, "models.review.codex.effort"),
+            ({"review": {"codex": {"model": "a\x00b"}}}, "models.review.codex.model"),
+            ({"kanban": {"codex": {"large_effort": "hi\x00gh"}}}, "models.kanban.codex.large_effort"),
             (None, "models 必须是 JSON object"),
             ({"review": None}, "models.review 必须是 JSON object"),
             ({"review": {"other": {}}}, "models.review 含未知 agent"),

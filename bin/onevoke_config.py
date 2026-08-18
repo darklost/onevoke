@@ -180,11 +180,12 @@ def _validate_models(raw: object) -> dict[str, Any]:
                         f"models.{section}.{agent}.{field} must be a "
                         f"{'string' if field == 'model' else 'non-empty string'}",
                     ))
-                # 值会拼进命令行并经 review-model 按行输出, 换行会破坏两行协议.
-                if "\n" in value or "\r" in value:
+                # 值会拼进命令行并经 review-model 按行输出: 换行破坏两行协议,
+                # NUL 使 subprocess 参数直接抛 ValueError.
+                if any(banned in value for banned in ("\n", "\r", "\x00")):
                     raise ConfigError(language_text(
-                        f"models.{section}.{agent}.{field} 不得包含换行",
-                        f"models.{section}.{agent}.{field} must not contain line breaks",
+                        f"models.{section}.{agent}.{field} 不得包含换行或 NUL 字符",
+                        f"models.{section}.{agent}.{field} must not contain line breaks or NUL",
                     ))
                 fields[field] = value
     return models
