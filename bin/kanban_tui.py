@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import curses
+import locale
+import os
 import sys
 import time
 import unicodedata
@@ -11,7 +13,36 @@ from typing import Optional
 
 ACTIVE_STATES = ("backlog", "todo", "working", "done")
 ALL_STATES = ACTIVE_STATES + ("archived", "trash")
-CARD_HEIGHT = 4
+CARD_HEIGHT = 5
+
+FANCY_GLYPHS = {"vbar": "│", "bar": "▎", "hbar": "─", "left": "‹", "right": "›"}
+ASCII_GLYPHS = {"vbar": "|", "bar": ">", "hbar": "-", "left": "<", "right": ">"}
+
+THEMES = ("auto", "light", "dark")
+
+THEME_PALETTES = {
+    "dark": {
+        "text": curses.COLOR_WHITE,
+        "backlog": curses.COLOR_WHITE,
+        "todo": curses.COLOR_YELLOW,
+        "working": curses.COLOR_CYAN,
+        "done": curses.COLOR_GREEN,
+        "archived": curses.COLOR_BLUE,
+        "trash": curses.COLOR_RED,
+        "accent": curses.COLOR_MAGENTA,
+    },
+    "light": {
+        "text": curses.COLOR_BLACK,
+        "backlog": curses.COLOR_BLACK,
+        "todo": curses.COLOR_YELLOW,
+        "working": curses.COLOR_BLUE,
+        "done": curses.COLOR_GREEN,
+        "archived": curses.COLOR_MAGENTA,
+        "trash": curses.COLOR_RED,
+        "accent": curses.COLOR_MAGENTA,
+    },
+}
+THEME_BACKGROUNDS = {"light": curses.COLOR_WHITE, "dark": curses.COLOR_BLACK}
 
 
 class KanbanTuiError(Exception):
@@ -213,10 +244,13 @@ class KanbanTui:
         context: dict,
         get_board: Callable[[], dict],
         get_task: Callable[[str], dict],
+        theme: str = "auto",
     ) -> None:
         self.screen = screen
         self.model = BoardModel(single=single)
         self.refresh_interval = refresh_interval
+        self.theme = theme
+        self.has_colors = False
         self.context = context
         self.get_board = get_board
         self.get_task = get_task
@@ -225,8 +259,11 @@ class KanbanTui:
         self.detail_scroll = 0
         self.last_refresh = time.monotonic()
         self.running = True
+        self.colors: dict[str, int] = {}
+        self.glyphs = dict(ASCII_GLYPHS)
 
     def run(self, initial_board: dict) -> None:
+        self._init_style()
         self.model.set_board(initial_board)
         self.screen.keypad(True)
         self.screen.timeout(200)
@@ -247,6 +284,55 @@ class KanbanTui:
                 self._handle_search_key(key)
             else:
                 self._handle_board_key(key)
+
+    def _init_style(self) -> None:
+        encoding = getattr(self.screen, "encoding", "") or "ascii"
+        try:
+            for glyph in FANCY_GLYPHS.values():
+                glyph.encode(encoding)
+        except (UnicodeEncodeError, LookupError):
+            pass
+        else:
+            self.glyphs = dict(FANCY_GLYPHS)
+        try:
+            self.has_colors = curses.has_colors()
+            if self.has_colors:
+                curses.use_default_colors()
+        except curses.error:
+            self.has_colors = False
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        self.colors = {}
+        if not self.has_colors:
+            return
+        if self.theme == "auto":
+            light_background = (
+                os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1] in {"7", "15"}
+            )
+            palette = THEME_PALETTES["light" if light_background else "dark"]
+            background = -1
+        else:
+            palette = THEME_PALETTES[self.theme]
+            background = THEME_BACKGROUNDS[self.theme]
+        for index, name in enumerate(
+            ("text", "backlog", "todo", "working", "done", "archived", "trash", "accent"),
+            start=1,
+        ):
+            try:
+                curses.init_pair(index, palette[name], background)
+            except curses.error:
+                continue
+            self.colors[name] = curses.color_pair(index)
+        self.colors["id"] = self.colors.get("working", 0)
+        self.colors["group"] = self.colors.get("todo", 0)
+        self.colors["error"] = self.colors.get("trash", 0)
+        try:
+            self.screen.bkgd(
+                " ", 0 if self.theme == "auto" else self.colors.get("text", 0)
+            )
+        except curses.error:
+            pass
 
     def _set_cursor(self, visible: bool) -> None:
         try:
@@ -272,6 +358,10 @@ class KanbanTui:
         except Exception as error:
             self.model.detail_error = str(error)
 
+    def _page_size(self) -> int:
+        # 与 _render_column 的卡片容量保持一致: body_top=4, 页脚占 1 行.
+        return max(1, (self.screen.getmaxyx()[0] - 4) // CARD_HEIGHT)
+
     def _handle_board_key(self, key) -> None:
         if key in ("q", "Q"):
             self.running = False
@@ -283,6 +373,10 @@ class KanbanTui:
             self.model.move_task(-1)
         elif key in (curses.KEY_DOWN, "j", "J"):
             self.model.move_task(1)
+        elif key == curses.KEY_PPAGE:
+            self.model.move_task(-self._page_size())
+        elif key == curses.KEY_NPAGE:
+            self.model.move_task(self._page_size())
         elif key == curses.KEY_HOME:
             self.model.move_task(-len(self.model.tasks))
         elif key == curses.KEY_END:
@@ -292,6 +386,9 @@ class KanbanTui:
             self._set_cursor(True)
         elif key in ("a", "A"):
             self.model.toggle_archived()
+        elif key in ("t", "T"):
+            self.theme = THEMES[(THEMES.index(self.theme) + 1) % len(THEMES)]
+            self._apply_theme()
         elif key in ("r", "R"):
             self._refresh()
         elif key in ("\n", "\r", curses.KEY_ENTER):
@@ -357,18 +454,19 @@ class KanbanTui:
         rendered = clip_text(text, available)
         try:
             self.screen.addstr(y, x, rendered, attr)
-        except curses.error:
+        except (curses.error, UnicodeEncodeError):
             pass
 
     def _render_board(self) -> None:
         height, width = self.screen.getmaxyx()
         title = self.context.get("title", "Task Board")
-        self._add(0, 0, title, curses.A_BOLD, width)
+        accent = self.colors.get("accent", 0)
+        self._add(0, 0, title, accent | curses.A_BOLD, width)
         if height < 8 or width < 32:
             message = self.context.get("too_small", "Terminal is too small.")
             self._add(2, 0, message, curses.A_BOLD, width)
             quit_help = self.context.get("quit_help", "q quit")
-            self._add(height - 1, 0, quit_help, curses.A_REVERSE, width)
+            self._add(height - 1, 0, quit_help, self._footer_attr(), width)
             return
 
         query_prefix = self.context.get("search", "Search") + ": "
@@ -379,7 +477,11 @@ class KanbanTui:
             else self.context.get("active", "active")
         )
         stamp = self.model.generated_at or "-"
-        toolbar_right = f"{mode} | {self.context.get('updated', 'Updated')} {stamp}"
+        theme_label = self.context.get("theme_labels", {}).get(self.theme, self.theme)
+        toolbar_right = (
+            f"{self.context.get('theme', 'Theme')} {theme_label} | "
+            f"{mode} | {self.context.get('updated', 'Updated')} {stamp}"
+        )
         toolbar_left_width = max(
             12,
             display_width(query_prefix) + 4,
@@ -387,7 +489,12 @@ class KanbanTui:
         )
         toolbar_right_width = max(0, width - toolbar_left_width - 1)
         toolbar_right = clip_text(toolbar_right, toolbar_right_width)
-        search_attr = curses.A_BOLD if self.searching else 0
+        if self.searching:
+            search_attr = accent | curses.A_BOLD
+        elif query_text:
+            search_attr = curses.A_BOLD
+        else:
+            search_attr = curses.A_DIM
         self._add(1, 0, query_prefix + query_text, search_attr, toolbar_left_width)
         right_x = max(0, width - display_width(toolbar_right))
         self._add(1, right_x, toolbar_right, curses.A_DIM, width - right_x)
@@ -410,7 +517,7 @@ class KanbanTui:
             self._render_footer(height, width)
             return
 
-        body_top = 3
+        body_top = 4
         body_height = height - body_top - 1
         for index, state in enumerate(states):
             x = index * width // len(states)
@@ -419,7 +526,7 @@ class KanbanTui:
             column_width = end - x - (1 if separator else 0)
             if separator:
                 for y in range(2, height - 1):
-                    self._add(y, end - 1, "|", curses.A_DIM, 1)
+                    self._add(y, end - 1, self.glyphs["vbar"], curses.A_DIM, 1)
             self._render_column(
                 state,
                 x,
@@ -441,15 +548,23 @@ class KanbanTui:
     ) -> None:
         tasks = self.model.tasks_for(state)
         label = self.context.get("state_labels", {}).get(state, state)
-        marker = "> " if focused else "  "
-        heading = pad_text(f"{marker}{label} ({len(tasks)})", width)
-        self._add(2, x, heading, curses.A_BOLD, width)
+        state_color = self.colors.get(state, 0)
+        heading_text = f"{label} ({len(tasks)})"
+        if self.model.single:
+            heading_text = (
+                f"{self.glyphs['left']} {heading_text} {self.glyphs['right']}"
+            )
+        heading_attr = state_color | curses.A_BOLD
+        if focused:
+            heading_attr |= curses.A_REVERSE
+        self._add(2, x, pad_text(f" {heading_text}", width), heading_attr, width)
         if not tasks:
             empty = self.context.get("empty", "No tasks")
-            self._add(body_top, x + 1, empty, curses.A_DIM, max(0, width - 2))
+            self._add(body_top, x + 2, empty, curses.A_DIM, max(0, width - 3))
             return
 
-        capacity = max(1, body_height // CARD_HEIGHT)
+        # 最后一张卡不需要卡片间的空行, 因此容量按 body_height + 1 计算.
+        capacity = max(1, (body_height + 1) // CARD_HEIGHT)
         task_ids = [str(task.get("task_id") or "") for task in tasks]
         selected_id = self.model.selected_ids[state]
         try:
@@ -465,12 +580,11 @@ class KanbanTui:
         scroll = max(0, min(scroll, max(0, len(tasks) - capacity)))
         self.model.scrolls[state] = scroll
 
-        content_width = max(1, width - 2)
+        content_width = max(1, width - 3)
         for row, task in enumerate(tasks[scroll : scroll + capacity]):
             task_index = scroll + row
             y = body_top + row * CARD_HEIGHT
             selected = focused and task_index == selected_index
-            attr = curses.A_REVERSE if selected else 0
             group_or_type = task.get("task_group") or " / ".join(
                 value
                 for value in (
@@ -485,14 +599,29 @@ class KanbanTui:
                 "unassigned", "Unassigned"
             )
             lines = (
-                str(task.get("title") or task.get("task_id") or ""),
-                str(task.get("task_id") or ""),
-                str(group_or_type),
-                f"{assignee} | {task.get('time') or '-'}",
+                (str(task.get("title") or task.get("task_id") or ""), curses.A_BOLD),
+                (str(task.get("task_id") or ""), self.colors.get("id", 0)),
+                (str(group_or_type), self.colors.get("group", 0)),
+                (f"{assignee} | {task.get('time') or '-'}", curses.A_DIM),
             )
-            for offset, line in enumerate(lines):
-                rendered = pad_text(line, content_width)
-                self._add(y + offset, x + 1, rendered, attr, content_width)
+            bar_attr = state_color | (curses.A_BOLD if selected else curses.A_DIM)
+            for offset, (line, attr) in enumerate(lines):
+                if selected:
+                    attr = state_color | curses.A_REVERSE | (attr & curses.A_BOLD)
+                self._add(y + offset, x, self.glyphs["bar"], bar_attr, 1)
+                self._add(
+                    y + offset,
+                    x + 2,
+                    pad_text(line, content_width),
+                    attr,
+                    content_width,
+                )
+
+    def _footer_attr(self, error: bool = False) -> int:
+        # 提示栏用强调色反白, 与状态色的选中卡和栏目高亮区分.
+        if error:
+            return self.colors.get("error", 0) | curses.A_REVERSE | curses.A_BOLD
+        return self.colors.get("accent", 0) | curses.A_REVERSE
 
     def _render_footer(self, height: int, width: int) -> None:
         if self.model.error:
@@ -504,7 +633,13 @@ class KanbanTui:
                 "help",
                 "arrows/hjkl move | / search | Enter detail | a archive | r refresh | q quit",
             )
-        self._add(height - 1, 0, pad_text(footer, width), curses.A_REVERSE, width)
+        self._add(
+            height - 1,
+            0,
+            pad_text(" " + footer, width),
+            self._footer_attr(bool(self.model.error)),
+            width,
+        )
 
     def _render_detail(self) -> None:
         height, width = self.screen.getmaxyx()
@@ -513,8 +648,11 @@ class KanbanTui:
             self._add(0, 0, message, curses.A_BOLD, width)
             return
         task = self.detail or {}
+        accent = self.colors.get("accent", 0)
+        state_color = self.colors.get(str(task.get("state") or ""), 0)
         title = str(task.get("title") or task.get("task_id") or "")
-        self._add(0, 0, title, curses.A_BOLD, width)
+        self._add(0, 0, self.glyphs["bar"], state_color | curses.A_BOLD, 1)
+        self._add(0, 2, title, curses.A_BOLD, max(0, width - 2))
         meta = " | ".join(
             str(value)
             for value in (
@@ -530,8 +668,9 @@ class KanbanTui:
             )
             if value
         )
-        self._add(1, 0, meta, curses.A_DIM, width)
-        self._add(2, 0, "-" * width, curses.A_DIM, width)
+        self._add(1, 0, self.glyphs["bar"], state_color | curses.A_BOLD, 1)
+        self._add(1, 2, meta, curses.A_DIM, max(0, width - 2))
+        self._add(2, 0, self.glyphs["hbar"] * width, curses.A_DIM, width)
         body_height = height - 4
         lines = wrap_text(str(task.get("document") or ""), max(1, width - 1))
         maximum_scroll = max(0, len(lines) - body_height)
@@ -540,7 +679,13 @@ class KanbanTui:
             self.detail_scroll : self.detail_scroll + body_height
         ]
         for index, line in enumerate(visible_lines):
-            attr = curses.A_BOLD if line.startswith("#") else 0
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                attr = accent | curses.A_BOLD
+            elif stripped.startswith(">"):
+                attr = curses.A_DIM
+            else:
+                attr = 0
             self._add(3 + index, 0, line, attr, width - 1)
         visible_end = min(len(lines), self.detail_scroll + body_height)
         position = f"{self.detail_scroll + 1}-{visible_end}/{len(lines)}"
@@ -551,7 +696,13 @@ class KanbanTui:
                 "detail_help", "arrows/jk scroll | PgUp/PgDn | q/Esc back"
             )
             footer = f"{help_text} | {position}"
-        self._add(height - 1, 0, pad_text(footer, width), curses.A_REVERSE, width)
+        self._add(
+            height - 1,
+            0,
+            pad_text(" " + footer, width),
+            self._footer_attr(bool(self.model.error)),
+            width,
+        )
 
 
 def run(
@@ -561,11 +712,20 @@ def run(
     context: dict,
     get_board: Callable[[], dict],
     get_task: Callable[[str], dict],
+    theme: str = "auto",
 ) -> None:
+    if theme not in THEMES:
+        raise KanbanTuiError(f"unknown theme: {theme}")
+
     try:
         initial_board = get_board()
     except Exception as error:
         raise KanbanTuiError(str(error)) from error
+
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
 
     def start(screen) -> None:
         KanbanTui(
@@ -575,6 +735,7 @@ def run(
             context=context,
             get_board=get_board,
             get_task=get_task,
+            theme=theme,
         ).run(initial_board)
 
     try:

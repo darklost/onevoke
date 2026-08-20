@@ -1495,9 +1495,13 @@ N/A
         self.assertIn("--single", help_text)
         self.assertIn("--refresh", help_text)
         self.assertIn("默认 60", help_text)
+        self.assertIn("--theme", help_text)
 
         bad_refresh = self.run_command("tui", "--refresh", "0", succeeds=False)
         self.assertIn("刷新间隔", bad_refresh.stderr)
+        bad_theme = self.run_command("tui", "--theme", "sepia", succeeds=False)
+        self.assertIn("--theme", bad_theme.stderr)
+        self.assertIn("sepia", bad_theme.stderr)
         noninteractive = self.run_command("tui", succeeds=False)
         self.assertIn("TUI 需要交互终端", noninteractive.stderr)
         self.assertIn("stdin/stdout 均为 tty", noninteractive.stderr)
@@ -1567,6 +1571,93 @@ N/A
         self.assertEqual("trash", model.current_state)
         model.toggle_archived()
         self.assertEqual("done", model.current_state)
+
+    def test_tui_page_keys_move_selection_by_page_and_clamp(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+        import curses
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 100
+
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=60,
+            context={},
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+        )
+        tui.model.set_board({
+            "tasks": [
+                {"task_id": f"20260820-page-{index:02d}-task", "state": "todo"}
+                for index in range(10)
+            ],
+        })
+        tui.model.column_index = tui.model.states.index("todo")
+        page = tui._page_size()
+        self.assertEqual((24 - 4) // kanban_tui.CARD_HEIGHT, page)
+
+        tui._handle_board_key(curses.KEY_NPAGE)
+        self.assertEqual(
+            f"20260820-page-{page:02d}-task", tui.model.selected_task()["task_id"]
+        )
+        for _ in range(5):
+            tui._handle_board_key(curses.KEY_NPAGE)
+        self.assertEqual(
+            "20260820-page-09-task", tui.model.selected_task()["task_id"]
+        )
+        tui._handle_board_key(curses.KEY_PPAGE)
+        self.assertEqual(
+            f"20260820-page-{9 - page:02d}-task",
+            tui.model.selected_task()["task_id"],
+        )
+        for _ in range(5):
+            tui._handle_board_key(curses.KEY_PPAGE)
+        self.assertEqual(
+            "20260820-page-00-task", tui.model.selected_task()["task_id"]
+        )
+
+    def test_tui_theme_key_cycles_and_run_rejects_unknown_theme(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 100
+
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=60,
+            context={},
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+        )
+        self.assertEqual("auto", tui.theme)
+        seen = []
+        for _ in kanban_tui.THEMES:
+            tui._handle_board_key("t")
+            seen.append(tui.theme)
+        self.assertEqual(["light", "dark", "auto"], seen)
+
+        with self.assertRaises(kanban_tui.KanbanTuiError) as raised:
+            kanban_tui.run(
+                single=False,
+                refresh_interval=60,
+                context={},
+                get_board=lambda: {"tasks": []},
+                get_task=lambda _task_id: {},
+                theme="sepia",
+            )
+        self.assertIn("sepia", str(raised.exception))
 
     def test_tui_text_helpers_handle_wide_characters(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))

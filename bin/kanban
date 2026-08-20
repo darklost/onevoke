@@ -1158,9 +1158,15 @@ def tui_page_context() -> dict:
         ),
         "quit_help": t("q 退出", "q quit"),
         "search_help": t("Enter 应用 | Esc 清空", "Enter apply | Esc clear"),
+        "theme": t("主题", "Theme"),
+        "theme_labels": {
+            "auto": t("自动", "auto"),
+            "light": t("浅色", "light"),
+            "dark": t("深色", "dark"),
+        },
         "help": t(
-            "方向键/hjkl 移动 | / 搜索 | Enter 详情 | a 存档栏目 | r 刷新 | q 退出",
-            "arrows/hjkl move | / search | Enter detail | a archives | r refresh | q quit",
+            "方向键/hjkl 移动 | PgUp/PgDn 翻页 | / 搜索 | Enter 详情 | a 存档栏目 | t 主题 | r 刷新 | q 退出",
+            "arrows/hjkl move | PgUp/PgDn page | / search | Enter detail | a archives | t theme | r refresh | q quit",
         ),
         "detail_help": t(
             "方向键/jk 滚动 | PgUp/PgDn 翻页 | q/Esc 返回",
@@ -1194,6 +1200,7 @@ def command_tui(args: argparse.Namespace, root: Path) -> None:
             context=tui_page_context(),
             get_board=lambda: web_board_payload(root),
             get_task=lambda task_id: web_task_payload(root, task_id),
+            theme=args.theme,
         )
     except kanban_tui.KanbanTuiError as error:
         raise KanbanError(str(error)) from error
@@ -1307,6 +1314,12 @@ def parser() -> argparse.ArgumentParser:
         default=60,
         metavar=t("秒", "seconds"),
         help=t("任务自动刷新间隔秒数, 默认 60", "task refresh interval in seconds; default 60"),
+    )
+    tui_parser.add_argument(
+        "--theme",
+        choices=("auto", "light", "dark"),
+        default="auto",
+        help=t("配色主题, 默认 auto 跟随终端", "color theme; default auto follows the terminal"),
     )
     return result
 
