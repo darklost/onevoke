@@ -1383,9 +1383,9 @@ def parser() -> argparse.ArgumentParser:
     tui_parser.add_argument(
         "--refresh",
         type=int,
-        default=60,
+        default=30,
         metavar=t("秒", "seconds"),
-        help=t("任务自动刷新间隔秒数, 默认 60", "task refresh interval in seconds; default 60"),
+        help=t("任务自动刷新间隔秒数, 默认 30", "task refresh interval in seconds; default 30"),
     )
     tui_parser.add_argument(
         "--theme",

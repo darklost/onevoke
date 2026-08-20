@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import curses
+import json
 import locale
 import os
 import sys
@@ -138,6 +139,86 @@ def task_matches(task: dict, keyword: str) -> bool:
     return needle in haystack
 
 
+def board_content_key(tasks: list[dict]) -> str:
+    return json.dumps(tasks, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+class ScreenBuffer:
+    def __init__(self, height: int, width: int) -> None:
+        self.height = height
+        self.width = width
+        self.cells = [[(" ", 0) for _ in range(width)] for _ in range(height)]
+
+    def write(
+        self,
+        y: int,
+        x: int,
+        text: str,
+        attr: int = 0,
+        width: Optional[int] = None,
+    ) -> None:
+        if y < 0 or y >= self.height or x < 0 or x >= self.width:
+            return
+        available = self.width - x if width is None else min(width, self.width - x)
+        if available <= 0:
+            return
+        rendered = clip_text(text, available)
+        column = x
+        last_col: Optional[int] = None
+        limit = x + available
+        for char in rendered:
+            char_width = display_width(char)
+            if char_width == 0:
+                if last_col is not None:
+                    previous, previous_attr = self.cells[y][last_col]
+                    self.cells[y][last_col] = (previous + char, previous_attr)
+                continue
+            if column >= self.width or column + char_width > limit:
+                break
+            self.cells[y][column] = (char, attr)
+            if char_width == 2 and column + 1 < self.width:
+                self.cells[y][column + 1] = ("", attr)
+            last_col = column
+            column += char_width
+
+    def blit(self, screen, previous: Optional["ScreenBuffer"]) -> None:
+        reuse = (
+            previous is not None
+            and previous.height == self.height
+            and previous.width == self.width
+        )
+        for y in range(self.height):
+            x = 0
+            while x < self.width:
+                char, attr = self.cells[y][x]
+                if not char:
+                    x += 1
+                    continue
+                old = previous.cells[y][x] if reuse else None
+                span = max(1, display_width(char))
+                if old == (char, attr):
+                    x += span
+                    continue
+                start = x
+                run = [char]
+                run_attr = attr
+                x += span
+                while x < self.width:
+                    char, attr = self.cells[y][x]
+                    if not char:
+                        x += 1
+                        continue
+                    old = previous.cells[y][x] if reuse else None
+                    if attr != run_attr or old == (char, attr):
+                        break
+                    run.append(char)
+                    x += max(1, display_width(char))
+                try:
+                    screen.addstr(y, start, "".join(run), run_attr)
+                except (curses.error, UnicodeEncodeError):
+                    pass
+
+
 @dataclass
 class BoardModel:
     single: bool = False
@@ -148,10 +229,14 @@ class BoardModel:
     selected_ids: dict[str, Optional[str]] = field(
         default_factory=lambda: {state: None for state in ALL_STATES}
     )
+    selected_indexes: dict[str, int] = field(
+        default_factory=lambda: {state: 0 for state in ALL_STATES}
+    )
     scrolls: dict[str, int] = field(
         default_factory=lambda: {state: 0 for state in ALL_STATES}
     )
     generated_at: str = ""
+    content_key: str = ""
     refresh_error: str = ""
     detail_error: str = ""
 
@@ -167,18 +252,27 @@ class BoardModel:
     def current_state(self) -> str:
         return self.states[self.column_index]
 
-    def set_board(self, payload: dict) -> None:
+    def set_board(self, payload: dict) -> bool:
         tasks = payload.get("tasks", [])
         if not isinstance(tasks, list):
             raise KanbanTuiError("board payload tasks must be a list")
-        self.tasks = [
+        parsed = [
             task
             for task in tasks
             if isinstance(task, dict) and task.get("state") in ALL_STATES
         ]
-        self.generated_at = str(payload.get("generated_at") or "")
+        generated_at = str(payload.get("generated_at") or "")
+        next_key = board_content_key(parsed)
+        stamp_changed = generated_at != self.generated_at
+        error_cleared = bool(self.refresh_error)
+        self.generated_at = generated_at
         self.refresh_error = ""
+        if next_key == self.content_key:
+            return stamp_changed or error_cleared
+        self.tasks = parsed
+        self.content_key = next_key
         self.normalize()
+        return True
 
     def tasks_for(self, state: str) -> list[dict]:
         return [
@@ -192,9 +286,18 @@ class BoardModel:
         for state in ALL_STATES:
             tasks = self.tasks_for(state)
             task_ids = [str(task.get("task_id") or "") for task in tasks]
-            if self.selected_ids[state] not in task_ids:
-                self.selected_ids[state] = task_ids[0] if task_ids else None
-                self.scrolls[state] = 0
+            selected = self.selected_ids[state]
+            if selected in task_ids:
+                self.selected_indexes[state] = task_ids.index(selected)
+            elif task_ids:
+                index = min(self.selected_indexes[state], len(task_ids) - 1)
+                self.selected_ids[state] = task_ids[max(0, index)]
+                self.selected_indexes[state] = max(0, index)
+            else:
+                self.selected_ids[state] = None
+            self.scrolls[state] = max(
+                0, min(self.scrolls[state], max(0, len(tasks) - 1))
+            )
 
     def move_column(self, delta: int) -> None:
         self.column_index = (self.column_index + delta) % len(self.states)
@@ -212,6 +315,7 @@ class BoardModel:
             index = 0
         index = max(0, min(len(task_ids) - 1, index + delta))
         self.selected_ids[state] = task_ids[index]
+        self.selected_indexes[state] = index
 
     def selected_task(self) -> Optional[dict]:
         selected_id = self.selected_ids[self.current_state]
@@ -262,6 +366,9 @@ class KanbanTui:
         self.running = True
         self.colors: dict[str, int] = {}
         self.glyphs = dict(ASCII_GLYPHS)
+        self.frame: Optional[ScreenBuffer] = None
+        self.prev_frame: Optional[ScreenBuffer] = None
+        self.cursor_pos: Optional[tuple[int, int]] = None
 
     def run(self, initial_board: dict) -> None:
         self._init_style()
@@ -269,22 +376,26 @@ class KanbanTui:
         self.screen.keypad(True)
         self.screen.timeout(200)
         self._set_cursor(False)
+        self._render(force=True)
         while self.running:
-            if time.monotonic() - self.last_refresh >= self.refresh_interval:
-                self._refresh()
-            self._render()
             try:
                 key = self.screen.get_wch()
             except curses.error:
-                continue
+                key = None
             if key == curses.KEY_RESIZE:
-                continue
-            if self.detail is not None:
-                self._handle_detail_key(key)
-            elif self.searching:
-                self._handle_search_key(key)
-            else:
-                self._handle_board_key(key)
+                self._render(force=True)
+            elif key is not None:
+                if self.detail is not None:
+                    self._handle_detail_key(key)
+                elif self.searching:
+                    self._handle_search_key(key)
+                else:
+                    self._handle_board_key(key)
+                if self.running:
+                    self._render()
+            if time.monotonic() - self.last_refresh >= self.refresh_interval:
+                if self._refresh():
+                    self._render()
 
     def _init_style(self) -> None:
         encoding = getattr(self.screen, "encoding", "") or "ascii"
@@ -315,6 +426,7 @@ class KanbanTui:
             pass
 
     def _apply_theme(self) -> None:
+        self.prev_frame = None
         self.colors = {}
         if not self.has_colors:
             return
@@ -357,12 +469,35 @@ class KanbanTui:
         except curses.error:
             pass
 
-    def _refresh(self) -> None:
+    def _refresh(self) -> bool:
+        previous_error = self.model.refresh_error
         try:
-            self.model.set_board(self.get_board())
+            changed = self.model.set_board(self.get_board())
         except Exception as error:  # 刷新失败时保留上一份有效看板.
             self.model.refresh_error = str(error)
+            self.last_refresh = time.monotonic()
+            return self.model.refresh_error != previous_error
         self.last_refresh = time.monotonic()
+        detail_changed = self._refresh_open_detail()
+        return changed or detail_changed
+
+    def _refresh_open_detail(self) -> bool:
+        if self.detail is None:
+            return False
+        task_id = str(self.detail.get("task_id") or "")
+        if not task_id:
+            return False
+        previous_error = self.model.detail_error
+        try:
+            next_detail = self.get_task(task_id)
+        except Exception as error:
+            self.model.detail_error = str(error)
+            return self.model.detail_error != previous_error
+        self.model.detail_error = ""
+        if next_detail == self.detail:
+            return bool(previous_error)
+        self.detail = next_detail
+        return True
 
     def _open_detail(self) -> None:
         selected = self.model.selected_task()
@@ -459,12 +594,22 @@ class KanbanTui:
         elif key == curses.KEY_END:
             self.detail_scroll = sys.maxsize
 
-    def _render(self) -> None:
-        self.screen.erase()
+    def _render(self, *, force: bool = False) -> None:
+        height, width = self.screen.getmaxyx()
+        self.cursor_pos = None
+        self.frame = ScreenBuffer(height, width)
         if self.detail is not None:
             self._render_detail()
         else:
             self._render_board()
+        self.frame.blit(self.screen, None if force else self.prev_frame)
+        self.prev_frame = self.frame
+        self.frame = None
+        if self.searching and self.cursor_pos is not None:
+            try:
+                self.screen.move(*self.cursor_pos)
+            except curses.error:
+                pass
         try:
             self.screen.refresh()
         except curses.error:
@@ -478,6 +623,9 @@ class KanbanTui:
         attr: int = 0,
         width: Optional[int] = None,
     ) -> None:
+        if self.frame is not None:
+            self.frame.write(y, x, text, attr, width)
+            return
         height, screen_width = self.screen.getmaxyx()
         if y < 0 or y >= height or x < 0 or x >= screen_width:
             return
@@ -534,10 +682,12 @@ class KanbanTui:
         if self.searching:
             cursor_text = clip_text(query_prefix + query_text, toolbar_left_width)
             cursor_x = min(width - 1, display_width(cursor_text))
-            try:
-                self.screen.move(1, cursor_x)
-            except curses.error:
-                pass
+            self.cursor_pos = (1, cursor_x)
+            if self.frame is None:
+                try:
+                    self.screen.move(1, cursor_x)
+                except curses.error:
+                    pass
 
         states = (self.model.current_state,) if self.model.single else self.model.states
         minimum_column_width = 10

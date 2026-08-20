@@ -1616,7 +1616,7 @@ N/A
         help_text = self.run_command("tui", "--help").stdout
         self.assertIn("--single", help_text)
         self.assertIn("--refresh", help_text)
-        self.assertIn("默认 60", help_text)
+        self.assertIn("默认 30", help_text)
         self.assertIn("--theme", help_text)
 
         bad_refresh = self.run_command("tui", "--refresh", "0", succeeds=False)
@@ -2186,6 +2186,258 @@ N/A
         controller._refresh()
         self.assertEqual("", controller.model.refresh_error)
         self.assertEqual("", controller.model.error)
+
+    def test_tui_refresh_keeps_selection_scroll_and_updates_detail_inplace(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        def make_tasks(task_ids: list[str], *, title_prefix: str = "") -> list[dict]:
+            return [
+                {
+                    "task_id": task_id,
+                    "title": f"{title_prefix}{task_id}",
+                    "state": "todo",
+                }
+                for task_id in task_ids
+            ]
+
+        task_ids = [f"20260820-keep-{index:02d}-task" for index in range(8)]
+        model = kanban_tui.BoardModel()
+        self.assertTrue(
+            model.set_board({"generated_at": "t1", "tasks": make_tasks(task_ids)})
+        )
+        model.column_index = model.states.index("todo")
+        model.selected_ids["todo"] = task_ids[4]
+        model.selected_indexes["todo"] = 4
+        model.scrolls["todo"] = 2
+
+        self.assertTrue(
+            model.set_board({
+                "generated_at": "t2",
+                "tasks": make_tasks(task_ids, title_prefix="updated-"),
+            })
+        )
+        self.assertEqual(task_ids[4], model.selected_ids["todo"])
+        self.assertEqual(4, model.selected_indexes["todo"])
+        self.assertEqual(2, model.scrolls["todo"])
+
+        remaining = task_ids[:4] + task_ids[5:]
+        self.assertTrue(model.set_board({
+            "generated_at": "t3",
+            "tasks": make_tasks(remaining),
+        }))
+        self.assertEqual(task_ids[5], model.selected_ids["todo"])
+        self.assertEqual(4, model.selected_indexes["todo"])
+        self.assertEqual(2, model.scrolls["todo"])
+
+        self.assertTrue(model.set_board({
+            "generated_at": "t4",
+            "tasks": make_tasks(remaining),
+        }))
+        self.assertFalse(model.set_board({
+            "generated_at": "t4",
+            "tasks": make_tasks(remaining),
+        }))
+        self.assertEqual(task_ids[5], model.selected_ids["todo"])
+        self.assertEqual(2, model.scrolls["todo"])
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 80
+
+        details = [
+            {
+                "task_id": "20260820-keep-task",
+                "title": "Keep",
+                "document": "one\n" * 8,
+                "state": "todo",
+            },
+            {
+                "task_id": "20260820-keep-task",
+                "title": "Keep",
+                "document": "two\n" * 8,
+                "state": "todo",
+            },
+        ]
+        boards = [
+            {
+                "generated_at": "d1",
+                "tasks": [{
+                    "task_id": "20260820-keep-task",
+                    "title": "Keep",
+                    "state": "todo",
+                }],
+            },
+            {
+                "generated_at": "d2",
+                "tasks": [{
+                    "task_id": "20260820-keep-task",
+                    "title": "Keep changed",
+                    "state": "todo",
+                }],
+            },
+        ]
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=30,
+            context={},
+            get_board=lambda: boards[1],
+            get_task=lambda _task_id: details[1],
+        )
+        tui.model.set_board(boards[0])
+        tui.detail = details[0]
+        tui.detail_scroll = 3
+        self.assertTrue(tui._refresh())
+        self.assertEqual("two\n" * 8, tui.detail["document"])
+        self.assertEqual(3, tui.detail_scroll)
+        self.assertEqual("20260820-keep-task", tui.model.selected_ids["todo"])
+
+    def test_tui_render_updates_inplace_without_erase(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        class FakeScreen:
+            def __init__(self) -> None:
+                self.writes = []
+                self.erased = 0
+
+            def getmaxyx(self):
+                return 24, 80
+
+            def erase(self):
+                self.erased += 1
+
+            def addstr(self, y, x, text, attr=0):
+                self.writes.append((y, x, text, attr))
+
+            def refresh(self):
+                pass
+
+            def move(self, y, x):
+                pass
+
+        context = {
+            "title": "Task Board",
+            "search": "Search",
+            "active": "active",
+            "updated": "Updated",
+            "state_labels": {state: state for state in STATES},
+            "size_labels": {"small": "small", "large": "large"},
+            "help": "help",
+        }
+        first_board = {
+            "generated_at": "2026-08-21 00:00:00",
+            "tasks": [{
+                "task_id": "20260821-inplace-task",
+                "title": "Old title",
+                "state": "backlog",
+                "type": "chore",
+                "kind": "small",
+                "assignee": "codex",
+                "time": "08-21 00:00",
+            }],
+        }
+        screen = FakeScreen()
+        tui = kanban_tui.KanbanTui(
+            screen,
+            single=True,
+            refresh_interval=30,
+            context=context,
+            get_board=lambda: first_board,
+            get_task=lambda _task_id: {},
+        )
+        tui.model.set_board(first_board)
+        tui._render(force=True)
+        self.assertEqual(0, screen.erased)
+        first_writes = list(screen.writes)
+        self.assertTrue(any("Old title" in text for _y, _x, text, _attr in first_writes))
+
+        screen.writes.clear()
+        tui._render()
+        self.assertEqual([], screen.writes)
+        self.assertEqual(0, screen.erased)
+
+        next_board = {
+            "generated_at": "2026-08-21 00:00:30",
+            "tasks": [{
+                **first_board["tasks"][0],
+                "title": "New title",
+            }],
+        }
+        self.assertTrue(tui.model.set_board(next_board))
+        tui._render()
+        self.assertEqual(0, screen.erased)
+        self.assertTrue(any("New" in text for _y, _x, text, _attr in screen.writes))
+        self.assertFalse(any("Old" in text for _y, _x, text, _attr in screen.writes))
+        self.assertLess(len(screen.writes), len(first_writes))
+
+    def test_tui_auto_refresh_runs_after_interval(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+        import curses
+
+        class FakeScreen:
+            def __init__(self) -> None:
+                self.keys = [curses.error("timeout"), "q"]
+
+            def getmaxyx(self):
+                return 24, 80
+
+            def keypad(self, _enabled):
+                pass
+
+            def timeout(self, _milliseconds):
+                pass
+
+            def get_wch(self):
+                key = self.keys.pop(0)
+                if isinstance(key, Exception):
+                    raise key
+                return key
+
+            def addstr(self, y, x, text, attr=0):
+                pass
+
+            def refresh(self):
+                pass
+
+            def move(self, y, x):
+                pass
+
+            def bkgd(self, *_args):
+                pass
+
+        calls = {"board": 0}
+
+        def get_board() -> dict:
+            calls["board"] += 1
+            return {"generated_at": str(calls["board"]), "tasks": []}
+
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=30,
+            context={"title": "Task Board"},
+            get_board=get_board,
+            get_task=lambda _task_id: {},
+        )
+        tui.last_refresh = 0
+        with mock.patch.object(kanban_tui.KanbanTui, "_init_style"), mock.patch.object(
+            kanban_tui.time, "monotonic", side_effect=[30, 30, 31]
+        ):
+            tui.run({"generated_at": "0", "tasks": []})
+        self.assertEqual(1, calls["board"])
+        self.assertFalse(tui.running)
 
     def test_tui_single_mode_searches_opens_detail_and_quits_on_a_pty(self) -> None:
         self.make_todo("tui-pty")
