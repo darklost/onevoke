@@ -1606,21 +1606,25 @@ N/A
         self.assertEqual(
             f"20260820-page-{page:02d}-task", tui.model.selected_task()["task_id"]
         )
+        self.assertEqual(page, tui.model.scrolls["todo"])
         for _ in range(5):
             tui._handle_board_key(curses.KEY_NPAGE)
         self.assertEqual(
             "20260820-page-09-task", tui.model.selected_task()["task_id"]
         )
+        self.assertEqual(10 - page, tui.model.scrolls["todo"])
         tui._handle_board_key(curses.KEY_PPAGE)
         self.assertEqual(
             f"20260820-page-{9 - page:02d}-task",
             tui.model.selected_task()["task_id"],
         )
+        self.assertEqual(10 - 2 * page, tui.model.scrolls["todo"])
         for _ in range(5):
             tui._handle_board_key(curses.KEY_PPAGE)
         self.assertEqual(
             "20260820-page-00-task", tui.model.selected_task()["task_id"]
         )
+        self.assertEqual(0, tui.model.scrolls["todo"])
 
     def test_tui_theme_key_cycles_and_run_rejects_unknown_theme(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
@@ -1658,6 +1662,85 @@ N/A
                 theme="sepia",
             )
         self.assertIn("sepia", str(raised.exception))
+
+    def test_tui_apply_theme_sets_palette_background_and_auto_fallback(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+        import curses
+        from unittest import mock
+
+        class FakeScreen:
+            def __init__(self):
+                self.background = None
+
+            def getmaxyx(self):
+                return 24, 100
+
+            def bkgd(self, _char, attr=0):
+                self.background = attr
+
+        pairs = {}
+        screen = FakeScreen()
+        tui = kanban_tui.KanbanTui(
+            screen,
+            single=True,
+            refresh_interval=60,
+            context={},
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+            theme="light",
+        )
+        with mock.patch.object(kanban_tui.curses, "has_colors", return_value=True), \
+                mock.patch.object(kanban_tui.curses, "use_default_colors"), \
+                mock.patch.object(
+                    kanban_tui.curses,
+                    "init_pair",
+                    side_effect=lambda index, fg, bg: pairs.__setitem__(
+                        index, (fg, bg)
+                    ),
+                ), \
+                mock.patch.object(
+                    kanban_tui.curses,
+                    "color_pair",
+                    side_effect=lambda index: index << 8,
+                ), \
+                mock.patch.dict(kanban_tui.os.environ, {"COLORFGBG": ""}):
+            tui._init_style()
+            light = kanban_tui.THEME_PALETTES["light"]
+            self.assertTrue(
+                all(bg == curses.COLOR_WHITE for _fg, bg in pairs.values())
+            )
+            self.assertEqual(light["backlog"], pairs[2][0])
+            self.assertEqual(light["working"], pairs[4][0])
+            self.assertEqual(tui.colors["text"], screen.background)
+            self.assertNotEqual(0, tui.colors["error"])
+            footer = tui._footer_attr()
+            self.assertEqual(
+                tui.colors["accent"] | curses.A_REVERSE, footer
+            )
+
+            pairs.clear()
+            tui._handle_board_key("t")
+            self.assertEqual("dark", tui.theme)
+            self.assertTrue(
+                all(bg == curses.COLOR_BLACK for _fg, bg in pairs.values())
+            )
+            self.assertEqual(
+                kanban_tui.THEME_PALETTES["dark"]["working"], pairs[4][0]
+            )
+            self.assertEqual(tui.colors["text"], screen.background)
+
+            pairs.clear()
+            tui._handle_board_key("t")
+            self.assertEqual("auto", tui.theme)
+            self.assertTrue(all(bg == -1 for _fg, bg in pairs.values()))
+            # 背景未知时 backlog 和文本回退到终端默认前景色.
+            self.assertEqual(-1, pairs[1][0])
+            self.assertEqual(-1, pairs[2][0])
+            self.assertEqual(0, screen.background)
 
     def test_tui_text_helpers_handle_wide_characters(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))

@@ -307,10 +307,13 @@ class KanbanTui:
         if not self.has_colors:
             return
         if self.theme == "auto":
-            light_background = (
-                os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1] in {"7", "15"}
-            )
-            palette = THEME_PALETTES["light" if light_background else "dark"]
+            background_code = os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1]
+            light_background = background_code in {"7", "15"}
+            palette = dict(THEME_PALETTES["light" if light_background else "dark"])
+            if not background_code:
+                # 背景未知时文本和 backlog 用终端默认前景色, 避免浅色终端白底白字.
+                palette["text"] = -1
+                palette["backlog"] = -1
             background = -1
         else:
             palette = THEME_PALETTES[self.theme]
@@ -362,6 +365,20 @@ class KanbanTui:
         # 与 _render_column 的卡片容量保持一致: body_top=4, 页脚占 1 行.
         return max(1, (self.screen.getmaxyx()[0] - 4) // CARD_HEIGHT)
 
+    def _page(self, direction: int) -> None:
+        # 选中项和视口同步移动一整页, 渲染时再保证选中项可见.
+        page = self._page_size()
+        state = self.model.current_state
+        self.model.move_task(direction * page)
+        task_count = len(self.model.tasks_for(state))
+        self.model.scrolls[state] = max(
+            0,
+            min(
+                self.model.scrolls[state] + direction * page,
+                max(0, task_count - page),
+            ),
+        )
+
     def _handle_board_key(self, key) -> None:
         if key in ("q", "Q"):
             self.running = False
@@ -374,9 +391,9 @@ class KanbanTui:
         elif key in (curses.KEY_DOWN, "j", "J"):
             self.model.move_task(1)
         elif key == curses.KEY_PPAGE:
-            self.model.move_task(-self._page_size())
+            self._page(-1)
         elif key == curses.KEY_NPAGE:
-            self.model.move_task(self._page_size())
+            self._page(1)
         elif key == curses.KEY_HOME:
             self.model.move_task(-len(self.model.tasks))
         elif key == curses.KEY_END:
