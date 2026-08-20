@@ -2,6 +2,8 @@
 
 一个人用看板调度多个 AI Agent.
 
+![Onevoke 工作流](docs/workflow.svg)
+
 ## 1. 安装
 
 需要 Python 3, Git, POSIX shell, 以及 Codex, Claude 或 Grok 中至少一个.
@@ -76,3 +78,9 @@ kanban list done
 ```sh
 kanban rules
 ```
+
+## 3. 审核
+
+任务命中审核白名单后, 由 `onevoke-review.sh` 按 PM -> 安全角色 -> QA 三阶段串行审核, QA 固定在最后; 每次修复只重跑当前阶段. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
+
+![Onevoke 审核流程](docs/review.svg)
