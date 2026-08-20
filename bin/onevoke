@@ -458,6 +458,13 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
         print(t("输入无效, 请输入 yes 或 no.", "Invalid input; enter yes or no."), file=sys.stderr)
 
 
+def choices_with_current(choices: list[tuple[str, str]], current: str) -> list[tuple[str, str]]:
+    if any(value == current for value, _ in choices):
+        return choices
+    unavailable = t("当前不可用", "currently unavailable")
+    return [(current, f"{AGENT_LABELS[current]} ({unavailable})"), *choices]
+
+
 def ask_text(prompt: str, default: str) -> str:
     shown = default if default else t("(空, 用 CLI 默认)", "(empty; CLI default)")
     print(f"\n{color('1;36', prompt)} [{shown}]: ", end="", file=sys.stderr, flush=True)
@@ -659,7 +666,10 @@ def ask_welcome_action(config: dict[str, Any]) -> str:
     while True:
         print_welcome_menu(config)
         print(
-            t("请选择要修改的项目 [1-8]: ", "Choose an item to change [1-8]: "),
+            t(
+                "请选择要修改的项目 [1-8], 直接回车保存, q 取消: ",
+                "Choose an item to change [1-8], press Enter to save, or q to cancel: ",
+            ),
             end="",
             file=sys.stderr,
             flush=True,
@@ -712,14 +722,14 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         section: {agent: dict(entry) for agent, entry in entries.items()}
         for section, entries in existing["models"].items()
     }
-    config["kanban_agent"] = (
-        existing["kanban_agent"]
-        if agent_usable(agents.get(existing["kanban_agent"], {}))
-        else execution_choices[0][0]
-    )
+    config["kanban_agent"] = existing["kanban_agent"]
+    if not existing["welcome_complete"] and not agent_usable(agents.get(config["kanban_agent"], {})):
+        config["kanban_agent"] = execution_choices[0][0]
     for role in REVIEW_ROLES:
         previous = existing["reviewers"][role]
-        config["reviewers"][role] = previous if agent_usable(agents.get(previous, {})) else review_choices[0][0]
+        config["reviewers"][role] = previous
+        if not existing["welcome_complete"] and not agent_usable(agents.get(previous, {})):
+            config["reviewers"][role] = review_choices[0][0]
     config["launcher"] = existing["launcher"]
     if config["launcher"] == "tmux" and not shutil.which("tmux") and not existing["welcome_complete"]:
         config["launcher"] = "foreground"
@@ -740,14 +750,14 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         if action == "1":
             config["kanban_agent"] = ask_choice(
                 t("kanban 默认用哪个 Agent 执行任务?", "Which Agent should kanban use by default?"),
-                execution_choices,
+                choices_with_current(execution_choices, config["kanban_agent"]),
                 config["kanban_agent"],
             )
         elif action in ("2", "3", "4", "5"):
             role = REVIEW_ROLES[int(action) - 2]
             config["reviewers"][role] = ask_choice(
                 t(f"{role} 使用哪个 Reviewer?", f"Which Reviewer should {role} use?"),
-                review_choices,
+                choices_with_current(review_choices, config["reviewers"][role]),
                 config["reviewers"][role],
             )
         elif action == "6":

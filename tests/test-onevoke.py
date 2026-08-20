@@ -468,6 +468,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
     def test_welcome_reset_enter_preserves_unavailable_current_values(self) -> None:
         self.install_fake_environment(tmux=False)
+        self.fake_command("grok", "#!/bin/sh\nexit 1\n")
         existing = {
             "schema_version": 1,
             "welcome_complete": True,
@@ -479,13 +480,18 @@ class OnevokeCommandTest(unittest.TestCase):
         self.config.parent.mkdir(parents=True)
         self.config.write_text(json.dumps(existing), encoding="utf-8")
 
-        # 即使进入当前不可用的 launcher 项, 空回车也保留当前 tmux.
-        returncode, output = self.run_on_tty("6\n\n\n", "welcome", "--reset")
+        # 即使进入当前不可用的 Agent、Reviewer 和 launcher, 空回车也保留当前值.
+        returncode, output = self.run_on_tty(
+            "1\n\n2\n\n6\n\n\n", "welcome", "--reset"
+        )
 
         self.assertEqual(0, returncode, output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("grok", config["kanban_agent"])
+        self.assertEqual({role: "grok" for role in ROLES}, config["reviewers"])
         self.assertEqual("tmux", config["launcher"])
         self.assertTrue(config["memsearch"]["enabled"])
+        self.assertIn("Grok (当前不可用) (当前)", output)
         self.assertIn("tmux 新窗口 (当前未安装) (当前)", output)
 
     def test_yes_no_uses_text_input_and_enter_uses_default(self) -> None:
