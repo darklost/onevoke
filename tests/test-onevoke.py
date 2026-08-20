@@ -301,11 +301,12 @@ class OnevokeCommandTest(unittest.TestCase):
             "/bin/cp \"$TMUX_TEMPLATE\" \"$FAKE_BIN/tmux\"\n",
         )
 
-        # 进入启动方式菜单, 选择安装 tmux, 然后直接回车保存.
-        returncode, output = self.run_on_tty("6\n2\n\n", "welcome")
+        # 进入启动方式菜单, 选择安装 tmux, 回车沿用当前 session 模式, 再回车保存.
+        returncode, output = self.run_on_tty("6\n2\n\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertEqual("install tmux", brew_log.read_text(encoding="utf-8").strip())
+        self.assertIn("tmux 已就绪, 用哪种 tmux 启动方式?", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("tmux", config["launcher"])
 
@@ -492,7 +493,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual("tmux", config["launcher"])
         self.assertTrue(config["memsearch"]["enabled"])
         self.assertIn("Grok (当前不可用) (当前)", output)
-        self.assertIn("tmux 新窗口 (当前未安装) (当前)", output)
+        self.assertIn("tmux 当前 session 新窗口 (当前未安装) (当前)", output)
 
     def test_welcome_failed_tmux_install_keeps_current_launcher(self) -> None:
         self.install_fake_environment(tmux=False)
@@ -536,7 +537,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.config.write_text(json.dumps(existing), encoding="utf-8")
 
         # 所有 Agent 暂不可用时仍可只把 launcher 改成 foreground.
-        returncode, output = self.run_on_tty("6\n2\n\n", "welcome", "--reset")
+        returncode, output = self.run_on_tty("6\n3\n\n", "welcome", "--reset")
 
         self.assertEqual(0, returncode, output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
@@ -1001,6 +1002,57 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, returncode, output)
         self.assertIn("已安装但当前不在 session", output)
         self.assertEqual(1, output.count("tmux new -A -s onevoke"))
+
+    def test_welcome_saves_the_per_project_tmux_session_launcher(self) -> None:
+        self.install_fake_environment(tmux=True)
+
+        # 启动方式菜单的第二项是项目专属 session.
+        returncode, output = self.run_on_tty("6\n2\n\n", "welcome")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("tmux 项目专属 session 新窗口", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("tmux-session", config["launcher"])
+        self.assertEqual("tmux-session", self.run_command("config").stdout.splitlines()[2].split(": ")[1])
+
+    def test_doctor_accepts_tmux_session_launcher_outside_tmux(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.env.pop("TMUX", None)
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux-session",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("按项目自动新建或复用专属 session", result.stderr)
+        self.assertNotIn("需要先进入", result.stderr)
+        self.assertNotIn("已安装但当前不在 session", result.stderr)
+
+    def test_doctor_rejects_tmux_session_launcher_when_tmux_missing(self) -> None:
+        self.install_fake_environment(tmux=False)
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux-session",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("配置的 launcher 是 tmux-session", result.stderr)
 
     def test_welcome_ctrl_c_exits_without_traceback_or_config(self) -> None:
         self.install_fake_environment(tmux=False)

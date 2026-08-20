@@ -2,6 +2,7 @@
 
 import argparse
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -104,6 +105,22 @@ class KanbanCommandTest(unittest.TestCase):
             """#!/bin/sh
 if [ "$1" = "display-message" ]; then
     printf '%s\\n' '$42'
+    exit 0
+fi
+if [ "$1" = "has-session" ]; then
+    for name in ${KANBAN_TMUX_SESSIONS:-}; do
+        [ "$name" = "${3#=}" ] && exit 0
+    done
+    exit 1
+fi
+if [ "$1" = "show-options" ]; then
+    # 真实 tmux 对未设置的用户选项返回非零并报 invalid option.
+    [ -n "${KANBAN_TMUX_PROJECT:-}" ] || exit 1
+    printf '%s\\n' "$KANBAN_TMUX_PROJECT"
+    exit 0
+fi
+if [ "$1" = "set-option" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.setopt"
     exit 0
 fi
 printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG"
@@ -732,6 +749,111 @@ printf '%s\\n' '@9'
         self.assertIn("当前不在 tmux session", result.stderr)
         self.assertIn("tmux new -A -s onevoke", result.stderr)
         self.assertTrue(task.exists())
+
+    def project_session(self, suffix: str = "") -> str:
+        project = self.root.resolve().parent
+        digest = hashlib.sha256(str(project).encode("utf-8")).hexdigest()[:8]
+        label = project.name[:30]
+        return f"kb-{label}-{digest}{suffix}" if label else f"kb-{digest}{suffix}"
+
+    def tmux_arguments(self) -> list[str]:
+        return (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
+
+    def test_tmux_session_launcher_creates_the_project_session(self) -> None:
+        task_id, task = self.make_todo("session-create")
+        fake_bin = self.install_fake_launchers()
+        # 项目专属 session 自己建, 因此不在 tmux 里也能启动.
+        self.env.pop("TMUX")
+        self.env.pop("TMUX_PANE")
+
+        result = self.run_command("start", "--launcher", "tmux-session", task_id)
+
+        session = self.project_session()
+        project = str(self.root.resolve().parent)
+        self.assertIn(f"已启动: {task_id}", result.stdout)
+        self.assertIn(f"会话={session}", result.stdout)
+        self.assertIn(f"tmux attach -t {session}", result.stdout)
+        arguments = self.tmux_arguments()
+        self.assertEqual("new-session", arguments[0])
+        self.assertIn("-d", arguments)
+        self.assertEqual(session, arguments[arguments.index("-s") + 1])
+        self.assertEqual(project, arguments[arguments.index("-c") + 1])
+        self.assertEqual("kb-任务-session-create", arguments[arguments.index("-n") + 1])
+        self.assertIn(str(fake_bin / "codex"), arguments[-1])
+        self.assertIn(task_id, arguments[-1])
+        self.assertEqual(
+            ["set-option", "-t", session, "@onevoke_project", project],
+            (self.root / "tmux.log.setopt").read_text(encoding="utf-8").splitlines(),
+        )
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_tmux_session_launcher_reuses_the_project_session(self) -> None:
+        task_id, _ = self.make_todo("session-reuse")
+        self.install_fake_launchers()
+        session = self.project_session()
+        self.env["KANBAN_TMUX_SESSIONS"] = session
+        self.env["KANBAN_TMUX_PROJECT"] = str(self.root.resolve().parent)
+
+        result = self.run_command("start", "--launcher", "tmux-session", task_id)
+
+        arguments = self.tmux_arguments()
+        self.assertEqual("new-window", arguments[0])
+        self.assertEqual(f"{session}:", arguments[arguments.index("-t") + 1])
+        self.assertEqual("kb-任务-session-reuse", arguments[arguments.index("-n") + 1])
+        self.assertFalse((self.root / "tmux.log.setopt").exists())
+        self.assertIn(f"会话={session}", result.stdout)
+        # 已在 tmux 里时给切换命令而不是 attach.
+        self.assertIn(f"tmux switch-client -t {session}", result.stdout)
+
+    def test_tmux_session_launcher_reuses_an_unmarked_session(self) -> None:
+        task_id, _ = self.make_todo("session-unmarked")
+        self.install_fake_launchers()
+        session = self.project_session()
+        self.env["KANBAN_TMUX_SESSIONS"] = session
+
+        self.run_command("start", "--launcher", "tmux-session", task_id)
+
+        arguments = self.tmux_arguments()
+        self.assertEqual("new-window", arguments[0])
+        self.assertEqual(f"{session}:", arguments[arguments.index("-t") + 1])
+
+    def test_tmux_session_launcher_avoids_another_projects_session(self) -> None:
+        task_id, _ = self.make_todo("session-conflict")
+        self.install_fake_launchers()
+        self.env["KANBAN_TMUX_SESSIONS"] = self.project_session()
+        self.env["KANBAN_TMUX_PROJECT"] = "/somewhere/else"
+
+        result = self.run_command("start", "--launcher", "tmux-session", task_id)
+
+        arguments = self.tmux_arguments()
+        self.assertEqual("new-session", arguments[0])
+        self.assertEqual(self.project_session("-2"), arguments[arguments.index("-s") + 1])
+        self.assertIn(f"会话={self.project_session('-2')}", result.stdout)
+
+    def test_tmux_session_launcher_reads_the_machine_config(self) -> None:
+        task_id, _ = self.make_todo("session-config")
+        self.install_fake_launchers()
+        self.write_onevoke_config("codex", "tmux-session")
+        self.env.pop("TMUX")
+        self.env.pop("TMUX_PANE")
+
+        self.run_command("start", task_id)
+
+        self.assertEqual("new-session", self.tmux_arguments()[0])
+
+    def test_tmux_session_launcher_failure_restores_todo(self) -> None:
+        task_id, task = self.make_todo("session-rollback")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_launchers()
+        self.env["KANBAN_TMUX_FAIL"] = "1"
+
+        result = self.run_command(
+            "start", "--launcher", "tmux-session", task_id, succeeds=False
+        )
+
+        self.assertIn("tmux new-session 失败", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
 
     def test_rejects_invalid_transition_and_duplicate_id(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-duplicate-task"

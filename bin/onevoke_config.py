@@ -17,7 +17,7 @@ SCHEMA_VERSION = 1
 EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
-LAUNCHERS = ("tmux", "foreground")
+LAUNCHERS = ("tmux", "tmux-session", "foreground")
 LANGUAGES = ("cn", "en")
 # model 允许空字符串, 表示用对应 CLI 自己的默认模型.
 KANBAN_MODEL_DEFAULTS = {

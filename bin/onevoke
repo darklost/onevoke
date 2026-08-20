@@ -271,10 +271,15 @@ def print_doctor() -> bool:
                 f"{name} 不在 PATH. 请把 ~/.local/bin 加入 PATH 后重新打开 shell.",
                 f"{name} is not in PATH. Add ~/.local/bin to PATH and reopen your shell.",
             ))
+    try:
+        # 只用来决定要不要提示进入 session; 配置本身的错误留给下面的统一校验报告.
+        configured_launcher = effective_config(load_config())["launcher"]
+    except ConfigError:
+        configured_launcher = None
     tmux = shutil.which("tmux")
     if tmux:
         success(f"tmux: {tmux}")
-        if not os.environ.get("TMUX"):
+        if not os.environ.get("TMUX") and configured_launcher != "tmux-session":
             print(
                 t(
                     f"[-] tmux: 已安装但当前不在 session. 启动: {TMUX_SESSION_HINT}",
@@ -374,16 +379,26 @@ def validate_configured_resources(
             )
 
     launcher = effective["launcher"]
-    if launcher == "tmux":
+    if launcher in ("tmux", "tmux-session"):
         if not shutil.which("tmux"):
             healthy = False
             warning(
                 t(
-                    "配置的 launcher 是 tmux, 但 tmux 不在 PATH; 请安装 tmux 或运行 onevoke welcome --reset 改选 foreground.",
-                    "The configured launcher is tmux, but tmux is not in PATH; install tmux or run onevoke welcome --reset and select foreground.",
+                    f"配置的 launcher 是 {launcher}, 但 tmux 不在 PATH; 请安装 tmux 或运行 onevoke welcome --reset 改选 foreground.",
+                    f"The configured launcher is {launcher}, but tmux is not in PATH; install tmux or run onevoke welcome --reset and select foreground.",
                 )
             )
-        elif not os.environ.get("TMUX") and config.get("welcome_complete"):
+        elif not config.get("welcome_complete"):
+            pass
+        elif launcher == "tmux-session":
+            print(
+                t(
+                    "[-] launcher=tmux-session 会按项目自动新建或复用专属 session, 不要求当前处于 tmux",
+                    "[-] launcher=tmux-session creates or reuses a per-project session automatically; being in tmux is not required",
+                ),
+                file=sys.stderr,
+            )
+        elif not os.environ.get("TMUX"):
             # 通用 tmux 段已给出唯一启动命令; 这里只在已完成配置时补充契约提示.
             print(
                 t(
@@ -605,25 +620,32 @@ def install_tmux() -> bool:
     return True
 
 
+def tmux_launcher_choices() -> list[tuple[str, str]]:
+    return [
+        ("tmux", t("tmux 当前 session 新窗口", "new window in the current tmux session")),
+        ("tmux-session", t("tmux 项目专属 session 新窗口", "new window in a per-project tmux session")),
+    ]
+
+
 def edit_launcher(config: dict[str, Any]) -> None:
     prompt = t("kanban start 使用哪种启动方式?", "How should kanban start launch tasks?")
+    foreground = ("foreground", t("当前终端前台运行", "foreground in this terminal"))
     if shutil.which("tmux"):
         config["launcher"] = ask_choice(
             prompt,
-            [
-                ("tmux", t("tmux 新窗口", "new tmux window")),
-                ("foreground", t("当前终端前台运行", "foreground in this terminal")),
-            ],
+            [*tmux_launcher_choices(), foreground],
             config["launcher"],
         )
         return
 
     choices = []
-    if config["launcher"] == "tmux":
-        choices.append(("tmux", t("tmux 新窗口 (当前未安装)", "new tmux window (not currently installed)")))
+    unavailable = t(" (当前未安装)", " (not currently installed)")
+    for value, label in tmux_launcher_choices():
+        if config["launcher"] == value:
+            choices.append((value, label + unavailable))
     choices.extend(
         (
-            ("foreground", t("当前终端前台运行", "foreground in this terminal")),
+            foreground,
             ("install-tmux", t("安装 tmux 并使用新窗口", "install tmux and use a new window")),
         )
     )
@@ -634,9 +656,13 @@ def edit_launcher(config: dict[str, Any]) -> None:
     )
     if selected == "install-tmux":
         if install_tmux():
-            config["launcher"] = "tmux"
-    elif selected == "foreground":
-        config["launcher"] = "foreground"
+            config["launcher"] = ask_choice(
+                t("tmux 已就绪, 用哪种 tmux 启动方式?", "tmux is ready; which tmux mode should be used?"),
+                tmux_launcher_choices(),
+                config["launcher"],
+            )
+    else:
+        config["launcher"] = selected
 
 
 def print_welcome_menu(config: dict[str, Any]) -> None:
@@ -732,7 +758,7 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         if not existing["welcome_complete"] and not agent_usable(agents.get(previous, {})):
             config["reviewers"][role] = review_choices[0][0]
     config["launcher"] = existing["launcher"]
-    if config["launcher"] == "tmux" and not shutil.which("tmux") and not existing["welcome_complete"]:
+    if config["launcher"].startswith("tmux") and not shutil.which("tmux") and not existing["welcome_complete"]:
         config["launcher"] = "foreground"
         warning(
             t(

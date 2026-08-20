@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ from typing import Dict, Iterable, Optional
 from onevoke_config import (
     ARGPARSE_ZH,
     LANGUAGES,
+    LAUNCHERS,
     ConfigError,
     LocalizedArgumentParser,
     apply_language_argument,
@@ -858,6 +860,71 @@ def tmux_session_id(tmux: str) -> str:
     return session
 
 
+PROJECT_SESSION_OPTION = "@onevoke_project"
+PROJECT_SESSION_CANDIDATES = 9
+
+
+def tmux_capture(tmux: str, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run([tmux, *arguments], text=True, capture_output=True, check=False)
+
+
+def project_session_name(project: Path) -> str:
+    """项目专属 session 名 kb-<目录名>-<路径摘要>; 摘要让同名目录的不同项目不会共用 session."""
+    label = re.sub(r"[\s.:]+", "-", "".join(c for c in project.name if c.isprintable()).strip()).strip("-")
+    digest = hashlib.sha256(str(project).encode("utf-8")).hexdigest()[:8]
+    return f"kb-{label[:30]}-{digest}" if label else f"kb-{digest}"
+
+
+def session_owner(tmux: str, session: str) -> Optional[str]:
+    """session 记录的项目路径; session 不存在返回 None, 存在但没有标记返回空串."""
+    # has-session 的 = 前缀强制精确匹配, 没有它 tmux 会前缀匹配到别的 session;
+    # show-options 不接受该前缀, 但同名精确匹配优先于前缀匹配, 用原名即可.
+    if tmux_capture(tmux, "has-session", "-t", f"={session}").returncode != 0:
+        return None
+    result = tmux_capture(tmux, "show-options", "-v", "-t", session, PROJECT_SESSION_OPTION)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def resolve_project_session(tmux: str, project: Path) -> tuple[str, bool]:
+    """选出该项目可用的 session 名并返回它是否已存在.
+
+    没有项目标记的同名 session 视为可复用 (兼容标记写入失败或用户手工创建);
+    只有明确属于其他项目时才退避到带序号的候选名.
+    """
+    base = project_session_name(project)
+    for index in range(1, PROJECT_SESSION_CANDIDATES + 1):
+        candidate = base if index == 1 else f"{base}-{index}"
+        owner = session_owner(tmux, candidate)
+        if owner is None:
+            return candidate, False
+        if owner in ("", str(project)):
+            return candidate, True
+    raise KanbanError(t(
+        f"没有可用的项目 session 名: {base} 及其序号候选都属于其他项目",
+        f"No project session name is available: {base} and its numbered candidates belong to other projects",
+    ))
+
+
+def tmux_launch(
+    tmux: str, session: str, create: bool, cwd: str, name: str, command: str
+) -> subprocess.CompletedProcess:
+    """在目标 session 里建任务 window; create 为真时连 session 一起建, 输出新 window id."""
+    return tmux_capture(
+        tmux,
+        "new-session" if create else "new-window",
+        *(["-d"] if create else []),
+        "-P",
+        "-F",
+        "#{window_id}",
+        *(["-s", session] if create else ["-t", session + ":"]),
+        "-c",
+        cwd,
+        "-n",
+        name,
+        command,
+    )
+
+
 def window_name(entry: Entry, text: str) -> str:
     title = title_from(text)
     label = re.sub(r"\s+", "-", "".join(c for c in title if c.isprintable()).strip()).strip("-")
@@ -894,13 +961,19 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     agent = shutil.which(agent_name)
     if not agent:
         raise KanbanError(t(f"Agent 不在 PATH: {agent_name}", f"Agent is not in PATH: {agent_name}"))
+    project = root.parent.resolve()
     tmux = None
     session = None
-    if launcher == "tmux":
+    session_exists = False
+    if launcher in ("tmux", "tmux-session"):
         tmux = shutil.which("tmux")
         if not tmux:
             raise KanbanError(t("tmux 不在 PATH; 运行 onevoke welcome 选择前台启动模式", "tmux is not in PATH; run onevoke welcome to select foreground mode"))
-        session = tmux_session_id(tmux)
+        if launcher == "tmux":
+            session = tmux_session_id(tmux)
+        else:
+            # 项目专属 session 自己建, 因此不要求 start 本身跑在 tmux 里.
+            session, session_exists = resolve_project_session(tmux, project)
     elif not (sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()):
         raise KanbanError(t(
             "前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). 在 CI、管道或无 TTY 环境请改用: kanban start --launcher tmux <task-id>",
@@ -920,36 +993,27 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind), prompt]
     try:
         write_text_atomic(moved.document, updated, entry=moved)
-        if launcher == "tmux":
-            command = shlex.join(agent_argv)
-            result = subprocess.run(
-                [
-                    tmux,
-                    "new-window",
-                    "-P",
-                    "-F",
-                    "#{window_id}",
-                    "-t",
-                    session + ":",
-                    "-c",
-                    str(root.parent),
-                    "-n",
-                    name,
-                    command,
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                detail = result.stderr.strip() or f"exit {result.returncode}"
-                raise KanbanError(t(f"tmux new-window 失败: {detail}", f"tmux new-window failed: {detail}"))
-            window = result.stdout.strip() or "unknown"
-        else:
+        if launcher == "foreground":
             try:
                 process = subprocess.Popen(agent_argv, cwd=root.parent)
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
+        else:
+            command = shlex.join(agent_argv)
+            create = launcher == "tmux-session" and not session_exists
+            result = tmux_launch(tmux, session, create, str(root.parent), name, command)
+            if create and result.returncode != 0 and session_owner(tmux, session) in ("", str(project)):
+                # 与另一次 start 抢建同一个 session 时改为在已建好的 session 里开 window.
+                create = False
+                result = tmux_launch(tmux, session, create, str(root.parent), name, command)
+            if result.returncode != 0:
+                subcommand = "new-session" if create else "new-window"
+                detail = result.stderr.strip() or f"exit {result.returncode}"
+                raise KanbanError(t(f"tmux {subcommand} 失败: {detail}", f"tmux {subcommand} failed: {detail}"))
+            window = result.stdout.strip() or "unknown"
+            if create:
+                # 标记项目归属供后续复用校验; 写失败不影响本次启动, 未标记的 session 仍会被复用.
+                tmux_capture(tmux, "set-option", "-t", session, PROJECT_SESSION_OPTION, str(project))
     except (KanbanError, OSError, UnicodeError) as error:
         rollback_errors: list[str] = []
         try:
@@ -983,6 +1047,14 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 f"Agent 已启动但以非零状态退出: {returncode}; 卡片保留在 working",
                 f"Agent started but exited with status {returncode}; task remains in working",
             ))
+        return
+    if launcher == "tmux-session":
+        print(t(
+            f"已启动: {entry.task_id}\tAgent={agent_name}\t会话={session}\t窗口={window}",
+            f"started: {entry.task_id}\tagent={agent_name}\tsession={session}\twindow={window}",
+        ))
+        hint = f"tmux switch-client -t {session}" if os.environ.get("TMUX") else f"tmux attach -t {session}"
+        print(t(f"查看: {hint}", f"view: {hint}"))
         return
     print(t(
         f"已启动: {entry.task_id}\tAgent={agent_name}\t窗口={window}",
@@ -1261,7 +1333,7 @@ def parser() -> argparse.ArgumentParser:
     start_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
     start_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
     start_parser.add_argument(
-        "--launcher", choices=("tmux", "foreground"), help=t("覆盖配置中的启动方式", "override the configured launcher")
+        "--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
 
     commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
