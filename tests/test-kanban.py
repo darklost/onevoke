@@ -2233,10 +2233,11 @@ N/A
         self.assertEqual(4, model.selected_indexes["todo"])
         self.assertEqual(2, model.scrolls["todo"])
 
-        self.assertTrue(model.set_board({
+        self.assertFalse(model.set_board({
             "generated_at": "t4",
             "tasks": make_tasks(remaining),
         }))
+        self.assertEqual("t4", model.generated_at)
         self.assertFalse(model.set_board({
             "generated_at": "t4",
             "tasks": make_tasks(remaining),
@@ -2432,11 +2433,21 @@ N/A
             get_task=lambda _task_id: {},
         )
         tui.last_refresh = 0
+        renders = {"count": 0}
+        original_render = tui._render
+
+        def counted_render(*, force: bool = False) -> None:
+            renders["count"] += 1
+            original_render(force=force)
+
         with mock.patch.object(kanban_tui.KanbanTui, "_init_style"), mock.patch.object(
+            tui, "_render", side_effect=counted_render
+        ), mock.patch.object(
             kanban_tui.time, "monotonic", side_effect=[30, 30, 31]
         ):
             tui.run({"generated_at": "0", "tasks": []})
         self.assertEqual(1, calls["board"])
+        self.assertEqual(1, renders["count"])
         self.assertFalse(tui.running)
 
     def test_tui_single_mode_searches_opens_detail_and_quits_on_a_pty(self) -> None:

@@ -263,12 +263,11 @@ class BoardModel:
         ]
         generated_at = str(payload.get("generated_at") or "")
         next_key = board_content_key(parsed)
-        stamp_changed = generated_at != self.generated_at
         error_cleared = bool(self.refresh_error)
         self.generated_at = generated_at
         self.refresh_error = ""
         if next_key == self.content_key:
-            return stamp_changed or error_cleared
+            return error_cleared
         self.tasks = parsed
         self.content_key = next_key
         self.normalize()
