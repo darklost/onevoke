@@ -414,6 +414,17 @@ def metadata_from(text: str, name: str) -> str:
     return match.group(1) if match else ""
 
 
+def task_group_from(text: str) -> str:
+    task_group = metadata_from(text, "任务组")
+    if task_group:
+        return task_group
+    discussion = section_body(text, "讨论与决策")
+    if not discussion:
+        return ""
+    match = re.search(r"(?m)^任务组:[ \t]*(.*?)[ \t]*$", discussion)
+    return match.group(1) if match else ""
+
+
 def completion_metadata(text: str) -> str:
     value = datetime.now().strftime("%Y-%m-%d %H:%M")
     matches = list(re.finditer(r"(?m)^- 完成时间:.*$", text))
@@ -550,6 +561,7 @@ def render_contract(title: str, task_type: str) -> str:
     return f"""# {title}
 
 - 类型: {TYPE_NAMES[task_type]}
+- 任务组:
 - 创建时间: {created}
 - 负责人:
 - 开始时间:
@@ -1021,6 +1033,7 @@ def web_task_summary(entry: Entry, text: Optional[str] = None) -> dict:
         "state": entry.state,
         "kind": entry.kind,
         "type": metadata_from(document, "类型") or "-",
+        "task_group": task_group_from(document),
         "assignee": metadata_from(document, "负责人"),
         "created_at": metadata_from(document, "创建时间"),
         "started_at": metadata_from(document, "开始时间"),
@@ -1061,7 +1074,10 @@ def web_page_context() -> dict:
             "只读查看本机文件看板; 任务变化通过 SSE 推送.",
             "Read-only view of the local file kanban; task changes are pushed over SSE.",
         ),
-        "keyword_placeholder": t("搜索标题或任务 ID", "Search title or task ID"),
+        "keyword_placeholder": t(
+            "搜索标题, 任务 ID 或任务组",
+            "Search title, task ID, or task group",
+        ),
         "show_archived": t("显示已存档", "Show archived"),
         "show_active": t("显示活跃", "Show active"),
         "load_failed_title": t("加载任务失败", "Failed to load tasks"),

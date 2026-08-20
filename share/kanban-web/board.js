@@ -51,6 +51,7 @@
       const haystack = [
         task.title,
         task.task_id,
+        task.task_group,
         task.type,
         task.assignee,
         task.state,
@@ -76,7 +77,11 @@
     const card = makeElement("button", "task-card");
     card.type = "button";
     card.dataset.taskId = task.task_id;
-    card.append(makeElement("p", "task-title"), makeElement("p", "task-id"));
+    card.append(
+      makeElement("p", "task-title"),
+      makeElement("p", "task-group"),
+      makeElement("p", "task-id"),
+    );
 
     const meta = makeElement("div", "task-meta");
     const badges = makeElement("div", "task-badges");
@@ -98,6 +103,9 @@
   function updateCard(card, task) {
     card.dataset.state = task.state;
     card.querySelector(".task-title").textContent = task.title;
+    const taskGroup = card.querySelector(".task-group");
+    taskGroup.textContent = task.task_group || "";
+    taskGroup.hidden = !task.task_group;
     card.querySelector(".task-id").textContent = task.task_id;
     card.querySelector(".badge.type").textContent = task.type || "-";
 

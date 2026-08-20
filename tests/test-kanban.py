@@ -235,6 +235,20 @@ printf '%s\\n' '@9'
         )
         self.assertEqual("通过: 2 个任务\n", self.run_command("check").stdout)
 
+    def test_new_templates_include_optional_task_group_metadata(self) -> None:
+        today = datetime.now().strftime("%Y%m%d")
+        self.run_command("new", "chore", "small-group-field", "小任务组字段")
+        self.run_command(
+            "new", "--large", "chore", "large-group-field", "大任务组字段"
+        )
+
+        small = self.root / "backlog" / f"{today}-small-group-field-task.md"
+        large = self.root / "backlog" / f"{today}-large-group-field-task" / "spec.md"
+        for document in (small, large):
+            text = document.read_text(encoding="utf-8")
+            self.assertEqual(1, text.count("- 任务组:\n"))
+            self.assertIn("- 类型: Chore\n- 任务组:\n- 创建时间:", text)
+
     def test_pick_moves_only_ready_backlog_task_to_todo(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-pick-task"
         self.run_command("new", "chore", "pick", "挑选任务")
@@ -1472,6 +1486,42 @@ N/A
         bad = self.run_command("web", "--refresh", "0", succeeds=False)
         self.assertIn("扫描间隔", bad.stderr)
 
+    def test_web_task_group_supports_new_legacy_and_missing_metadata(self) -> None:
+        task_id, task = self.make_todo("web-task-group")
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_web_group_test")
+        finally:
+            sys.path.pop(0)
+
+        current = task.read_text(encoding="utf-8")
+        missing = current.replace("- 任务组:\n", "", 1)
+        task.write_text(missing, encoding="utf-8")
+        payload = kanban["web_board_payload"](self.root)
+        self.assertEqual("", payload["tasks"][0]["task_group"])
+
+        legacy_group = "20260820-legacy-web-group"
+        legacy = missing.replace(
+            "## 讨论与决策\n\n",
+            f"## 讨论与决策\n\n任务组: {legacy_group}\n前置任务: N/A\n\n",
+            1,
+        )
+        task.write_text(legacy, encoding="utf-8")
+        payload = kanban["web_task_payload"](self.root, task_id)
+        self.assertEqual(legacy_group, payload["task_group"])
+
+        current_group = "20260820-current-web-group"
+        current_with_legacy = current.replace(
+            "- 任务组:\n", f"- 任务组: {current_group}\n", 1
+        ).replace(
+            "## 讨论与决策\n\n",
+            f"## 讨论与决策\n\n任务组: {legacy_group}\n前置任务: N/A\n\n",
+            1,
+        )
+        task.write_text(current_with_legacy, encoding="utf-8")
+        payload = kanban["web_task_payload"](self.root, task_id)
+        self.assertEqual(current_group, payload["task_group"])
+
     def test_web_sse_only_publishes_content_changes(self) -> None:
         import queue
 
@@ -1607,6 +1657,8 @@ N/A
             self.assertNotIn("boardEl.innerHTML", script)
             self.assertNotIn("setInterval", script)
             self.assertIn("KanbanMarkdown.renderMarkdown", script)
+            self.assertIn('makeElement("p", "task-group")', script)
+            self.assertIn("taskGroup.hidden = !task.task_group", script)
 
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/static/markdown.js", timeout=2
