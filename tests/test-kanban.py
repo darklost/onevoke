@@ -1522,6 +1522,31 @@ N/A
         payload = kanban["web_task_payload"](self.root, task_id)
         self.assertEqual(current_group, payload["task_group"])
 
+    def test_web_task_group_card_renders_as_badge_after_task_id(self) -> None:
+        script = (PROJECT_ROOT / "share" / "kanban-web" / "board.js").read_text(
+            encoding="utf-8"
+        )
+        css = (PROJECT_ROOT / "share" / "kanban-web" / "board.css").read_text(
+            encoding="utf-8"
+        )
+        title_at = script.index('makeElement("p", "task-title")')
+        task_id_at = script.index('makeElement("p", "task-id")')
+        group_at = script.index('makeElement("span", "badge task-group")')
+        self.assertLess(title_at, task_id_at)
+        self.assertLess(task_id_at, group_at)
+        self.assertIn("taskGroup.hidden = !task.task_group", script)
+        self.assertIn("task.task_group,", script)
+
+        group_style = re.search(r"\.badge\.task-group\s*\{([^}]+)\}", css)
+        self.assertIsNotNone(group_style)
+        group_css = group_style.group(1)
+        self.assertIn("overflow-wrap: anywhere", group_css)
+        self.assertIn("max-width: 100%", group_css)
+        self.assertIn("width: fit-content", group_css)
+        self.assertIn("[hidden]", css)
+        self.assertIn("display: none !important", css)
+        self.assertIn("border-radius: calc(var(--radius) - 4px)", css)
+
     def test_web_sse_only_publishes_content_changes(self) -> None:
         import queue
 
@@ -1657,7 +1682,7 @@ N/A
             self.assertNotIn("boardEl.innerHTML", script)
             self.assertNotIn("setInterval", script)
             self.assertIn("KanbanMarkdown.renderMarkdown", script)
-            self.assertIn('makeElement("p", "task-group")', script)
+            self.assertIn('makeElement("span", "badge task-group")', script)
             self.assertIn("taskGroup.hidden = !task.task_group", script)
 
             with urllib.request.urlopen(

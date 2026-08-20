@@ -288,14 +288,6 @@ body {
   font-weight: 500;
 }
 
-.task-group {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.7rem;
-  overflow-wrap: anywhere;
-}
-
 .task-meta {
   display: flex;
   align-items: center;
@@ -369,6 +361,22 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.7rem;
   overflow-wrap: anywhere;
+}
+
+.badge.task-group {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  height: auto;
+  margin: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  background: var(--amber-100);
+  color: var(--amber-800);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  line-height: 1.35;
 }
 
 .empty-state {

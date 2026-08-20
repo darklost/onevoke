@@ -79,8 +79,8 @@
     card.dataset.taskId = task.task_id;
     card.append(
       makeElement("p", "task-title"),
-      makeElement("p", "task-group"),
       makeElement("p", "task-id"),
+      makeElement("span", "badge task-group"),
     );
 
     const meta = makeElement("div", "task-meta");
