@@ -121,7 +121,12 @@ class BoardModel:
         default_factory=lambda: {state: 0 for state in ALL_STATES}
     )
     generated_at: str = ""
-    error: str = ""
+    refresh_error: str = ""
+    detail_error: str = ""
+
+    @property
+    def error(self) -> str:
+        return self.refresh_error or self.detail_error
 
     @property
     def states(self) -> tuple[str, ...]:
@@ -141,7 +146,7 @@ class BoardModel:
             if isinstance(task, dict) and task.get("state") in ALL_STATES
         ]
         self.generated_at = str(payload.get("generated_at") or "")
-        self.error = ""
+        self.refresh_error = ""
         self.normalize()
 
     def tasks_for(self, state: str) -> list[dict]:
@@ -253,7 +258,7 @@ class KanbanTui:
         try:
             self.model.set_board(self.get_board())
         except Exception as error:  # 刷新失败时保留上一份有效看板.
-            self.model.error = str(error)
+            self.model.refresh_error = str(error)
         self.last_refresh = time.monotonic()
 
     def _open_detail(self) -> None:
@@ -263,9 +268,9 @@ class KanbanTui:
         try:
             self.detail = self.get_task(str(selected.get("task_id") or ""))
             self.detail_scroll = 0
-            self.model.error = ""
+            self.model.detail_error = ""
         except Exception as error:
-            self.model.error = str(error)
+            self.model.detail_error = str(error)
 
     def _handle_board_key(self, key) -> None:
         if key in ("q", "Q"):

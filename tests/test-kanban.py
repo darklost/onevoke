@@ -1663,10 +1663,46 @@ N/A
             "kind": "small",
             "document": "# Detail\n\nBody",
         }
-        tui.model.error = "board unavailable"
+        tui.model.refresh_error = "board unavailable"
         tui._render_detail()
         footer = next(write for write in detail_screen.writes if write[0] == 11)
         self.assertIn("Load failed: board unavailable", footer[2])
+
+        controller = kanban_tui.KanbanTui(
+            detail_screen,
+            single=True,
+            refresh_interval=60,
+            context=context,
+            get_board=lambda: (_ for _ in ()).throw(
+                UnicodeError("other card is invalid UTF-8")
+            ),
+            get_task=lambda task_id: {
+                "task_id": task_id,
+                "title": "Readable task",
+                "document": "# Readable task",
+            },
+        )
+        controller.model.set_board({
+            "tasks": [
+                {
+                    "task_id": "20260820-readable-task",
+                    "title": "Readable task",
+                    "state": "backlog",
+                }
+            ],
+        })
+        controller._refresh()
+        controller._open_detail()
+        self.assertEqual(
+            "other card is invalid UTF-8", controller.model.refresh_error
+        )
+        self.assertEqual(
+            "other card is invalid UTF-8", controller.model.error
+        )
+        controller.get_board = lambda: {"tasks": []}
+        controller._refresh()
+        self.assertEqual("", controller.model.refresh_error)
+        self.assertEqual("", controller.model.error)
 
     def test_tui_single_mode_searches_opens_detail_and_quits_on_a_pty(self) -> None:
         self.make_todo("tui-pty")
