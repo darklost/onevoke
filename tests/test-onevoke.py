@@ -494,6 +494,27 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("Grok (当前不可用) (当前)", output)
         self.assertIn("tmux 新窗口 (当前未安装) (当前)", output)
 
+    def test_welcome_failed_tmux_install_keeps_current_launcher(self) -> None:
+        self.install_fake_environment(tmux=False)
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+        # 无包管理器时安装失败; 第三个 launcher 选项是安装 tmux.
+        returncode, output = self.run_on_tty("6\n3\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("没有找到受支持的包管理器", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("tmux", config["launcher"])
+
     def test_yes_no_uses_text_input_and_enter_uses_default(self) -> None:
         onevoke = load_onevoke_module()
         stderr = io.StringIO()

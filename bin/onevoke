@@ -633,7 +633,8 @@ def edit_launcher(config: dict[str, Any]) -> None:
         config["launcher"],
     )
     if selected == "install-tmux":
-        config["launcher"] = "tmux" if install_tmux() else "foreground"
+        if install_tmux():
+            config["launcher"] = "tmux"
     elif selected == "foreground":
         config["launcher"] = "foreground"
 
