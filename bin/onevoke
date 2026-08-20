@@ -694,8 +694,8 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         if state["path"] and not agent_usable(state):
             warning(
                 t(
-                    f"{AGENT_LABELS[name]} 的 --version 失败, 已从可选列表排除: {state['path']}",
-                    f"{AGENT_LABELS[name]} --version failed; excluded from choices: {state['path']}",
+                    f"{AGENT_LABELS[name]} 的 --version 失败, 不可作为新选择: {state['path']}",
+                    f"{AGENT_LABELS[name]} --version failed; unavailable as a new choice: {state['path']}",
                 )
             )
     execution_choices = [
@@ -703,7 +703,7 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         for name, state in agents.items()
         if agent_usable(state)
     ]
-    if not execution_choices:
+    if not execution_choices and not existing["welcome_complete"]:
         raise OnevokeError(
             t(
                 "没有发现可用的 Agent (--version 须成功). 请先安装 Codex、Claude 或 Grok.",
@@ -715,7 +715,7 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         for name in REVIEW_AGENTS
         if agent_usable(agents[name])
     ]
-    if not review_choices:
+    if not review_choices and not existing["welcome_complete"]:
         raise OnevokeError(t("没有发现可用 Reviewer. 请安装 Codex、Claude 或 Grok.", "No usable Reviewer found. Install Codex, Claude, or Grok."))
 
     config = default_config()

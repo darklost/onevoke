@@ -515,6 +515,48 @@ class OnevokeCommandTest(unittest.TestCase):
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("tmux", config["launcher"])
 
+    def test_welcome_reset_works_when_all_agents_are_unavailable(self) -> None:
+        self.install_fake_environment(tmux=True)
+        for agent in ("codex", "claude", "grok"):
+            self.fake_command(agent, "#!/bin/sh\nexit 1\n")
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "claude",
+            "launcher": "tmux",
+            "reviewers": {
+                "PM": "codex",
+                "CSA": "claude",
+                "Hacker": "grok",
+                "QA": "codex",
+            },
+            "memsearch": {"enabled": True},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+        # 所有 Agent 暂不可用时仍可只把 launcher 改成 foreground.
+        returncode, output = self.run_on_tty("6\n2\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("foreground", config["launcher"])
+        self.assertEqual("claude", config["kanban_agent"])
+        self.assertEqual(existing["reviewers"], config["reviewers"])
+        self.assertTrue(config["memsearch"]["enabled"])
+        self.assertIn("不可作为新选择", output)
+
+    def test_first_welcome_still_rejects_when_all_agents_are_unavailable(self) -> None:
+        self.install_fake_environment(tmux=True)
+        for agent in ("codex", "claude", "grok"):
+            self.fake_command(agent, "#!/bin/sh\nexit 1\n")
+
+        returncode, output = self.run_on_tty("", "welcome")
+
+        self.assertEqual(1, returncode, output)
+        self.assertIn("没有发现可用的 Agent", output)
+        self.assertFalse(self.config.exists())
+
     def test_yes_no_uses_text_input_and_enter_uses_default(self) -> None:
         onevoke = load_onevoke_module()
         stderr = io.StringIO()
@@ -703,7 +745,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, returncode, output)
         self.assertIn("--version 失败", output)
-        self.assertIn("已从可选列表排除", output)
+        self.assertIn("不可作为新选择", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("grok", config["kanban_agent"])
         self.assertFalse(config["memsearch"]["enabled"])
