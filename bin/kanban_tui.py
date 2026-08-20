@@ -308,12 +308,20 @@ class KanbanTui:
                 self.has_default_colors = False
         self._apply_theme()
 
+    def _set_background(self, attr: int) -> None:
+        try:
+            self.screen.bkgd(" ", attr)
+        except curses.error:
+            pass
+
     def _apply_theme(self) -> None:
         self.colors = {}
         if not self.has_colors:
             return
         if self.theme == "auto":
             if not self.has_default_colors:
+                # auto 降级为纯属性渲染时清除显式主题遗留的窗口背景.
+                self._set_background(0)
                 return
             background_code = os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1]
             light_background = background_code in {"7", "15"}
@@ -339,12 +347,9 @@ class KanbanTui:
         self.colors["id"] = self.colors.get("working", 0)
         self.colors["group"] = self.colors.get("todo", 0)
         self.colors["error"] = self.colors.get("trash", 0)
-        try:
-            self.screen.bkgd(
-                " ", 0 if self.theme == "auto" else self.colors.get("text", 0)
-            )
-        except curses.error:
-            pass
+        self._set_background(
+            0 if self.theme == "auto" else self.colors.get("text", 0)
+        )
 
     def _set_cursor(self, visible: bool) -> None:
         try:

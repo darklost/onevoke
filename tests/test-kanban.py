@@ -1800,15 +1800,19 @@ N/A
         from unittest import mock
 
         class FakeScreen:
+            def __init__(self):
+                self.background = None
+
             def getmaxyx(self):
                 return 24, 100
 
             def bkgd(self, _char, attr=0):
-                pass
+                self.background = attr
 
         pairs = {}
+        screen = FakeScreen()
         tui = kanban_tui.KanbanTui(
-            FakeScreen(),
+            screen,
             single=True,
             refresh_interval=60,
             context={},
@@ -1841,13 +1845,15 @@ N/A
             self.assertTrue(
                 all(bg == curses.COLOR_BLACK for _fg, bg in pairs.values())
             )
+            self.assertEqual(tui.colors["text"], screen.background)
 
-            # auto 需要默认色扩展, 不可用时回退纯属性渲染.
+            # auto 需要默认色扩展, 不可用时回退纯属性渲染并清除窗口背景.
             pairs.clear()
             tui.theme = "auto"
             tui._apply_theme()
             self.assertEqual({}, tui.colors)
             self.assertEqual({}, pairs)
+            self.assertEqual(0, screen.background)
 
     def test_tui_board_height_boundary_keeps_footer_off_cards(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
