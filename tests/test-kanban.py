@@ -1790,6 +1790,139 @@ N/A
         self.assertNotEqual(0, tui.colors["trash"])
         self.assertEqual(curses.A_REVERSE, tui._footer_attr())
 
+    def test_tui_explicit_theme_works_without_default_colors(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+        import curses
+        from unittest import mock
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 100
+
+            def bkgd(self, _char, attr=0):
+                pass
+
+        pairs = {}
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=60,
+            context={},
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+            theme="dark",
+        )
+        with mock.patch.object(kanban_tui.curses, "has_colors", return_value=True), \
+                mock.patch.object(
+                    kanban_tui.curses,
+                    "use_default_colors",
+                    side_effect=curses.error("default colors unsupported"),
+                ), \
+                mock.patch.object(
+                    kanban_tui.curses,
+                    "init_pair",
+                    side_effect=lambda index, fg, bg: pairs.__setitem__(
+                        index, (fg, bg)
+                    ),
+                ), \
+                mock.patch.object(
+                    kanban_tui.curses,
+                    "color_pair",
+                    side_effect=lambda index: index << 8,
+                ):
+            tui._init_style()
+            # 显式主题不依赖默认色扩展, 固定背景色照常初始化.
+            self.assertFalse(tui.has_default_colors)
+            self.assertNotEqual(0, tui.colors["working"])
+            self.assertTrue(
+                all(bg == curses.COLOR_BLACK for _fg, bg in pairs.values())
+            )
+
+            # auto 需要默认色扩展, 不可用时回退纯属性渲染.
+            pairs.clear()
+            tui.theme = "auto"
+            tui._apply_theme()
+            self.assertEqual({}, tui.colors)
+            self.assertEqual({}, pairs)
+
+    def test_tui_board_height_boundary_keeps_footer_off_cards(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        class FakeScreen:
+            def __init__(self, height, width):
+                self.height = height
+                self.width = width
+                self.writes = []
+
+            def getmaxyx(self):
+                return self.height, self.width
+
+            def addstr(self, y, x, text, attr=0):
+                self.writes.append((y, x, text))
+
+            def move(self, y, x):
+                pass
+
+        context = {
+            "too_small": "Terminal is too small.",
+            "state_labels": {state: state for state in STATES},
+            "size_labels": {"small": "small", "large": "large"},
+        }
+        board = {
+            "tasks": [
+                {
+                    "task_id": "20260820-boundary-task",
+                    "title": "Boundary",
+                    "state": "backlog",
+                    "type": "chore",
+                    "kind": "small",
+                    "assignee": "codex",
+                    "time": "08-20 23:00",
+                }
+            ],
+        }
+
+        short = FakeScreen(8, 40)
+        tui = kanban_tui.KanbanTui(
+            short,
+            single=True,
+            refresh_interval=60,
+            context=context,
+            get_board=lambda: board,
+            get_task=lambda _task_id: {},
+        )
+        tui.model.set_board(board)
+        tui._render_board()
+        self.assertTrue(
+            any("Terminal is too small." in text for _y, _x, text in short.writes)
+        )
+
+        tall = FakeScreen(9, 40)
+        tui = kanban_tui.KanbanTui(
+            tall,
+            single=True,
+            refresh_interval=60,
+            context=context,
+            get_board=lambda: board,
+            get_task=lambda _task_id: {},
+        )
+        tui.model.set_board(board)
+        tui._render_board()
+        card_rows = [y for y, _x, text in tall.writes if "codex" in text]
+        footer_rows = [y for y, _x, text in tall.writes if y == 8]
+        # 9 行时卡片末行 (负责人/时间) 在第 7 行, 页脚独占第 8 行.
+        self.assertEqual([7], card_rows)
+        self.assertTrue(footer_rows)
+        self.assertFalse(any(y == 8 for y in card_rows))
+
     def test_tui_text_helpers_handle_wide_characters(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:

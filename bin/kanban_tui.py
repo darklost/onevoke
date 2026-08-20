@@ -251,6 +251,7 @@ class KanbanTui:
         self.refresh_interval = refresh_interval
         self.theme = theme
         self.has_colors = False
+        self.has_default_colors = False
         self.context = context
         self.get_board = get_board
         self.get_task = get_task
@@ -296,10 +297,15 @@ class KanbanTui:
             self.glyphs = dict(FANCY_GLYPHS)
         try:
             self.has_colors = curses.has_colors()
-            if self.has_colors:
-                curses.use_default_colors()
         except curses.error:
             self.has_colors = False
+        if self.has_colors:
+            # 默认色扩展只影响 auto 主题; 不支持时 light/dark 仍可用固定背景色.
+            try:
+                curses.use_default_colors()
+                self.has_default_colors = True
+            except curses.error:
+                self.has_default_colors = False
         self._apply_theme()
 
     def _apply_theme(self) -> None:
@@ -307,6 +313,8 @@ class KanbanTui:
         if not self.has_colors:
             return
         if self.theme == "auto":
+            if not self.has_default_colors:
+                return
             background_code = os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1]
             light_background = background_code in {"7", "15"}
             palette = dict(THEME_PALETTES["light" if light_background else "dark"])
