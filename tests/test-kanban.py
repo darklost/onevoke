@@ -1707,6 +1707,13 @@ N/A
         self.assertEqual(3, kanban_tui.visible_column_count(62, 4))
         self.assertEqual(4, kanban_tui.visible_column_count(83, 4))
         self.assertEqual(1, kanban_tui.visible_column_count(80, 4, single=True))
+        for width, count in ((41, 2), (62, 3), (83, 4)):
+            layout = kanban_tui.column_geometry(width, count)
+            self.assertEqual(count, len(layout))
+            self.assertTrue(all(column_width >= 20 for _x, column_width, _sep in layout))
+            last_x, last_width, last_sep = layout[-1]
+            self.assertFalse(last_sep)
+            self.assertEqual(width, last_x + last_width)
 
         model = kanban_tui.BoardModel()
         self.assertEqual(("backlog", "todo", "working"), model.visible_states(3))

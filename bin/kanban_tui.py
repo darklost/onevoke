@@ -153,6 +153,22 @@ def visible_column_count(width: int, total: int, *, single: bool = False) -> int
     return min(total, maximum)
 
 
+def column_geometry(width: int, count: int) -> list[tuple[int, int, bool]]:
+    count = max(1, count)
+    separators = count - 1
+    usable = max(0, width - separators)
+    layout = []
+    cursor = 0
+    for index in range(count):
+        start = index * usable // count
+        end = (index + 1) * usable // count
+        column_width = end - start
+        has_separator = index < separators
+        layout.append((cursor, column_width, has_separator))
+        cursor += column_width + (1 if has_separator else 0)
+    return layout
+
+
 class ScreenBuffer:
     def __init__(self, height: int, width: int) -> None:
         self.height = height
@@ -723,14 +739,12 @@ class KanbanTui:
         more_right = self.model.column_offset + len(states) < len(self.model.states)
         body_top = 4
         body_height = height - body_top - 1
-        for index, state in enumerate(states):
-            x = index * width // len(states)
-            end = (index + 1) * width // len(states)
-            separator = index < len(states) - 1
-            column_width = end - x - (1 if separator else 0)
+        for index, (state, (x, column_width, separator)) in enumerate(
+            zip(states, column_geometry(width, len(states)))
+        ):
             if separator:
                 for y in range(2, height - 1):
-                    self._add(y, end - 1, self.glyphs["vbar"], curses.A_DIM, 1)
+                    self._add(y, x + column_width, self.glyphs["vbar"], curses.A_DIM, 1)
             self._render_column(
                 state,
                 x,
