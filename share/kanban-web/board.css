@@ -125,7 +125,7 @@ body {
 }
 
 .toolbar-group[data-align="start"] {
-  flex: 1;
+  flex: 1 1 14rem;
 }
 
 .toolbar-group[data-align="end"] {
@@ -140,6 +140,7 @@ body {
 
 .input {
   width: min(100%, 220px);
+  min-width: 12rem;
   height: 2.25rem;
   padding: 0 0.75rem;
   border: 1px solid var(--input);
@@ -180,6 +181,13 @@ body {
 
 .button:hover {
   opacity: 0.92;
+}
+
+@media (pointer: coarse) {
+  .input,
+  .button {
+    height: 2.75rem;
+  }
 }
 
 .refresh-status {
