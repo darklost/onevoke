@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 
 import argparse
+import fcntl
 import io
 import json
 import os
+import pty
 import re
 import runpy
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import unicodedata
 import unittest
 from datetime import datetime
@@ -1485,6 +1489,138 @@ N/A
         self.assertIn("默认 60", help_text)
         bad = self.run_command("web", "--refresh", "0", succeeds=False)
         self.assertIn("扫描间隔", bad.stderr)
+
+    def test_tui_help_and_rejects_invalid_or_noninteractive_use(self) -> None:
+        help_text = self.run_command("tui", "--help").stdout
+        self.assertIn("--single", help_text)
+        self.assertIn("--refresh", help_text)
+        self.assertIn("默认 60", help_text)
+
+        bad_refresh = self.run_command("tui", "--refresh", "0", succeeds=False)
+        self.assertIn("刷新间隔", bad_refresh.stderr)
+        noninteractive = self.run_command("tui", succeeds=False)
+        self.assertIn("TUI 需要交互终端", noninteractive.stderr)
+        self.assertIn("stdin/stdout 均为 tty", noninteractive.stderr)
+
+    def test_tui_model_filters_web_fields_and_navigates_columns(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        model = kanban_tui.BoardModel(single=True)
+        model.set_board({
+            "generated_at": "2026-08-20 22:30:00",
+            "tasks": [
+                {
+                    "task_id": "20260820-first-task",
+                    "title": "第一项",
+                    "state": "todo",
+                    "task_group": "20260820-terminal-group",
+                    "type": "Feature",
+                    "assignee": "Codex",
+                },
+                {
+                    "task_id": "20260820-second-task",
+                    "title": "Second item",
+                    "state": "todo",
+                    "task_group": "",
+                    "type": "Bug",
+                    "assignee": "",
+                },
+                {
+                    "task_id": "20260820-old-task",
+                    "title": "Old item",
+                    "state": "archived",
+                    "task_group": "",
+                    "type": "Chore",
+                    "assignee": "QA",
+                },
+            ],
+        })
+
+        self.assertTrue(model.single)
+        self.assertEqual(kanban_tui.ACTIVE_STATES, model.states)
+        model.column_index = model.states.index("todo")
+        self.assertEqual("20260820-first-task", model.selected_task()["task_id"])
+        model.move_task(1)
+        self.assertEqual("20260820-second-task", model.selected_task()["task_id"])
+
+        model.query = "terminal-group"
+        model.normalize()
+        self.assertEqual(["20260820-first-task"], [
+            task["task_id"] for task in model.tasks_for("todo")
+        ])
+        model.query = "qa"
+        model.normalize()
+        self.assertEqual([], model.tasks_for("todo"))
+        self.assertEqual(["20260820-old-task"], [
+            task["task_id"] for task in model.tasks_for("archived")
+        ])
+
+        model.query = ""
+        model.toggle_archived()
+        self.assertEqual(kanban_tui.ALL_STATES, model.states)
+        model.column_index = 0
+        model.move_column(-1)
+        self.assertEqual("trash", model.current_state)
+        model.toggle_archived()
+        self.assertEqual("done", model.current_state)
+
+    def test_tui_text_helpers_handle_wide_characters(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual(4, kanban_tui.display_width("任务"))
+        self.assertEqual("任...", kanban_tui.clip_text("任务标题", 5))
+        self.assertEqual("A B C", kanban_tui.clip_text("A\rB\x1bC", 10))
+        self.assertEqual(["任务", "标题"], kanban_tui.wrap_text("任务标题", 4))
+        task = {
+            "title": "Alpha",
+            "task_id": "id",
+            "task_group": "group-one",
+            "type": "Feature",
+            "assignee": "Codex",
+            "state": "todo",
+        }
+        for keyword in ("alpha", "ID", "group-one", "feature", "codex", "todo"):
+            self.assertTrue(kanban_tui.task_matches(task, keyword))
+        self.assertFalse(kanban_tui.task_matches(task, "missing"))
+
+    def test_tui_single_mode_searches_opens_detail_and_quits_on_a_pty(self) -> None:
+        self.make_todo("tui-pty")
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "tui",
+                "--single",
+                "--refresh",
+                "1",
+            ],
+            env={**self.env, "TERM": "xterm-256color"},
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+        try:
+            os.write(master, b"l/tui-pty\n\njqarq")
+            returncode = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+            self.fail("TUI did not exit after q")
+        finally:
+            os.close(master)
+        self.assertEqual(0, returncode)
 
     def test_web_task_group_supports_new_legacy_and_missing_metadata(self) -> None:
         task_id, task = self.make_todo("web-task-group")

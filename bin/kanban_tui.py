@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+
+import curses
+import sys
+import time
+import unicodedata
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+ACTIVE_STATES = ("backlog", "todo", "working", "done")
+ALL_STATES = ACTIVE_STATES + ("archived", "trash")
+CARD_HEIGHT = 4
+
+
+class KanbanTuiError(Exception):
+    pass
+
+
+def display_width(text: str) -> int:
+    return sum(
+        0
+        if unicodedata.combining(char)
+        else 2
+        if unicodedata.east_asian_width(char) in "WF"
+        else 1
+        for char in text
+    )
+
+
+def printable_text(text: str) -> str:
+    return "".join(
+        char
+        if char == "\n" or unicodedata.category(char) not in {"Cc", "Cf"}
+        else " "
+        for char in text
+    )
+
+
+def clip_text(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    normalized = printable_text(text.replace("\t", "    ").replace("\n", " "))
+    if display_width(normalized) <= width:
+        return normalized
+    suffix = "..." if width >= 4 else "." * width
+    available = width - display_width(suffix)
+    result = []
+    used = 0
+    for char in normalized:
+        char_width = (
+            0
+            if unicodedata.combining(char)
+            else 2
+            if unicodedata.east_asian_width(char) in "WF"
+            else 1
+        )
+        if used + char_width > available:
+            break
+        result.append(char)
+        used += char_width
+    return "".join(result) + suffix
+
+
+def pad_text(text: str, width: int) -> str:
+    clipped = clip_text(text, width)
+    return clipped + " " * max(0, width - display_width(clipped))
+
+
+def wrap_text(text: str, width: int) -> list[str]:
+    if width <= 0:
+        return []
+    result = []
+    for source_line in printable_text(text.expandtabs(4)).split("\n"):
+        if not source_line:
+            result.append("")
+            continue
+        current = []
+        current_width = 0
+        for char in source_line:
+            char_width = (
+                0
+                if unicodedata.combining(char)
+                else 2
+                if unicodedata.east_asian_width(char) in "WF"
+                else 1
+            )
+            if current and current_width + char_width > width:
+                result.append("".join(current))
+                current = []
+                current_width = 0
+            current.append(char)
+            current_width += char_width
+        result.append("".join(current))
+    return result or [""]
+
+
+def task_matches(task: dict, keyword: str) -> bool:
+    needle = keyword.strip().casefold()
+    if not needle:
+        return True
+    haystack = " ".join(
+        str(task.get(name) or "")
+        for name in ("title", "task_id", "task_group", "type", "assignee", "state")
+    ).casefold()
+    return needle in haystack
+
+
+@dataclass
+class BoardModel:
+    single: bool = False
+    tasks: list[dict] = field(default_factory=list)
+    query: str = ""
+    show_archived: bool = False
+    column_index: int = 0
+    selected_ids: dict[str, Optional[str]] = field(
+        default_factory=lambda: {state: None for state in ALL_STATES}
+    )
+    scrolls: dict[str, int] = field(
+        default_factory=lambda: {state: 0 for state in ALL_STATES}
+    )
+    generated_at: str = ""
+    error: str = ""
+
+    @property
+    def states(self) -> tuple[str, ...]:
+        return ALL_STATES if self.show_archived else ACTIVE_STATES
+
+    @property
+    def current_state(self) -> str:
+        return self.states[self.column_index]
+
+    def set_board(self, payload: dict) -> None:
+        tasks = payload.get("tasks", [])
+        if not isinstance(tasks, list):
+            raise KanbanTuiError("board payload tasks must be a list")
+        self.tasks = [
+            task
+            for task in tasks
+            if isinstance(task, dict) and task.get("state") in ALL_STATES
+        ]
+        self.generated_at = str(payload.get("generated_at") or "")
+        self.error = ""
+        self.normalize()
+
+    def tasks_for(self, state: str) -> list[dict]:
+        return [
+            task
+            for task in self.tasks
+            if task.get("state") == state and task_matches(task, self.query)
+        ]
+
+    def normalize(self) -> None:
+        self.column_index = min(self.column_index, len(self.states) - 1)
+        for state in ALL_STATES:
+            tasks = self.tasks_for(state)
+            task_ids = [str(task.get("task_id") or "") for task in tasks]
+            if self.selected_ids[state] not in task_ids:
+                self.selected_ids[state] = task_ids[0] if task_ids else None
+                self.scrolls[state] = 0
+
+    def move_column(self, delta: int) -> None:
+        self.column_index = (self.column_index + delta) % len(self.states)
+
+    def move_task(self, delta: int) -> None:
+        state = self.current_state
+        tasks = self.tasks_for(state)
+        if not tasks:
+            self.selected_ids[state] = None
+            return
+        task_ids = [str(task.get("task_id") or "") for task in tasks]
+        try:
+            index = task_ids.index(self.selected_ids[state])
+        except ValueError:
+            index = 0
+        index = max(0, min(len(task_ids) - 1, index + delta))
+        self.selected_ids[state] = task_ids[index]
+
+    def selected_task(self) -> Optional[dict]:
+        selected_id = self.selected_ids[self.current_state]
+        return next(
+            (
+                task
+                for task in self.tasks_for(self.current_state)
+                if task.get("task_id") == selected_id
+            ),
+            None,
+        )
+
+    def toggle_archived(self) -> None:
+        current = self.current_state
+        self.show_archived = not self.show_archived
+        if current in self.states:
+            self.column_index = self.states.index(current)
+        else:
+            self.column_index = len(self.states) - 1
+        self.normalize()
+
+
+class KanbanTui:
+    def __init__(
+        self,
+        screen,
+        *,
+        single: bool,
+        refresh_interval: int,
+        context: dict,
+        get_board: Callable[[], dict],
+        get_task: Callable[[str], dict],
+    ) -> None:
+        self.screen = screen
+        self.model = BoardModel(single=single)
+        self.refresh_interval = refresh_interval
+        self.context = context
+        self.get_board = get_board
+        self.get_task = get_task
+        self.searching = False
+        self.detail: Optional[dict] = None
+        self.detail_scroll = 0
+        self.last_refresh = time.monotonic()
+        self.running = True
+
+    def run(self, initial_board: dict) -> None:
+        self.model.set_board(initial_board)
+        self.screen.keypad(True)
+        self.screen.timeout(200)
+        self._set_cursor(False)
+        while self.running:
+            if time.monotonic() - self.last_refresh >= self.refresh_interval:
+                self._refresh()
+            self._render()
+            try:
+                key = self.screen.get_wch()
+            except curses.error:
+                continue
+            if key == curses.KEY_RESIZE:
+                continue
+            if self.detail is not None:
+                self._handle_detail_key(key)
+            elif self.searching:
+                self._handle_search_key(key)
+            else:
+                self._handle_board_key(key)
+
+    def _set_cursor(self, visible: bool) -> None:
+        try:
+            curses.curs_set(1 if visible else 0)
+        except curses.error:
+            pass
+
+    def _refresh(self) -> None:
+        try:
+            self.model.set_board(self.get_board())
+        except Exception as error:  # 刷新失败时保留上一份有效看板.
+            self.model.error = str(error)
+        self.last_refresh = time.monotonic()
+
+    def _open_detail(self) -> None:
+        selected = self.model.selected_task()
+        if selected is None:
+            return
+        try:
+            self.detail = self.get_task(str(selected.get("task_id") or ""))
+            self.detail_scroll = 0
+            self.model.error = ""
+        except Exception as error:
+            self.model.error = str(error)
+
+    def _handle_board_key(self, key) -> None:
+        if key in ("q", "Q"):
+            self.running = False
+        elif key in (curses.KEY_LEFT, "h", "H"):
+            self.model.move_column(-1)
+        elif key in (curses.KEY_RIGHT, "l", "L", "\t"):
+            self.model.move_column(1)
+        elif key in (curses.KEY_UP, "k", "K"):
+            self.model.move_task(-1)
+        elif key in (curses.KEY_DOWN, "j", "J"):
+            self.model.move_task(1)
+        elif key == curses.KEY_HOME:
+            self.model.move_task(-len(self.model.tasks))
+        elif key == curses.KEY_END:
+            self.model.move_task(len(self.model.tasks))
+        elif key == "/":
+            self.searching = True
+            self._set_cursor(True)
+        elif key in ("a", "A"):
+            self.model.toggle_archived()
+        elif key in ("r", "R"):
+            self._refresh()
+        elif key in ("\n", "\r", curses.KEY_ENTER):
+            self._open_detail()
+
+    def _handle_search_key(self, key) -> None:
+        if key in ("\n", "\r", curses.KEY_ENTER):
+            self.searching = False
+            self._set_cursor(False)
+        elif key == "\x1b":
+            self.model.query = ""
+            self.model.normalize()
+            self.searching = False
+            self._set_cursor(False)
+        elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
+            self.model.query = self.model.query[:-1]
+            self.model.normalize()
+        elif isinstance(key, str) and key.isprintable():
+            self.model.query += key
+            self.model.normalize()
+
+    def _handle_detail_key(self, key) -> None:
+        if key in ("q", "Q", "\x1b", curses.KEY_BACKSPACE, "\b", "\x7f"):
+            self.detail = None
+            self.detail_scroll = 0
+        elif key in (curses.KEY_UP, "k", "K"):
+            self.detail_scroll = max(0, self.detail_scroll - 1)
+        elif key in (curses.KEY_DOWN, "j", "J"):
+            self.detail_scroll += 1
+        elif key == curses.KEY_PPAGE:
+            page_height = max(1, self.screen.getmaxyx()[0] - 5)
+            self.detail_scroll = max(0, self.detail_scroll - page_height)
+        elif key == curses.KEY_NPAGE:
+            self.detail_scroll += max(1, self.screen.getmaxyx()[0] - 5)
+        elif key == curses.KEY_HOME:
+            self.detail_scroll = 0
+        elif key == curses.KEY_END:
+            self.detail_scroll = sys.maxsize
+
+    def _render(self) -> None:
+        self.screen.erase()
+        if self.detail is not None:
+            self._render_detail()
+        else:
+            self._render_board()
+        try:
+            self.screen.refresh()
+        except curses.error:
+            pass
+
+    def _add(
+        self,
+        y: int,
+        x: int,
+        text: str,
+        attr: int = 0,
+        width: Optional[int] = None,
+    ) -> None:
+        height, screen_width = self.screen.getmaxyx()
+        if y < 0 or y >= height or x < 0 or x >= screen_width:
+            return
+        available = screen_width - x if width is None else min(width, screen_width - x)
+        rendered = clip_text(text, available)
+        try:
+            self.screen.addstr(y, x, rendered, attr)
+        except curses.error:
+            pass
+
+    def _render_board(self) -> None:
+        height, width = self.screen.getmaxyx()
+        title = self.context.get("title", "Task Board")
+        self._add(0, 0, title, curses.A_BOLD, width)
+        if height < 8 or width < 32:
+            message = self.context.get("too_small", "Terminal is too small.")
+            self._add(2, 0, message, curses.A_BOLD, width)
+            quit_help = self.context.get("quit_help", "q quit")
+            self._add(height - 1, 0, quit_help, curses.A_REVERSE, width)
+            return
+
+        query_prefix = self.context.get("search", "Search") + ": "
+        query_text = self.model.query
+        mode = (
+            self.context.get("all", "all")
+            if self.model.show_archived
+            else self.context.get("active", "active")
+        )
+        stamp = self.model.generated_at or "-"
+        toolbar_right = f"{mode} | {self.context.get('updated', 'Updated')} {stamp}"
+        toolbar_left_width = max(1, width - display_width(toolbar_right) - 3)
+        search_attr = curses.A_BOLD if self.searching else 0
+        self._add(1, 0, query_prefix + query_text, search_attr, toolbar_left_width)
+        right_x = max(0, width - display_width(toolbar_right))
+        self._add(1, right_x, toolbar_right, curses.A_DIM, width - right_x)
+
+        if self.searching:
+            cursor_text = clip_text(query_prefix + query_text, toolbar_left_width)
+            cursor_x = min(width - 1, display_width(cursor_text))
+            try:
+                self.screen.move(1, cursor_x)
+            except curses.error:
+                pass
+
+        states = (self.model.current_state,) if self.model.single else self.model.states
+        minimum_column_width = 10
+        if width < len(states) * minimum_column_width:
+            message = self.context.get(
+                "use_single", "Terminal is too narrow; use --single."
+            )
+            self._add(3, 0, message, curses.A_BOLD, width)
+            self._render_footer(height, width)
+            return
+
+        body_top = 3
+        body_height = height - body_top - 1
+        for index, state in enumerate(states):
+            x = index * width // len(states)
+            end = (index + 1) * width // len(states)
+            separator = index < len(states) - 1
+            column_width = end - x - (1 if separator else 0)
+            if separator:
+                for y in range(2, height - 1):
+                    self._add(y, end - 1, "|", curses.A_DIM, 1)
+            self._render_column(
+                state,
+                x,
+                column_width,
+                body_top,
+                body_height,
+                state == self.model.current_state,
+            )
+        self._render_footer(height, width)
+
+    def _render_column(
+        self,
+        state: str,
+        x: int,
+        width: int,
+        body_top: int,
+        body_height: int,
+        focused: bool,
+    ) -> None:
+        tasks = self.model.tasks_for(state)
+        label = self.context.get("state_labels", {}).get(state, state)
+        marker = "> " if focused else "  "
+        heading = pad_text(f"{marker}{label} ({len(tasks)})", width)
+        self._add(2, x, heading, curses.A_BOLD, width)
+        if not tasks:
+            empty = self.context.get("empty", "No tasks")
+            self._add(body_top, x + 1, empty, curses.A_DIM, max(0, width - 2))
+            return
+
+        capacity = max(1, body_height // CARD_HEIGHT)
+        task_ids = [str(task.get("task_id") or "") for task in tasks]
+        selected_id = self.model.selected_ids[state]
+        try:
+            selected_index = task_ids.index(selected_id)
+        except ValueError:
+            selected_index = 0
+            self.model.selected_ids[state] = task_ids[0]
+        scroll = self.model.scrolls[state]
+        if selected_index < scroll:
+            scroll = selected_index
+        elif selected_index >= scroll + capacity:
+            scroll = selected_index - capacity + 1
+        scroll = max(0, min(scroll, max(0, len(tasks) - capacity)))
+        self.model.scrolls[state] = scroll
+
+        content_width = max(1, width - 2)
+        for row, task in enumerate(tasks[scroll : scroll + capacity]):
+            task_index = scroll + row
+            y = body_top + row * CARD_HEIGHT
+            selected = focused and task_index == selected_index
+            attr = curses.A_REVERSE if selected else 0
+            group_or_type = task.get("task_group") or " / ".join(
+                value
+                for value in (
+                    str(task.get("type") or "-"),
+                    self.context.get("size_labels", {}).get(
+                        task.get("kind"), str(task.get("kind") or "-")
+                    ),
+                )
+                if value
+            )
+            assignee = task.get("assignee") or self.context.get(
+                "unassigned", "Unassigned"
+            )
+            lines = (
+                str(task.get("title") or task.get("task_id") or ""),
+                str(task.get("task_id") or ""),
+                str(group_or_type),
+                f"{assignee} | {task.get('time') or '-'}",
+            )
+            for offset, line in enumerate(lines):
+                rendered = pad_text(line, content_width)
+                self._add(y + offset, x + 1, rendered, attr, content_width)
+
+    def _render_footer(self, height: int, width: int) -> None:
+        if self.model.error:
+            footer = f"{self.context.get('error', 'Error')}: {self.model.error}"
+        elif self.searching:
+            footer = self.context.get("search_help", "Enter apply | Esc clear")
+        else:
+            footer = self.context.get(
+                "help",
+                "arrows/hjkl move | / search | Enter detail | a archive | r refresh | q quit",
+            )
+        self._add(height - 1, 0, pad_text(footer, width), curses.A_REVERSE, width)
+
+    def _render_detail(self) -> None:
+        height, width = self.screen.getmaxyx()
+        if height < 6 or width < 20:
+            message = self.context.get("too_small", "Terminal is too small.")
+            self._add(0, 0, message, curses.A_BOLD, width)
+            return
+        task = self.detail or {}
+        title = str(task.get("title") or task.get("task_id") or "")
+        self._add(0, 0, title, curses.A_BOLD, width)
+        meta = " | ".join(
+            str(value)
+            for value in (
+                task.get("task_id"),
+                self.context.get("state_labels", {}).get(
+                    task.get("state"), task.get("state")
+                ),
+                self.context.get("size_labels", {}).get(
+                    task.get("kind"), task.get("kind")
+                ),
+                task.get("type"),
+                task.get("assignee") or self.context.get("unassigned", "Unassigned"),
+            )
+            if value
+        )
+        self._add(1, 0, meta, curses.A_DIM, width)
+        self._add(2, 0, "-" * width, curses.A_DIM, width)
+        body_height = height - 4
+        lines = wrap_text(str(task.get("document") or ""), max(1, width - 1))
+        maximum_scroll = max(0, len(lines) - body_height)
+        self.detail_scroll = max(0, min(self.detail_scroll, maximum_scroll))
+        visible_lines = lines[
+            self.detail_scroll : self.detail_scroll + body_height
+        ]
+        for index, line in enumerate(visible_lines):
+            attr = curses.A_BOLD if line.startswith("#") else 0
+            self._add(3 + index, 0, line, attr, width - 1)
+        visible_end = min(len(lines), self.detail_scroll + body_height)
+        position = f"{self.detail_scroll + 1}-{visible_end}/{len(lines)}"
+        help_text = self.context.get(
+            "detail_help", "arrows/jk scroll | PgUp/PgDn | q/Esc back"
+        )
+        footer = f"{help_text} | {position}"
+        self._add(height - 1, 0, pad_text(footer, width), curses.A_REVERSE, width)
+
+
+def run(
+    *,
+    single: bool,
+    refresh_interval: int,
+    context: dict,
+    get_board: Callable[[], dict],
+    get_task: Callable[[str], dict],
+) -> None:
+    try:
+        initial_board = get_board()
+    except Exception as error:
+        raise KanbanTuiError(str(error)) from error
+
+    def start(screen) -> None:
+        KanbanTui(
+            screen,
+            single=single,
+            refresh_interval=refresh_interval,
+            context=context,
+            get_board=get_board,
+            get_task=get_task,
+        ).run(initial_board)
+
+    try:
+        curses.wrapper(start)
+    except KeyboardInterrupt:
+        return
+    except curses.error as error:
+        raise KanbanTuiError(f"failed to initialize terminal: {error}") from error

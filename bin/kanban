@@ -1140,6 +1140,65 @@ def command_web(args: argparse.Namespace, root: Path) -> None:
         raise KanbanError(str(error)) from error
 
 
+def tui_page_context() -> dict:
+    lang = "cn" if t("任务看板", "Task Board") == "任务看板" else "en"
+    return {
+        "title": t("任务看板", "Task Board"),
+        "search": t("搜索", "Search"),
+        "active": t("活跃栏目", "active columns"),
+        "all": t("全部栏目", "all columns"),
+        "updated": t("更新于", "Updated"),
+        "empty": t("暂无任务", "No tasks"),
+        "unassigned": t("未指派", "Unassigned"),
+        "error": t("加载失败", "Load failed"),
+        "too_small": t("终端空间不足; 请放大窗口.", "Terminal is too small; enlarge the window."),
+        "use_single": t(
+            "终端宽度不足以显示全部栏目; 请使用 --single.",
+            "Terminal is too narrow for all columns; use --single.",
+        ),
+        "quit_help": t("q 退出", "q quit"),
+        "search_help": t("Enter 应用 | Esc 清空", "Enter apply | Esc clear"),
+        "help": t(
+            "方向键/hjkl 移动 | / 搜索 | Enter 详情 | a 存档栏目 | r 刷新 | q 退出",
+            "arrows/hjkl move | / search | Enter detail | a archives | r refresh | q quit",
+        ),
+        "detail_help": t(
+            "方向键/jk 滚动 | PgUp/PgDn 翻页 | q/Esc 返回",
+            "arrows/jk scroll | PgUp/PgDn page | q/Esc back",
+        ),
+        "state_labels": WEB_STATUS_LABELS[lang],
+        "size_labels": WEB_SIZE_LABELS[lang],
+    }
+
+
+def command_tui(args: argparse.Namespace, root: Path) -> None:
+    if args.refresh < 1:
+        raise KanbanError(t("刷新间隔必须 >= 1 秒", "refresh interval must be >= 1 second"))
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise KanbanError(t(
+            "TUI 需要交互终端 (stdin/stdout 均为 tty)",
+            "TUI requires an interactive terminal (stdin/stdout must both be TTYs)",
+        ))
+    try:
+        import kanban_tui
+    except ImportError as error:
+        raise KanbanError(t(
+            f"当前 Python 无法加载 curses: {error}",
+            f"This Python cannot load curses: {error}",
+        )) from error
+
+    try:
+        kanban_tui.run(
+            single=args.single,
+            refresh_interval=args.refresh,
+            context=tui_page_context(),
+            get_board=lambda: web_board_payload(root),
+            get_task=lambda task_id: web_task_payload(root, task_id),
+        )
+    except kanban_tui.KanbanTuiError as error:
+        raise KanbanError(str(error)) from error
+
+
 def command_check(root: Path) -> int:
     board = scan(root)
     for problem in board.problems:
@@ -1232,6 +1291,23 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help=t("启动后尝试打开浏览器", "try to open a browser after start"),
     )
+
+    tui_parser = commands.add_parser(
+        "tui",
+        help=t("启动只读看板 TUI", "start the read-only kanban TUI"),
+    )
+    tui_parser.add_argument(
+        "--single",
+        action="store_true",
+        help=t("每次只显示一个栏目", "show one column at a time"),
+    )
+    tui_parser.add_argument(
+        "--refresh",
+        type=int,
+        default=60,
+        metavar=t("秒", "seconds"),
+        help=t("任务自动刷新间隔秒数, 默认 60", "task refresh interval in seconds; default 60"),
+    )
     return result
 
 
@@ -1261,6 +1337,8 @@ def main() -> int:
             return command_check(root)
         elif args.command == "web":
             command_web(args, root)
+        elif args.command == "tui":
+            command_tui(args, root)
         return 0
     except (KanbanError, ConfigError, OSError, UnicodeError) as error:
         print(f"kanban: {error}", file=sys.stderr)

@@ -32,10 +32,12 @@ kanban pick [task-id]
 kanban start [--agent codex|claude|grok] [--launcher tmux|foreground] [task-id]
 kanban check
 kanban web [--host HOST] [--port PORT] [--refresh SECONDS] [--assets DIR] [--open]
+kanban tui [--single] [--refresh SECONDS]
 ```
 
 - `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式.
-- `check` 列出全部无效入口并以非零退出. `web` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
+- `check` 列出全部无效入口并以非零退出. `web` 和 `tui` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
+- `tui` 默认并排显示活跃栏目, `--single` 每次只显示一个栏目. 方向键或 `hjkl` 切换栏目和任务, `/` 搜索, Enter 查看任务卡, `a` 切换存档栏目, `r` 刷新, `q` 退出; 搜索覆盖标题, 任务 ID, 任务组, 类型, 负责人和状态.
 - 命令只做结构和机械校验; 授权, 依赖和终止理由由 Agent 按本文件判断.
 
 ## 状态模型
