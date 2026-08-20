@@ -479,12 +479,14 @@ class OnevokeCommandTest(unittest.TestCase):
         self.config.parent.mkdir(parents=True)
         self.config.write_text(json.dumps(existing), encoding="utf-8")
 
-        returncode, output = self.run_on_tty("\n", "welcome", "--reset")
+        # 即使进入当前不可用的 launcher 项, 空回车也保留当前 tmux.
+        returncode, output = self.run_on_tty("6\n\n\n", "welcome", "--reset")
 
         self.assertEqual(0, returncode, output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("tmux", config["launcher"])
         self.assertTrue(config["memsearch"]["enabled"])
+        self.assertIn("tmux 新窗口 (当前未安装) (当前)", output)
 
     def test_yes_no_uses_text_input_and_enter_uses_default(self) -> None:
         onevoke = load_onevoke_module()

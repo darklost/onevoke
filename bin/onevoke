@@ -611,17 +611,23 @@ def edit_launcher(config: dict[str, Any]) -> None:
         )
         return
 
-    selected = ask_choice(
-        prompt,
-        [
+    choices = []
+    if config["launcher"] == "tmux":
+        choices.append(("tmux", t("tmux 新窗口 (当前未安装)", "new tmux window (not currently installed)")))
+    choices.extend(
+        (
             ("foreground", t("当前终端前台运行", "foreground in this terminal")),
             ("install-tmux", t("安装 tmux 并使用新窗口", "install tmux and use a new window")),
-        ],
-        "foreground",
+        )
     )
-    if selected == "install-tmux" and install_tmux():
-        config["launcher"] = "tmux"
-    else:
+    selected = ask_choice(
+        prompt,
+        choices,
+        config["launcher"],
+    )
+    if selected == "install-tmux":
+        config["launcher"] = "tmux" if install_tmux() else "foreground"
+    elif selected == "foreground":
         config["launcher"] = "foreground"
 
 
@@ -856,7 +862,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
     commands = result.add_subparsers(dest="command", required=True)
     welcome = commands.add_parser("welcome", help=t("检查环境并完成首次配置", "check the environment and complete initial setup"))
-    welcome.add_argument("--reset", action="store_true", help=t("重新执行配置向导", "run the setup wizard again"))
+    welcome.add_argument("--reset", action="store_true", help=t("重新打开配置菜单", "open the configuration menu again"))
     commands.add_parser("doctor", help=t("检查 Onevoke 环境", "check the Onevoke environment"))
     config = commands.add_parser("config", help=t("输出当前配置", "print the current configuration"))
     config.add_argument("--json", action="store_true", help=t("以 JSON 输出", "output JSON"))
