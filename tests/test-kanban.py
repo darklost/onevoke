@@ -1591,6 +1591,83 @@ N/A
             self.assertTrue(kanban_tui.task_matches(task, keyword))
         self.assertFalse(kanban_tui.task_matches(task, "missing"))
 
+    def test_tui_narrow_toolbar_and_detail_keep_errors_visible(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        class FakeScreen:
+            def __init__(self, height: int, width: int) -> None:
+                self.height = height
+                self.width = width
+                self.writes = []
+
+            def getmaxyx(self):
+                return self.height, self.width
+
+            def addstr(self, y, x, text, attr=0):
+                self.writes.append((y, x, text, attr))
+
+            def move(self, y, x):
+                self.cursor = (y, x)
+
+        context = {
+            "title": "Task Board",
+            "search": "Search",
+            "active": "active columns",
+            "updated": "Updated",
+            "error": "Load failed",
+            "state_labels": {state: state for state in STATES},
+            "size_labels": {"small": "small", "large": "large"},
+        }
+        for width in (32, 40):
+            screen = FakeScreen(24, width)
+            tui = kanban_tui.KanbanTui(
+                screen,
+                single=True,
+                refresh_interval=60,
+                context=context,
+                get_board=lambda: {"tasks": []},
+                get_task=lambda _task_id: {},
+            )
+            tui.model.set_board({
+                "generated_at": "2026-08-20 22:30:00",
+                "tasks": [],
+            })
+            tui.model.query = "needle"
+            tui.searching = True
+            tui._render_board()
+            toolbar_writes = [write for write in screen.writes if write[0] == 1]
+            search_write, status_write = toolbar_writes
+            self.assertIn("n", search_write[2])
+            self.assertLessEqual(
+                search_write[1] + kanban_tui.display_width(search_write[2]),
+                status_write[1],
+            )
+
+        detail_screen = FakeScreen(12, 40)
+        tui = kanban_tui.KanbanTui(
+            detail_screen,
+            single=True,
+            refresh_interval=60,
+            context=context,
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+        )
+        tui.detail = {
+            "task_id": "20260820-detail-task",
+            "title": "Detail",
+            "state": "todo",
+            "kind": "small",
+            "document": "# Detail\n\nBody",
+        }
+        tui.model.error = "board unavailable"
+        tui._render_detail()
+        footer = next(write for write in detail_screen.writes if write[0] == 11)
+        self.assertIn("Load failed: board unavailable", footer[2])
+
     def test_tui_single_mode_searches_opens_detail_and_quits_on_a_pty(self) -> None:
         self.make_todo("tui-pty")
         master, slave = pty.openpty()

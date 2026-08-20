@@ -375,7 +375,13 @@ class KanbanTui:
         )
         stamp = self.model.generated_at or "-"
         toolbar_right = f"{mode} | {self.context.get('updated', 'Updated')} {stamp}"
-        toolbar_left_width = max(1, width - display_width(toolbar_right) - 3)
+        toolbar_left_width = max(
+            12,
+            display_width(query_prefix) + 4,
+            width // 3,
+        )
+        toolbar_right_width = max(0, width - toolbar_left_width - 1)
+        toolbar_right = clip_text(toolbar_right, toolbar_right_width)
         search_attr = curses.A_BOLD if self.searching else 0
         self._add(1, 0, query_prefix + query_text, search_attr, toolbar_left_width)
         right_x = max(0, width - display_width(toolbar_right))
@@ -533,10 +539,13 @@ class KanbanTui:
             self._add(3 + index, 0, line, attr, width - 1)
         visible_end = min(len(lines), self.detail_scroll + body_height)
         position = f"{self.detail_scroll + 1}-{visible_end}/{len(lines)}"
-        help_text = self.context.get(
-            "detail_help", "arrows/jk scroll | PgUp/PgDn | q/Esc back"
-        )
-        footer = f"{help_text} | {position}"
+        if self.model.error:
+            footer = f"{self.context.get('error', 'Error')}: {self.model.error}"
+        else:
+            help_text = self.context.get(
+                "detail_help", "arrows/jk scroll | PgUp/PgDn | q/Esc back"
+            )
+            footer = f"{help_text} | {position}"
         self._add(height - 1, 0, pad_text(footer, width), curses.A_REVERSE, width)
 
 
