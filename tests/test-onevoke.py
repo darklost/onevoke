@@ -2,6 +2,7 @@
 
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import pty
@@ -211,13 +212,11 @@ class OnevokeCommandTest(unittest.TestCase):
         self.install_fake_environment(tmux=False)
         self.env["ONEVOKE_LANG"] = "en"
 
-        returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n2\n2\n1\n1\n", "welcome"
-        )
+        returncode, output = self.run_on_tty("\n", "welcome")
 
         self.assertEqual(0, returncode, output)
-        self.assertIn("Which Agent should kanban use by default?", output)
-        self.assertIn("Configuration summary:", output)
+        self.assertIn("Current configuration", output)
+        self.assertIn("Press Enter to save", output)
         self.assertIn("Configuration saved:", output)
         self.assertNotIn("配置摘要", output)
 
@@ -234,10 +233,9 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_welcome_saves_per_role_reviewers_and_foreground_launcher(self) -> None:
         self.install_fake_environment(tmux=False)
 
-        # Codex 执行; PM/CSA/Hacker/QA 依次选 Claude/Grok/Codex/Claude;
-        # 拒绝安装 tmux; 跳过模型调整; 选择使用 MemSearch; 最后确认保存.
+        # 只修改三个 Reviewer 和 MemSearch, 其余选项保留当前值.
         returncode, output = self.run_on_tty(
-            "1\n2\n3\n1\n2\n2\n2\n1\n1\n", "welcome"
+            "2\n2\n3\n3\n5\n2\n8\nyes\n\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -260,17 +258,11 @@ class OnevokeCommandTest(unittest.TestCase):
 
     def test_welcome_colors_question_titles_and_honors_no_color(self) -> None:
         self.install_fake_environment(tmux=True)
-        answers = "1\n1\n1\n1\n1\n1\n2\n2\n1\n"
+        answers = "1\n\n8\n\n\n"
         prompts = (
+            "当前配置",
             "kanban 默认用哪个 Agent 执行任务?",
-            "PM 使用哪个 Reviewer?",
-            "CSA 使用哪个 Reviewer?",
-            "Hacker 使用哪个 Reviewer?",
-            "QA 使用哪个 Reviewer?",
-            "kanban start 使用哪种启动方式?",
-            "是否调整模型与推理档位? (默认沿用当前配置)",
-            "是否使用 MemSearch?",
-            "保存以上配置?",
+            "使用 MemSearch?",
         )
 
         returncode, output = self.run_on_tty(answers, "welcome")
@@ -278,7 +270,8 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, returncode, output)
         for prompt in prompts:
             self.assertIn(f"\033[1;36m{prompt}\033[0m", output)
-        self.assertNotIn("\033[1;36m请选择", output)
+        self.assertNotIn("  1. Yes", output)
+        self.assertIn("[y/N]", output)
 
         self.env["NO_COLOR"] = "1"
         returncode, output = self.run_on_tty(answers, "welcome", "--reset")
@@ -308,10 +301,8 @@ class OnevokeCommandTest(unittest.TestCase):
             "/bin/cp \"$TMUX_TEMPLATE\" \"$FAKE_BIN/tmux\"\n",
         )
 
-        # Codex 执行和四个 Reviewer; 同意安装 tmux; 跳过模型调整; 不使用 MemSearch; 保存.
-        returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n2\n2\n1\n", "welcome"
-        )
+        # 进入启动方式菜单, 选择安装 tmux, 然后直接回车保存.
+        returncode, output = self.run_on_tty("6\n2\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertEqual("install tmux", brew_log.read_text(encoding="utf-8").strip())
@@ -339,9 +330,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.install_fake_environment(tmux=True)
         _, bash_log = self.install_fake_memsearch_tools(git_exit=1)
 
-        returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n2\n1\n1\n", "welcome"
-        )
+        returncode, output = self.run_on_tty("8\ny\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch 安装命令无法执行", output)
@@ -356,9 +345,7 @@ class OnevokeCommandTest(unittest.TestCase):
         blocked_parent.write_text("not a directory\n", encoding="utf-8")
         self.env["ONEVOKE_MEMSEARCH_SOURCE"] = str(blocked_parent / "memsearch")
 
-        returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n2\n1\n1\n", "welcome"
-        )
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch 安装命令无法执行", output)
@@ -416,10 +403,7 @@ class OnevokeCommandTest(unittest.TestCase):
         )
         before = self.config.read_bytes()
 
-        # 重选所有项目, 跳过模型调整, 不使用 MemSearch, 最后拒绝保存.
-        returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n2\n2\n2\n", "welcome", "--reset"
-        )
+        returncode, output = self.run_on_tty("q\n", "welcome", "--reset")
 
         self.assertEqual(1, returncode, output)
         self.assertIn("用户取消, 配置未更改", output)
@@ -428,11 +412,9 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_welcome_customizes_models_only_for_agents_in_use(self) -> None:
         self.install_fake_environment(tmux=True)
 
-        # Codex 执行与四个 Reviewer; tmux 启动; 调整模型: kanban 模型 gpt-7,
-        # 大档位回车沿用默认, 小档位 low; 审核模型 gpt-7-mini, 档位回车沿用;
-        # 不使用 MemSearch; 保存.
+        # 三次进入模型菜单, 分别只改一个字段; 未选择的值保持不变.
         returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n1\ngpt-7\n\nlow\ngpt-7-mini\n\n2\n1\n", "welcome"
+            "7\n1\ngpt-7\n7\n3\nlow\n7\n4\ngpt-7-mini\n\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
@@ -451,6 +433,73 @@ class OnevokeCommandTest(unittest.TestCase):
             config["models"]["kanban"]["grok"],
         )
         self.assertNotIn("审核 Grok", output)
+
+    def test_welcome_reset_changes_one_item_and_keeps_other_values(self) -> None:
+        self.install_fake_environment(tmux=True)
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "claude",
+            "launcher": "foreground",
+            "reviewers": {role: "grok" for role in ROLES},
+            "models": {
+                "kanban": {"claude": {"model": "custom-task", "large_effort": "max"}},
+                "review": {"grok": {"model": "custom-review", "effort": "xhigh"}},
+            },
+            "memsearch": {"enabled": True},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+        # 只把 PM Reviewer 改成 Codex, 然后直接回车保存.
+        returncode, output = self.run_on_tty("2\n1\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("codex", config["reviewers"]["PM"])
+        self.assertEqual({role: "grok" for role in ("CSA", "Hacker", "QA")}, {
+            role: config["reviewers"][role] for role in ("CSA", "Hacker", "QA")
+        })
+        self.assertEqual("claude", config["kanban_agent"])
+        self.assertEqual("foreground", config["launcher"])
+        self.assertEqual("custom-task", config["models"]["kanban"]["claude"]["model"])
+        self.assertEqual("custom-review", config["models"]["review"]["grok"]["model"])
+        self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_welcome_reset_enter_preserves_unavailable_current_values(self) -> None:
+        self.install_fake_environment(tmux=False)
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "grok",
+            "launcher": "tmux",
+            "reviewers": {role: "grok" for role in ROLES},
+            "memsearch": {"enabled": True},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+        returncode, output = self.run_on_tty("\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("tmux", config["launcher"])
+        self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_yes_no_uses_text_input_and_enter_uses_default(self) -> None:
+        onevoke = load_onevoke_module()
+        stderr = io.StringIO()
+        with mock.patch.object(onevoke.sys, "stdin", io.StringIO("1\nyes\n")):
+            with mock.patch.object(onevoke.sys, "stderr", stderr):
+                self.assertTrue(onevoke.ask_yes_no("Continue?", default=False))
+        output = stderr.getvalue()
+        self.assertIn("[y/N]", output)
+        self.assertIn("请输入 yes 或 no", output)
+        self.assertNotIn("1. Yes", output)
+
+        with mock.patch.object(onevoke.sys, "stdin", io.StringIO("\n")):
+            with mock.patch.object(onevoke.sys, "stderr", io.StringIO()):
+                self.assertTrue(onevoke.ask_yes_no("Continue?", default=True))
 
     def test_config_cli_prints_review_model_from_effective_config(self) -> None:
         config_module = str(PROJECT_ROOT / "bin" / "onevoke_config.py")
@@ -620,8 +669,8 @@ class OnevokeCommandTest(unittest.TestCase):
         self.fake_command("claude", "#!/bin/sh\nexit 1\n")
         # Only grok reports a version; four reviewers must also be usable.
 
-        # 仅 Grok 可用: 执行 1; 四个 Reviewer 各 1; 拒绝装 tmux 2; 跳过模型 2; 保存 1.
-        returncode, output = self.run_on_tty("1\n1\n1\n1\n1\n2\n2\n1\n", "welcome")
+        # 仅 Grok 可用, 直接保存自动选出的当前值.
+        returncode, output = self.run_on_tty("\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("--version 失败", output)
@@ -876,10 +925,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.install_fake_environment(tmux=True)
         self.env.pop("TMUX", None)
 
-        # agent + 4 reviewers + launcher + 跳过模型 + MemSearch + save.
-        returncode, output = self.run_on_tty(
-            "1\n1\n1\n1\n1\n1\n2\n2\n1\n", "welcome"
-        )
+        returncode, output = self.run_on_tty("\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("已安装但当前不在 session", output)

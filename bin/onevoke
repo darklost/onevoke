@@ -409,25 +409,53 @@ def validate_configured_resources(
 def ask_choice(prompt: str, choices: list[tuple[str, str]], default: str | None = None) -> str:
     if not choices:
         raise OnevokeError(t(f"没有可选项: {prompt}", f"No choices available: {prompt}"))
+    if default not in {value for value, _ in choices}:
+        default = choices[0][0]
     while True:
         print(f"\n{color('1;36', prompt)}", file=sys.stderr)
         for index, (_, label) in enumerate(choices, 1):
             suffix = t(" (当前)", " (current)") if choices[index - 1][0] == default else ""
             print(f"  {index}. {label}{suffix}", file=sys.stderr)
-        print(t(f"请选择 [1-{len(choices)}]: ", f"Choose [1-{len(choices)}]: "), end="", file=sys.stderr, flush=True)
+        print(
+            t(
+                f"请选择 [1-{len(choices)}], 直接回车保留当前值: ",
+                f"Choose [1-{len(choices)}], or press Enter to keep the current value: ",
+            ),
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
         answer = sys.stdin.readline()
         if not answer:
             raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed"))
         answer = answer.strip()
+        if not answer:
+            return default
         if answer.isdigit() and 1 <= int(answer) <= len(choices):
             return choices[int(answer) - 1][0]
         print(t("输入无效, 请重新选择.", "Invalid input; choose again."), file=sys.stderr)
 
 
 def ask_yes_no(prompt: str, default: bool = False) -> bool:
-    choices = [("yes", t("是", "Yes")), ("no", t("否", "No"))]
-    selected = ask_choice(prompt, choices, "yes" if default else "no")
-    return selected == "yes"
+    marker = "Y/n" if default else "y/N"
+    while True:
+        print(
+            f"\n{color('1;36', prompt)} [{marker}]: ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        answer = sys.stdin.readline()
+        if not answer:
+            raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed"))
+        normalized = answer.strip().lower()
+        if not normalized:
+            return default
+        if normalized in ("y", "yes"):
+            return True
+        if normalized in ("n", "no"):
+            return False
+        print(t("输入无效, 请输入 yes 或 no.", "Invalid input; enter yes or no."), file=sys.stderr)
 
 
 def ask_text(prompt: str, default: str) -> str:
@@ -440,24 +468,75 @@ def ask_text(prompt: str, default: str) -> str:
     return answer if answer else default
 
 
-def configure_models(config: dict[str, Any]) -> None:
-    """按需修改模型与推理档位; 只询问本次配置实际用到的 Agent."""
-    if not ask_yes_no(
-        t("是否调整模型与推理档位? (默认沿用当前配置)", "Adjust models and reasoning efforts? (defaults keep current values)"),
-        default=False,
-    ):
-        return
+def edit_models(config: dict[str, Any]) -> None:
+    """只列出当前配置实际用到的 Agent, 并允许精确修改一个字段."""
     kanban_agent = config["kanban_agent"]
-    entry = config["models"]["kanban"][kanban_agent]
-    label = AGENT_LABELS[kanban_agent]
-    entry["model"] = ask_text(t(f"kanban 任务 {label} 用什么模型?", f"Which model should {label} use for kanban tasks?"), entry["model"])
-    entry["large_effort"] = ask_text(t("大任务推理档位?", "Reasoning effort for large tasks?"), entry["large_effort"])
-    entry["small_effort"] = ask_text(t("小任务推理档位?", "Reasoning effort for small tasks?"), entry["small_effort"])
+    kanban_entry = config["models"]["kanban"][kanban_agent]
+    fields: list[tuple[str, dict[str, str], str, str]] = [
+        (
+            t(f"kanban {AGENT_LABELS[kanban_agent]} 模型", f"kanban {AGENT_LABELS[kanban_agent]} model"),
+            kanban_entry,
+            "model",
+            t("任务模型?", "Task model?"),
+        ),
+        (
+            t("kanban 大任务推理档位", "kanban large-task reasoning effort"),
+            kanban_entry,
+            "large_effort",
+            t("大任务推理档位?", "Reasoning effort for large tasks?"),
+        ),
+        (
+            t("kanban 小任务推理档位", "kanban small-task reasoning effort"),
+            kanban_entry,
+            "small_effort",
+            t("小任务推理档位?", "Reasoning effort for small tasks?"),
+        ),
+    ]
     for reviewer in dict.fromkeys(config["reviewers"].values()):
         entry = config["models"]["review"][reviewer]
         label = AGENT_LABELS[reviewer]
-        entry["model"] = ask_text(t(f"审核 {label} 用什么模型?", f"Which model should {label} use for reviews?"), entry["model"])
-        entry["effort"] = ask_text(t(f"审核 {label} 的推理档位?", f"Reasoning effort for {label} reviews?"), entry["effort"])
+        fields.extend(
+            (
+                (
+                    t(f"审核 {label} 模型", f"Review {label} model"),
+                    entry,
+                    "model",
+                    t(f"审核 {label} 用什么模型?", f"Which model should {label} use for reviews?"),
+                ),
+                (
+                    t(f"审核 {label} 推理档位", f"Review {label} reasoning effort"),
+                    entry,
+                    "effort",
+                    t(f"审核 {label} 的推理档位?", f"Reasoning effort for {label} reviews?"),
+                ),
+            )
+        )
+
+    while True:
+        print(f"\n{color('1;36', t('模型与推理档位', 'Models and reasoning efforts'))}", file=sys.stderr)
+        for index, (label, entry, field, _) in enumerate(fields, 1):
+            value = entry[field] or t("(CLI 默认)", "(CLI default)")
+            print(f"  {index}. {label}: {value}", file=sys.stderr)
+        print(
+            t(
+                f"请选择要修改的项目 [1-{len(fields)}], 直接回车返回: ",
+                f"Choose an item to change [1-{len(fields)}], or press Enter to return: ",
+            ),
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        answer = sys.stdin.readline()
+        if not answer:
+            raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed"))
+        answer = answer.strip()
+        if not answer:
+            return
+        if answer.isdigit() and 1 <= int(answer) <= len(fields):
+            _, entry, field, prompt = fields[int(answer) - 1]
+            entry[field] = ask_text(prompt, entry[field])
+            return
+        print(t("输入无效, 请重新选择.", "Invalid input; choose again."), file=sys.stderr)
 
 
 def install_memsearch_for(agent: str) -> None:
@@ -519,6 +598,79 @@ def install_tmux() -> bool:
     return True
 
 
+def edit_launcher(config: dict[str, Any]) -> None:
+    prompt = t("kanban start 使用哪种启动方式?", "How should kanban start launch tasks?")
+    if shutil.which("tmux"):
+        config["launcher"] = ask_choice(
+            prompt,
+            [
+                ("tmux", t("tmux 新窗口", "new tmux window")),
+                ("foreground", t("当前终端前台运行", "foreground in this terminal")),
+            ],
+            config["launcher"],
+        )
+        return
+
+    selected = ask_choice(
+        prompt,
+        [
+            ("foreground", t("当前终端前台运行", "foreground in this terminal")),
+            ("install-tmux", t("安装 tmux 并使用新窗口", "install tmux and use a new window")),
+        ],
+        "foreground",
+    )
+    if selected == "install-tmux" and install_tmux():
+        config["launcher"] = "tmux"
+    else:
+        config["launcher"] = "foreground"
+
+
+def print_welcome_menu(config: dict[str, Any]) -> None:
+    print(f"\n{color('1;36', t('当前配置', 'Current configuration'))}", file=sys.stderr)
+    print(f"  1. {t('执行 Agent', 'Execution Agent')}: {config['kanban_agent']}", file=sys.stderr)
+    for index, role in enumerate(REVIEW_ROLES, 2):
+        print(f"  {index}. {role} Reviewer: {config['reviewers'][role]}", file=sys.stderr)
+    print(f"  6. {t('启动方式', 'Launcher')}: {config['launcher']}", file=sys.stderr)
+    print(f"  7. {t('模型与推理档位', 'Models and reasoning efforts')}", file=sys.stderr)
+    kanban_agent = config["kanban_agent"]
+    kanban_entry = config["models"]["kanban"][kanban_agent]
+    kanban_model = kanban_entry["model"] or t("(CLI 默认)", "(CLI default)")
+    print(
+        f"     kanban {kanban_agent}: {kanban_model}"
+        f" ({t('大', 'large')} {kanban_entry['large_effort']} / {t('小', 'small')} {kanban_entry['small_effort']})",
+        file=sys.stderr,
+    )
+    for reviewer in dict.fromkeys(config["reviewers"].values()):
+        entry = config["models"]["review"][reviewer]
+        model = entry["model"] or t("(CLI 默认)", "(CLI default)")
+        print(f"     review {reviewer}: {model} ({entry['effort']})", file=sys.stderr)
+    memory = t("启用", "enabled") if config["memsearch"]["enabled"] else t("未启用", "disabled")
+    print(f"  8. MemSearch: {memory}", file=sys.stderr)
+    print(t("  直接回车保存当前配置; 输入 q 退出且不保存.", "  Press Enter to save; enter q to quit without saving."), file=sys.stderr)
+
+
+def ask_welcome_action(config: dict[str, Any]) -> str:
+    while True:
+        print_welcome_menu(config)
+        print(
+            t("请选择要修改的项目 [1-8]: ", "Choose an item to change [1-8]: "),
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        answer = sys.stdin.readline()
+        if not answer:
+            raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed"))
+        answer = answer.strip().lower()
+        if not answer:
+            return "save"
+        if answer == "q":
+            return "cancel"
+        if answer.isdigit() and 1 <= int(answer) <= 8:
+            return answer
+        print(t("输入无效, 请重新选择.", "Invalid input; choose again."), file=sys.stderr)
+
+
 def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
     agents = find_agents()
     for name, state in agents.items():
@@ -541,18 +693,6 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
                 "No usable Agent found (--version must succeed). Install Codex, Claude, or Grok first.",
             )
         )
-
-    config = default_config()
-    config["models"] = {
-        section: {agent: dict(entry) for agent, entry in agents.items()}
-        for section, agents in existing["models"].items()
-    }
-    config["kanban_agent"] = ask_choice(
-        t("kanban 默认用哪个 Agent 执行任务?", "Which Agent should kanban use by default?"),
-        execution_choices,
-        existing["kanban_agent"] if agent_usable(agents.get(existing["kanban_agent"], {})) else None,
-    )
-
     review_choices = [
         (name, f"{AGENT_LABELS[name]} ({agents[name]['version']})")
         for name in REVIEW_AGENTS
@@ -560,39 +700,63 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
     ]
     if not review_choices:
         raise OnevokeError(t("没有发现可用 Reviewer. 请安装 Codex、Claude 或 Grok.", "No usable Reviewer found. Install Codex, Claude, or Grok."))
+
+    config = default_config()
+    config["models"] = {
+        section: {agent: dict(entry) for agent, entry in entries.items()}
+        for section, entries in existing["models"].items()
+    }
+    config["kanban_agent"] = (
+        existing["kanban_agent"]
+        if agent_usable(agents.get(existing["kanban_agent"], {}))
+        else execution_choices[0][0]
+    )
     for role in REVIEW_ROLES:
         previous = existing["reviewers"][role]
-        config["reviewers"][role] = ask_choice(
-            t(f"{role} 使用哪个 Reviewer?", f"Which Reviewer should {role} use?"),
-            review_choices,
-            previous if agent_usable(agents.get(previous, {})) else None,
+        config["reviewers"][role] = previous if agent_usable(agents.get(previous, {})) else review_choices[0][0]
+    config["launcher"] = existing["launcher"]
+    if config["launcher"] == "tmux" and not shutil.which("tmux") and not existing["welcome_complete"]:
+        config["launcher"] = "foreground"
+        warning(
+            t(
+                "未安装 tmux, 当前使用 foreground; 可从启动方式菜单选择安装.",
+                "tmux is not installed; using foreground. The launcher menu can install it.",
+            )
         )
+    config["memsearch"]["enabled"] = existing["memsearch"]["enabled"]
 
-    if shutil.which("tmux"):
-        # doctor 已输出唯一启动命令; 这里不再重复.
-        launcher_choices = [
-            ("tmux", t("tmux 新窗口", "new tmux window")),
-            ("foreground", t("当前终端前台运行", "foreground in this terminal")),
-        ]
-        config["launcher"] = ask_choice(
-            t("kanban start 使用哪种启动方式?", "How should kanban start launch tasks?"),
-            launcher_choices,
-            existing["launcher"],
-        )
-    else:
-        warning(t("未安装 tmux.", "tmux is not installed."))
-        if ask_yes_no(t("是否现在安装 tmux?", "Install tmux now?"), default=False):
-            if install_tmux():
-                config["launcher"] = "tmux"
-            elif ask_yes_no(t("tmux 未安装成功, 是否改用当前终端前台模式?", "tmux was not installed; use foreground mode in this terminal?"), default=True):
-                config["launcher"] = "foreground"
-            else:
-                raise OnevokeError(t("没有可用启动方式, 配置未更改", "No launcher is available; configuration was not changed"))
-        else:
-            config["launcher"] = "foreground"
-            print(t("已选择当前终端前台运行模式.", "Selected foreground mode in this terminal."), file=sys.stderr)
-
-    configure_models(config)
+    while True:
+        action = ask_welcome_action(config)
+        if action == "save":
+            break
+        if action == "cancel":
+            raise OnevokeError(t("用户取消, 配置未更改", "Cancelled; configuration was not changed"))
+        if action == "1":
+            config["kanban_agent"] = ask_choice(
+                t("kanban 默认用哪个 Agent 执行任务?", "Which Agent should kanban use by default?"),
+                execution_choices,
+                config["kanban_agent"],
+            )
+        elif action in ("2", "3", "4", "5"):
+            role = REVIEW_ROLES[int(action) - 2]
+            config["reviewers"][role] = ask_choice(
+                t(f"{role} 使用哪个 Reviewer?", f"Which Reviewer should {role} use?"),
+                review_choices,
+                config["reviewers"][role],
+            )
+        elif action == "6":
+            edit_launcher(config)
+        elif action == "7":
+            edit_models(config)
+        elif action == "8":
+            memory_agent = config["kanban_agent"] if config["kanban_agent"] in ("codex", "claude") else None
+            enabled = ask_yes_no(t("使用 MemSearch?", "Use MemSearch?"), config["memsearch"]["enabled"])
+            if enabled and not config["memsearch"]["enabled"]:
+                if memory_agent is None:
+                    warning(t("当前执行 Agent 不支持 MemSearch 集成.", "The current execution Agent does not support MemSearch integration."))
+                    continue
+                install_memsearch_for(memory_agent)
+            config["memsearch"]["enabled"] = enabled
 
     selected_agent = config["kanban_agent"]
     integrated, detail = rules_integration(selected_agent)
@@ -604,30 +768,6 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
             "请按 README 的接入章节配置, welcome 不会覆盖你的全局规则文件.",
             "Follow the README integration section; welcome will not overwrite your global rules file.",
         ), file=sys.stderr)
-
-    memory_agent = selected_agent if selected_agent in ("codex", "claude") else None
-    config["memsearch"]["enabled"] = False
-    if memory_agent and ask_yes_no(
-        t("是否使用 MemSearch?", "Use MemSearch?"), default=False
-    ):
-        config["memsearch"]["enabled"] = True
-        install_memsearch_for(memory_agent)
-
-    print(t("\n配置摘要:", "\nConfiguration summary:"), file=sys.stderr)
-    print(f"  {t('执行 Agent', 'Execution Agent')}: {config['kanban_agent']}", file=sys.stderr)
-    print(f"  {t('启动方式', 'Launcher')}: {config['launcher']}", file=sys.stderr)
-    kanban_entry = config["models"]["kanban"][config["kanban_agent"]]
-    print(
-        f"  {t('任务模型', 'Task model')}: {kanban_entry['model'] or t('(CLI 默认)', '(CLI default)')}"
-        f" ({t('大', 'large')} {kanban_entry['large_effort']} / {t('小', 'small')} {kanban_entry['small_effort']})",
-        file=sys.stderr,
-    )
-    for role in REVIEW_ROLES:
-        reviewer = config["reviewers"][role]
-        review_entry = config["models"]["review"][reviewer]
-        model = review_entry["model"] or t("(CLI 默认)", "(CLI default)")
-        print(f"  {role}: {reviewer} {model} ({review_entry['effort']})", file=sys.stderr)
-    print(f"  MemSearch: {t('启用', 'enabled') if config['memsearch']['enabled'] else t('未启用', 'disabled')}", file=sys.stderr)
     print(
         color("1;33", t(
             "注意: kanban start 会使用 Agent 的免确认模式执行已确认任务.",
@@ -635,8 +775,6 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         )),
         file=sys.stderr,
     )
-    if not ask_yes_no(t("保存以上配置?", "Save this configuration?"), default=True):
-        raise OnevokeError(t("用户取消, 配置未更改", "Cancelled; configuration was not changed"))
     config["welcome_complete"] = True
     return config
 
