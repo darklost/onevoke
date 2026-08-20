@@ -324,7 +324,8 @@ class KanbanTui:
         ):
             try:
                 curses.init_pair(index, palette[name], background)
-            except curses.error:
+            except (curses.error, ValueError):
+                # 终端颜色对不足 (COLOR_PAIRS 小) 时保留已建颜色, 缺失项回退到属性 0.
                 continue
             self.colors[name] = curses.color_pair(index)
         self.colors["id"] = self.colors.get("working", 0)
@@ -479,7 +480,8 @@ class KanbanTui:
         title = self.context.get("title", "Task Board")
         accent = self.colors.get("accent", 0)
         self._add(0, 0, title, accent | curses.A_BOLD, width)
-        if height < 8 or width < 32:
+        # 高度 8 时首张卡片末行会被提示栏覆盖, 因此最小高度为 9.
+        if height < 9 or width < 32:
             message = self.context.get("too_small", "Terminal is too small.")
             self._add(2, 0, message, curses.A_BOLD, width)
             quit_help = self.context.get("quit_help", "q quit")
@@ -759,5 +761,5 @@ def run(
         curses.wrapper(start)
     except KeyboardInterrupt:
         return
-    except curses.error as error:
+    except (curses.error, ValueError) as error:
         raise KanbanTuiError(f"failed to initialize terminal: {error}") from error

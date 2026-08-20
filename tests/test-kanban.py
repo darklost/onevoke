@@ -1742,6 +1742,54 @@ N/A
             self.assertEqual(-1, pairs[2][0])
             self.assertEqual(0, screen.background)
 
+    def test_tui_theme_survives_terminal_with_few_color_pairs(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+        import curses
+        from unittest import mock
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 100
+
+            def bkgd(self, _char, attr=0):
+                pass
+
+        def limited_init_pair(index, _fg, _bg):
+            # 模拟 COLOR_PAIRS=8 的终端: 合法颜色对只有 1..7.
+            if index > 7:
+                raise ValueError(
+                    "Color pair is greater than COLOR_PAIRS-1 (7)."
+                )
+
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=60,
+            context={},
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+            theme="dark",
+        )
+        with mock.patch.object(kanban_tui.curses, "has_colors", return_value=True), \
+                mock.patch.object(kanban_tui.curses, "use_default_colors"), \
+                mock.patch.object(
+                    kanban_tui.curses, "init_pair", side_effect=limited_init_pair
+                ), \
+                mock.patch.object(
+                    kanban_tui.curses,
+                    "color_pair",
+                    side_effect=lambda index: index << 8,
+                ):
+            tui._init_style()
+        # 第 8 对 (accent) 创建失败, 已建的状态色保留, accent 回退到属性 0.
+        self.assertNotIn("accent", tui.colors)
+        self.assertNotEqual(0, tui.colors["trash"])
+        self.assertEqual(curses.A_REVERSE, tui._footer_attr())
+
     def test_tui_text_helpers_handle_wide_characters(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:
