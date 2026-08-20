@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960" role="img" aria-labelledby="title description">
   <title id="title">Onevoke 工作流</title>
-  <desc id="description">tmux launcher 下, 需求会话讨论并创建任务卡, 独立窗口领取、执行、审核、验收和集成任务; foreground launcher 则在当前终端等待任务结束.</desc>
+  <desc id="description">tmux launcher 下, 需求会话讨论并创建任务卡, 独立窗口领取、执行、审核和集成任务; foreground launcher 则在当前终端等待任务结束.</desc>
   <defs>
     <style>
       .sans { font-family: -apple-system, BlinkMacSystemFont, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; }
@@ -108,8 +108,8 @@
   <rect x="888" y="616" width="6" height="126" rx="3" fill="#3476aa"/>
   <circle cx="931" cy="657" r="20" fill="#3476aa"/>
   <text x="931" y="664" text-anchor="middle" class="sans" font-size="20" font-weight="700" fill="#ffffff">6</text>
-  <text x="968" y="659" class="sans step">审核、验收与集成</text>
-  <text x="968" y="702" class="sans detail">PM  ->  安全角色  ->  QA  ->  用户验收</text>
+  <text x="968" y="659" class="sans step">审核与集成</text>
+  <text x="968" y="702" class="sans detail">PM  ->  安全角色  ->  QA  ->  自动合回</text>
 
   <path d="M1196 743 V772" class="arrow"/>
   <rect x="888" y="786" width="616" height="74" rx="8" fill="#e7f1fb" stroke="#6e9bc3" stroke-width="2"/>
