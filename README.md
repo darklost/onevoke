@@ -84,3 +84,7 @@ kanban rules
 任务命中审核白名单后, 由 `onevoke-review.sh` 按 PM -> 安全角色 -> QA 三阶段串行审核, QA 固定在最后; 每次修复只重跑当前阶段. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
 
 ![Onevoke 审核流程](docs/review.svg)
+
+## 4. 许可
+
+本项目使用 MIT License, 见 [LICENSE](LICENSE).
