@@ -1694,6 +1694,135 @@ N/A
         model.toggle_archived()
         self.assertEqual("done", model.current_state)
 
+    def test_tui_fits_visible_columns_and_keeps_focus_on_screen(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual(1, kanban_tui.visible_column_count(20, 4))
+        self.assertEqual(1, kanban_tui.visible_column_count(40, 4))
+        self.assertEqual(2, kanban_tui.visible_column_count(41, 4))
+        self.assertEqual(3, kanban_tui.visible_column_count(62, 4))
+        self.assertEqual(4, kanban_tui.visible_column_count(83, 4))
+        self.assertEqual(1, kanban_tui.visible_column_count(80, 4, single=True))
+
+        model = kanban_tui.BoardModel()
+        self.assertEqual(("backlog", "todo", "working"), model.visible_states(3))
+        model.move_column(1)
+        self.assertEqual("todo", model.current_state)
+        self.assertEqual(("backlog", "todo", "working"), model.visible_states(3))
+        model.move_column(2)
+        self.assertEqual("done", model.current_state)
+        self.assertEqual(("todo", "working", "done"), model.visible_states(3))
+        self.assertIn(model.current_state, model.visible_states(3))
+        model.move_column(1)
+        self.assertEqual("backlog", model.current_state)
+        self.assertEqual(("backlog", "todo", "working"), model.visible_states(3))
+        model.move_column(-1)
+        self.assertEqual("done", model.current_state)
+        self.assertEqual(("todo", "working", "done"), model.visible_states(3))
+
+        model.toggle_archived()
+        model.column_index = model.states.index("trash")
+        self.assertEqual(("done", "archived", "trash"), model.visible_states(3))
+        model.toggle_archived()
+        self.assertEqual("done", model.current_state)
+        self.assertEqual(("todo", "working", "done"), model.visible_states(3))
+
+        class FakeScreen:
+            def __init__(self, width: int) -> None:
+                self.width = width
+                self.writes = []
+
+            def getmaxyx(self):
+                return 24, self.width
+
+            def addstr(self, y, x, text, attr=0):
+                self.writes.append((y, x, text))
+
+            def move(self, y, x):
+                pass
+
+        context = {
+            "state_labels": {state: state for state in STATES},
+            "size_labels": {"small": "small", "large": "large"},
+            "empty": "No tasks",
+        }
+        board = {
+            "generated_at": "2026-08-21 00:00:00",
+            "tasks": [
+                {
+                    "task_id": f"20260821-{state}-task",
+                    "title": state,
+                    "state": state,
+                }
+                for state in ("backlog", "todo", "working", "done")
+            ],
+        }
+
+        narrow = FakeScreen(62)
+        tui = kanban_tui.KanbanTui(
+            narrow,
+            single=False,
+            refresh_interval=30,
+            context=context,
+            get_board=lambda: board,
+            get_task=lambda _task_id: {},
+        )
+        tui.model.set_board(board)
+        tui._render_board()
+        headings = " ".join(text for y, _x, text in narrow.writes if y == 2)
+        self.assertIn("backlog", headings)
+        self.assertIn("todo", headings)
+        self.assertIn("working", headings)
+        self.assertNotIn("done", headings)
+        self.assertEqual(("backlog", "todo", "working"), tui.model.visible_states(3))
+        self.assertNotIn("too narrow", headings.lower())
+        self.assertNotIn("use --single", " ".join(text for _y, _x, text in narrow.writes))
+
+        narrow.writes.clear()
+        tui.model.move_column(3)
+        tui._render_board()
+        focused_headings = " ".join(text for y, _x, text in narrow.writes if y == 2)
+        self.assertIn("done", focused_headings)
+        self.assertNotIn("backlog", focused_headings)
+        self.assertIn(tui.model.current_state, tui.model.visible_states(3))
+        self.assertEqual(("todo", "working", "done"), tui.model.visible_states(3))
+
+        one_column = FakeScreen(20)
+        tui = kanban_tui.KanbanTui(
+            one_column,
+            single=False,
+            refresh_interval=30,
+            context=context,
+            get_board=lambda: board,
+            get_task=lambda _task_id: {},
+        )
+        tui.model.set_board(board)
+        tui._render_board()
+        single_headings = [text for y, _x, text in one_column.writes if y == 2]
+        self.assertEqual(1, len(single_headings))
+        self.assertIn("backlog", single_headings[0])
+
+        wide = FakeScreen(80)
+        tui = kanban_tui.KanbanTui(
+            wide,
+            single=True,
+            refresh_interval=30,
+            context=context,
+            get_board=lambda: board,
+            get_task=lambda _task_id: {},
+        )
+        tui.model.set_board(board)
+        tui.model.move_column(2)
+        tui._render_board()
+        forced = [text for y, _x, text in wide.writes if y == 2]
+        self.assertEqual(1, len(forced))
+        self.assertIn("working", forced[0])
+        self.assertNotIn("todo", forced[0])
+
     def test_tui_page_keys_move_selection_by_page_and_clamp(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:

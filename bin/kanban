@@ -1224,10 +1224,6 @@ def tui_page_context() -> dict:
         "unassigned": t("未指派", "Unassigned"),
         "error": t("加载失败", "Load failed"),
         "too_small": t("终端空间不足; 请放大窗口.", "Terminal is too small; enlarge the window."),
-        "use_single": t(
-            "终端宽度不足以显示全部栏目; 请使用 --single.",
-            "Terminal is too narrow for all columns; use --single.",
-        ),
         "quit_help": t("q 退出", "q quit"),
         "search_help": t("Enter 应用 | Esc 清空", "Enter apply | Esc clear"),
         "theme": t("主题", "Theme"),
@@ -1378,7 +1374,10 @@ def parser() -> argparse.ArgumentParser:
     tui_parser.add_argument(
         "--single",
         action="store_true",
-        help=t("每次只显示一个栏目", "show one column at a time"),
+        help=t(
+            "始终只显示一个栏目, 即使终端足够宽",
+            "always show one column, even when the terminal is wide enough",
+        ),
     )
     tui_parser.add_argument(
         "--refresh",

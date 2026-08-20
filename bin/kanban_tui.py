@@ -15,6 +15,8 @@ from typing import Optional
 ACTIVE_STATES = ("backlog", "todo", "working", "done")
 ALL_STATES = ACTIVE_STATES + ("archived", "trash")
 CARD_HEIGHT = 5
+MIN_COLUMN_WIDTH = 20
+MIN_BOARD_HEIGHT = 9
 
 FANCY_GLYPHS = {"vbar": "│", "bar": "▎", "hbar": "─", "left": "‹", "right": "›"}
 ASCII_GLYPHS = {"vbar": "|", "bar": ">", "hbar": "-", "left": "<", "right": ">"}
@@ -143,6 +145,14 @@ def board_content_key(tasks: list[dict]) -> str:
     return json.dumps(tasks, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def visible_column_count(width: int, total: int, *, single: bool = False) -> int:
+    if single or total <= 1:
+        return 1
+    # n 栏需要 n 个最小宽度和 n-1 条分隔线.
+    maximum = max(1, (width + 1) // (MIN_COLUMN_WIDTH + 1))
+    return min(total, maximum)
+
+
 class ScreenBuffer:
     def __init__(self, height: int, width: int) -> None:
         self.height = height
@@ -226,6 +236,7 @@ class BoardModel:
     query: str = ""
     show_archived: bool = False
     column_index: int = 0
+    column_offset: int = 0
     selected_ids: dict[str, Optional[str]] = field(
         default_factory=lambda: {state: None for state in ALL_STATES}
     )
@@ -282,6 +293,7 @@ class BoardModel:
 
     def normalize(self) -> None:
         self.column_index = min(self.column_index, len(self.states) - 1)
+        self.column_offset = max(0, min(self.column_offset, self.column_index))
         for state in ALL_STATES:
             tasks = self.tasks_for(state)
             task_ids = [str(task.get("task_id") or "") for task in tasks]
@@ -300,6 +312,21 @@ class BoardModel:
 
     def move_column(self, delta: int) -> None:
         self.column_index = (self.column_index + delta) % len(self.states)
+
+    def ensure_column_visible(self, visible_count: int) -> None:
+        visible_count = max(1, min(visible_count, len(self.states)))
+        if self.column_index < self.column_offset:
+            self.column_offset = self.column_index
+        elif self.column_index >= self.column_offset + visible_count:
+            self.column_offset = self.column_index - visible_count + 1
+        self.column_offset = max(
+            0, min(self.column_offset, max(0, len(self.states) - visible_count))
+        )
+
+    def visible_states(self, visible_count: int) -> tuple[str, ...]:
+        self.ensure_column_visible(visible_count)
+        end = self.column_offset + visible_count
+        return self.states[self.column_offset : end]
 
     def move_task(self, delta: int) -> None:
         state = self.current_state
@@ -641,7 +668,7 @@ class KanbanTui:
         accent = self.colors.get("accent", 0)
         self._add(0, 0, title, accent | curses.A_BOLD, width)
         # 高度 8 时首张卡片末行会被提示栏覆盖, 因此最小高度为 9.
-        if height < 9 or width < 32:
+        if height < MIN_BOARD_HEIGHT or width < MIN_COLUMN_WIDTH:
             message = self.context.get("too_small", "Terminal is too small.")
             self._add(2, 0, message, curses.A_BOLD, width)
             quit_help = self.context.get("quit_help", "q quit")
@@ -688,16 +715,12 @@ class KanbanTui:
                 except curses.error:
                     pass
 
-        states = (self.model.current_state,) if self.model.single else self.model.states
-        minimum_column_width = 10
-        if width < len(states) * minimum_column_width:
-            message = self.context.get(
-                "use_single", "Terminal is too narrow; use --single."
-            )
-            self._add(3, 0, message, curses.A_BOLD, width)
-            self._render_footer(height, width)
-            return
-
+        count = visible_column_count(
+            width, len(self.model.states), single=self.model.single
+        )
+        states = self.model.visible_states(count)
+        more_left = self.model.column_offset > 0
+        more_right = self.model.column_offset + len(states) < len(self.model.states)
         body_top = 4
         body_height = height - body_top - 1
         for index, state in enumerate(states):
@@ -714,7 +737,11 @@ class KanbanTui:
                 column_width,
                 body_top,
                 body_height,
-                state == self.model.current_state,
+                focused=state == self.model.current_state,
+                first_visible=index == 0,
+                last_visible=index == len(states) - 1,
+                more_left=more_left,
+                more_right=more_right,
             )
         self._render_footer(height, width)
 
@@ -726,15 +753,26 @@ class KanbanTui:
         body_top: int,
         body_height: int,
         focused: bool,
+        first_visible: bool = True,
+        last_visible: bool = True,
+        more_left: bool = False,
+        more_right: bool = False,
     ) -> None:
         tasks = self.model.tasks_for(state)
         label = self.context.get("state_labels", {}).get(state, state)
         state_color = self.colors.get(state, 0)
         heading_text = f"{label} ({len(tasks)})"
-        if self.model.single:
+        if self.model.single or (
+            first_visible and last_visible and len(self.model.states) > 1
+        ):
             heading_text = (
                 f"{self.glyphs['left']} {heading_text} {self.glyphs['right']}"
             )
+        else:
+            if first_visible and more_left:
+                heading_text = f"{self.glyphs['left']} {heading_text}"
+            if last_visible and more_right:
+                heading_text = f"{heading_text} {self.glyphs['right']}"
         heading_attr = state_color | curses.A_BOLD
         if focused:
             heading_attr |= curses.A_REVERSE
