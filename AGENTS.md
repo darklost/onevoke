@@ -7,6 +7,7 @@
 - 本仓库第二阶段安全角色 `CSA` 和 `Hacker` 一律标记 N/A, 不运行; `PM` 和 `QA` 保持适用.
 - 审核 base 以来全部改动都是 Markdown 规则或文档时, 不运行审核. 只要包含任一脚本, 代码或其他非 Markdown 文件, 就按适用规则运行 `PM` 和 `QA`; `CSA` 和 `Hacker` 仍按上一条标记 N/A.
 - 对外发布的分支模型固定为 `main` 稳定分支加 `develop` 集成分支, 不提供其他长期分支或集成分支选项; 缺少 `develop` 时从 `main` 自动初始化.
+- 功能或修复改完后默认: 在 `develop` 提交 → fast-forward 合入 `main` → 推送 `develop` 与 `main` → 运行 `./install.sh` 更新本机安装; 用户另有指示时除外.
 
 ## Project Structure & Module Organization
 
@@ -58,7 +59,7 @@ Shell 脚本使用 2 空格缩进, `set -eu`, 引用所有变量展开, 错误�
 
 ## Commit & Pull Request Guidelines
 
-新提交使用简短中文动宾 subject, 每个 commit 只包含一个关注点, 例如 `修复重复任务检测`. PR 应说明行为变化、原因和实际验证命令; 关联任务或 issue. CLI 输出变化附终端示例, 无界面改动时无需截图.
+新提交使用简短中文动宾 subject, 每个 commit 只包含一个关注点, 例如 `修复重复任务检测`. 改完后按本仓库特例完成合入 `main`、推送与本地 `install.sh`, 无需再等用户催促. PR 应说明行为变化、原因和实际验证命令; 关联任务或 issue. CLI 输出变化附终端示例, 无界面改动时无需截图.
 
 ## Security & Configuration
 
