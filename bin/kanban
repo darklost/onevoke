@@ -1238,9 +1238,10 @@ def tui_page_context() -> dict:
             "arrows/hjkl move | -/= width | PgUp/PgDn page | / search | Enter detail | a archives | t theme | r refresh | q quit",
         ),
         "detail_help": t(
-            "方向键/jk 滚动 | PgUp/PgDn 翻页 | q/Esc 返回",
-            "arrows/jk scroll | PgUp/PgDn page | q/Esc back",
+            "jk 滚动 | Ctrl-d/u 半页 | Ctrl-f/b 整页 | gg/G | / 搜索 n/N | q/Esc 返回",
+            "jk scroll | Ctrl-d/u half | Ctrl-f/b page | gg/G | / search n/N | q/Esc back",
         ),
+        "no_match": t("无匹配", "no match"),
         "state_labels": WEB_STATUS_LABELS[lang],
         "size_labels": WEB_SIZE_LABELS[lang],
     }

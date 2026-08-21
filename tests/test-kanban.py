@@ -2074,6 +2074,106 @@ N/A
         )
         self.assertEqual(0, tui.model.scrolls["todo"])
 
+    def test_tui_detail_vim_paging_and_document_search(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        class FakeScreen:
+            def __init__(self, height: int, width: int) -> None:
+                self.height = height
+                self.width = width
+                self.writes = []
+
+            def getmaxyx(self):
+                return self.height, self.width
+
+            def addstr(self, y, x, text, attr=0):
+                self.writes.append((y, x, text, attr))
+
+            def move(self, y, x):
+                self.cursor = (y, x)
+
+        document = "\n".join(
+            f"line-{index:02d} needle" if index in {3, 12, 20} else f"line-{index:02d}"
+            for index in range(30)
+        )
+        screen = FakeScreen(14, 40)
+        tui = kanban_tui.KanbanTui(
+            screen,
+            single=True,
+            refresh_interval=60,
+            context={
+                "search": "Search",
+                "search_help": "Enter apply | Esc clear",
+                "detail_help": "detail keys",
+                "no_match": "no match",
+                "state_labels": {"todo": "todo"},
+                "size_labels": {"small": "small"},
+            },
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+        )
+        tui.detail = {
+            "task_id": "20260821-detail-search-task",
+            "title": "Detail search",
+            "state": "todo",
+            "kind": "small",
+            "document": document,
+        }
+        body = tui._detail_body_height()
+        self.assertEqual(10, body)
+        half = max(1, body // 2)
+
+        tui._handle_detail_key("\x04")  # Ctrl-d
+        self.assertEqual(half, tui.detail_scroll)
+        tui._handle_detail_key("\x06")  # Ctrl-f
+        self.assertEqual(half + body, tui.detail_scroll)
+        tui._handle_detail_key("\x15")  # Ctrl-u
+        self.assertEqual(half + body - half, tui.detail_scroll)
+        tui._handle_detail_key("\x02")  # Ctrl-b
+        self.assertEqual(max(0, half + body - half - body), tui.detail_scroll)
+        tui._handle_detail_key("G")
+        tui._render_detail()
+        self.assertEqual(max(0, 30 - body), tui.detail_scroll)
+        tui._handle_detail_key("g")
+        tui._handle_detail_key("g")
+        self.assertEqual(0, tui.detail_scroll)
+
+        tui._handle_detail_key("/")
+        self.assertTrue(tui.detail_searching)
+        for char in "needle":
+            tui._handle_detail_key(char)
+        self.assertEqual("needle", tui.detail_query)
+        tui._handle_detail_key("\n")
+        self.assertFalse(tui.detail_searching)
+        self.assertEqual([3, 12, 20], tui._detail_matches())
+        self.assertEqual(0, tui.detail_match_index)
+        self.assertEqual(max(0, 3 - body // 3), tui.detail_scroll)
+
+        tui._handle_detail_key("n")
+        self.assertEqual(1, tui.detail_match_index)
+        self.assertEqual(max(0, 12 - body // 3), tui.detail_scroll)
+        tui._handle_detail_key("N")
+        self.assertEqual(0, tui.detail_match_index)
+
+        tui._handle_detail_key("/")
+        tui._handle_detail_key("\x1b")
+        self.assertEqual("", tui.detail_query)
+        self.assertFalse(tui.detail_searching)
+
+        tui.detail_query = "missing"
+        tui._apply_detail_search()
+        screen.writes = []
+        tui._render_detail()
+        footer = next(write for write in screen.writes if write[0] == 13)
+        self.assertIn("no match", footer[2])
+
+        self.assertEqual([0, 2], kanban_tui.line_match_indexes(["Alpha", "beta", "ALPHA"], "alpha"))
+        self.assertEqual([(2, 5)], kanban_tui.match_spans("xxABCyy", "abc"))
+
     def test_tui_theme_key_cycles_and_run_rejects_unknown_theme(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:

@@ -146,6 +146,33 @@ def task_matches(task: dict, keyword: str) -> bool:
     return needle in haystack
 
 
+def line_match_indexes(lines: list[str], keyword: str) -> list[int]:
+    needle = keyword.strip().casefold()
+    if not needle:
+        return []
+    return [index for index, line in enumerate(lines) if needle in line.casefold()]
+
+
+def match_spans(text: str, keyword: str) -> list[tuple[int, int]]:
+    needle = keyword.strip().casefold()
+    if not needle:
+        return []
+    folded = text.casefold()
+    # casefold 可能改变长度 (如 ß→ss); 此时整行高亮, 避免错位.
+    if len(folded) != len(text):
+        return [(0, len(text))] if needle in folded else []
+    spans: list[tuple[int, int]] = []
+    start = 0
+    step = max(1, len(needle))
+    while True:
+        index = folded.find(needle, start)
+        if index < 0:
+            break
+        spans.append((index, index + len(needle)))
+        start = index + step
+    return spans
+
+
 def board_content_key(tasks: list[dict]) -> str:
     return json.dumps(tasks, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -472,6 +499,10 @@ class KanbanTui:
         self.searching = False
         self.detail: Optional[dict] = None
         self.detail_scroll = 0
+        self.detail_searching = False
+        self.detail_query = ""
+        self.detail_match_index = 0
+        self.detail_pending_g = False
         self.last_refresh = time.monotonic()
         self.running = True
         self.colors: dict[str, int] = {}
@@ -608,6 +639,11 @@ class KanbanTui:
         if next_detail == self.detail:
             return bool(previous_error)
         self.detail = next_detail
+        matches = self._detail_matches()
+        if matches:
+            self.detail_match_index = min(self.detail_match_index, len(matches) - 1)
+        else:
+            self.detail_match_index = 0
         return True
 
     def _open_detail(self) -> None:
@@ -617,9 +653,65 @@ class KanbanTui:
         try:
             self.detail = self.get_task(str(selected.get("task_id") or ""))
             self.detail_scroll = 0
+            self._reset_detail_search()
             self.model.detail_error = ""
         except Exception as error:
             self.model.detail_error = str(error)
+
+    def _close_detail(self) -> None:
+        self.detail = None
+        self.detail_scroll = 0
+        self._reset_detail_search()
+
+    def _reset_detail_search(self) -> None:
+        self.detail_searching = False
+        self.detail_query = ""
+        self.detail_match_index = 0
+        self.detail_pending_g = False
+        self._set_cursor(False)
+
+    def _detail_body_height(self) -> int:
+        return max(1, self.screen.getmaxyx()[0] - 4)
+
+    def _detail_lines(self) -> list[str]:
+        width = max(1, self.screen.getmaxyx()[1] - 1)
+        task = self.detail or {}
+        return wrap_text(str(task.get("document") or ""), width)
+
+    def _detail_matches(self, lines: Optional[list[str]] = None) -> list[int]:
+        return line_match_indexes(
+            lines if lines is not None else self._detail_lines(),
+            self.detail_query,
+        )
+
+    def _scroll_detail_by(self, delta: int) -> None:
+        self.detail_scroll = max(0, self.detail_scroll + delta)
+
+    def _reveal_detail_line(self, line_index: int, lines: list[str]) -> None:
+        body_height = self._detail_body_height()
+        maximum_scroll = max(0, len(lines) - body_height)
+        # 尽量把命中行放在可视区上三分之一, 方便阅读上下文.
+        preferred = max(0, line_index - max(0, body_height // 3))
+        self.detail_scroll = max(0, min(preferred, maximum_scroll))
+
+    def _jump_detail_match(self, direction: int) -> None:
+        matches = self._detail_matches()
+        if not matches:
+            return
+        if self.detail_match_index >= len(matches):
+            self.detail_match_index = 0
+        self.detail_match_index = (self.detail_match_index + direction) % len(matches)
+        self._reveal_detail_line(matches[self.detail_match_index], self._detail_lines())
+
+    def _apply_detail_search(self) -> None:
+        self.detail_searching = False
+        self._set_cursor(False)
+        matches = self._detail_matches()
+        if not matches:
+            self.detail_match_index = 0
+            return
+        self.detail_match_index = 0
+        self._reveal_detail_line(matches[0], self._detail_lines())
 
     def _page_size(self) -> int:
         # 与 _render_column 的卡片容量保持一致: body_top=4, 页脚占 1 行.
@@ -705,24 +797,59 @@ class KanbanTui:
             self.model.query += key
             self.model.normalize()
 
+    def _handle_detail_search_key(self, key) -> None:
+        if key in ("\n", "\r", curses.KEY_ENTER):
+            self._apply_detail_search()
+        elif key == "\x1b":
+            self.detail_query = ""
+            self.detail_match_index = 0
+            self.detail_searching = False
+            self._set_cursor(False)
+        elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
+            self.detail_query = self.detail_query[:-1]
+        elif isinstance(key, str) and key.isprintable():
+            self.detail_query += key
+
     def _handle_detail_key(self, key) -> None:
+        if self.detail_searching:
+            self._handle_detail_search_key(key)
+            return
+        if self.detail_pending_g:
+            self.detail_pending_g = False
+            if key == "g":
+                self.detail_scroll = 0
+                return
+            # 未组成 gg 时继续处理本次按键 (例如 g 后按 G 仍跳到底).
+        page_height = self._detail_body_height()
+        half_page = max(1, page_height // 2)
         if key in ("q", "Q", "\x1b", curses.KEY_BACKSPACE, "\b", "\x7f"):
-            self.detail = None
-            self.detail_scroll = 0
+            self._close_detail()
         elif key in (curses.KEY_UP, "k", "K"):
-            self.detail_scroll = max(0, self.detail_scroll - 1)
+            self._scroll_detail_by(-1)
         elif key in (curses.KEY_DOWN, "j", "J"):
-            self.detail_scroll += 1
-        elif key == curses.KEY_PPAGE:
-            page_height = max(1, self.screen.getmaxyx()[0] - 5)
-            self.detail_scroll = max(0, self.detail_scroll - page_height)
-        elif key == curses.KEY_NPAGE:
-            self.detail_scroll += max(1, self.screen.getmaxyx()[0] - 5)
+            self._scroll_detail_by(1)
+        elif key in (curses.KEY_PPAGE, "\x02"):  # Ctrl-b
+            self._scroll_detail_by(-page_height)
+        elif key in (curses.KEY_NPAGE, "\x06"):  # Ctrl-f
+            self._scroll_detail_by(page_height)
+        elif key == "\x15":  # Ctrl-u
+            self._scroll_detail_by(-half_page)
+        elif key == "\x04":  # Ctrl-d
+            self._scroll_detail_by(half_page)
+        elif key == "g":
+            self.detail_pending_g = True
+        elif key in ("G", curses.KEY_END):
+            self.detail_scroll = sys.maxsize
         elif key == curses.KEY_HOME:
             self.detail_scroll = 0
-        elif key == curses.KEY_END:
-            self.detail_scroll = sys.maxsize
-
+        elif key == "/":
+            self.detail_searching = True
+            self.detail_pending_g = False
+            self._set_cursor(True)
+        elif key == "n":
+            self._jump_detail_match(1)
+        elif key == "N":
+            self._jump_detail_match(-1)
     def _render(self, *, force: bool = False) -> None:
         height, width = self.screen.getmaxyx()
         self.cursor_pos = None
@@ -734,7 +861,10 @@ class KanbanTui:
         self.frame.blit(self.screen, None if force else self.prev_frame)
         self.prev_frame = self.frame
         self.frame = None
-        if self.searching and self.cursor_pos is not None:
+        if (
+            (self.searching or self.detail_searching)
+            and self.cursor_pos is not None
+        ):
             try:
                 self.screen.move(*self.cursor_pos)
             except curses.error:
@@ -1013,33 +1143,89 @@ class KanbanTui:
         )
         self._add(1, 0, self.glyphs["bar"], state_color | curses.A_BOLD, 1)
         self._add(1, 2, meta, curses.A_DIM, max(0, width - 2))
-        self._add(2, 0, self.glyphs["hbar"] * width, curses.A_DIM, width)
+        query_prefix = self.context.get("search", "Search") + ": "
+        if self.detail_searching:
+            query_text = self.detail_query
+            search_attr = accent | curses.A_BOLD
+            self._add(2, 0, query_prefix + query_text, search_attr, width)
+            self.cursor_pos = (
+                2,
+                min(width - 1, display_width(query_prefix + query_text)),
+            )
+        else:
+            self._add(2, 0, self.glyphs["hbar"] * width, curses.A_DIM, width)
         body_height = height - 4
         lines = wrap_text(str(task.get("document") or ""), max(1, width - 1))
+        matches = self._detail_matches(lines)
+        if matches:
+            self.detail_match_index = min(self.detail_match_index, len(matches) - 1)
+        else:
+            self.detail_match_index = 0
+        current_match_line = (
+            matches[self.detail_match_index] if matches else None
+        )
         maximum_scroll = max(0, len(lines) - body_height)
         self.detail_scroll = max(0, min(self.detail_scroll, maximum_scroll))
         visible_lines = lines[
             self.detail_scroll : self.detail_scroll + body_height
         ]
         for index, line in enumerate(visible_lines):
+            line_index = self.detail_scroll + index
             stripped = line.lstrip()
             if stripped.startswith("#"):
-                attr = accent | curses.A_BOLD
+                base_attr = accent | curses.A_BOLD
             elif stripped.startswith(">"):
-                attr = curses.A_DIM
+                base_attr = curses.A_DIM
             else:
-                attr = 0
-            self._add(3 + index, 0, line, attr, width - 1)
+                base_attr = 0
+            spans = (
+                match_spans(line, self.detail_query)
+                if self.detail_query.strip()
+                else []
+            )
+            if not spans:
+                self._add(3 + index, 0, line, base_attr, width - 1)
+                continue
+            current = line_index == current_match_line
+            match_attr = (
+                (accent | curses.A_REVERSE | curses.A_BOLD)
+                if current
+                else (curses.A_REVERSE | curses.A_BOLD)
+            )
+            cursor = 0
+            column = 0
+            for start, end in spans:
+                if start > cursor:
+                    chunk = line[cursor:start]
+                    self._add(3 + index, column, chunk, base_attr, width - 1 - column)
+                    column += display_width(chunk)
+                chunk = line[start:end]
+                self._add(3 + index, column, chunk, match_attr, width - 1 - column)
+                column += display_width(chunk)
+                cursor = end
+            if cursor < len(line):
+                chunk = line[cursor:]
+                self._add(3 + index, column, chunk, base_attr, width - 1 - column)
         visible_end = min(len(lines), self.detail_scroll + body_height)
         position = f"{self.detail_scroll + 1}-{visible_end}/{len(lines)}"
         status_error = self._status_error()
         if status_error:
             footer = f"{self.context.get('error', 'Error')}: {status_error}"
+        elif self.detail_searching:
+            footer = self.context.get("search_help", "Enter apply | Esc clear")
         else:
             help_text = self.context.get(
-                "detail_help", "arrows/jk scroll | PgUp/PgDn | q/Esc back"
+                "detail_help",
+                "jk scroll | Ctrl-d/u half | Ctrl-f/b page | gg/G | / n N | q/Esc back",
             )
-            footer = f"{help_text} | {position}"
+            if self.detail_query.strip():
+                if matches:
+                    match_info = f"{self.detail_match_index + 1}/{len(matches)}"
+                else:
+                    match_info = self.context.get("no_match", "no match")
+                footer = f"{help_text} | {match_info} | {position}"
+            else:
+                footer = f"{help_text} | {position}"
         self._add(
             height - 1,
             0,
