@@ -16,12 +16,12 @@ from typing import Optional
 
 ACTIVE_STATES = ("backlog", "todo", "working", "done")
 ALL_STATES = ACTIVE_STATES + ("archived", "trash")
-CARD_HEIGHT = 5
+CARD_HEIGHT = 4
 DEFAULT_COLUMN_WIDTH = 40
 MIN_COLUMN_WIDTH = 10
 MAX_COLUMN_WIDTH = 120
 COLUMN_WIDTH_STEP = 5
-MIN_BOARD_HEIGHT = 9
+MIN_BOARD_HEIGHT = 8
 BODY_TOP = 4
 MOUSE_SCROLL_STEP = 3
 
@@ -29,7 +29,7 @@ FANCY_GLYPHS = {
     "vbar": "│",
     "bar": "▎",
     "hbar": "─",
-    "dashed": "- ",
+    "dot": "·",
     "left": "‹",
     "right": "›",
 }
@@ -37,7 +37,7 @@ ASCII_GLYPHS = {
     "vbar": "|",
     "bar": ">",
     "hbar": "-",
-    "dashed": "- ",
+    "dot": "|",
     "left": "<",
     "right": ">",
 }
@@ -1207,8 +1207,15 @@ class KanbanTui:
         height, width = self.screen.getmaxyx()
         title = self.context.get("title", "Task Board")
         accent = self.colors.get("accent", 0)
-        self._add(0, 0, title, accent | curses.A_BOLD, width)
-        # 高度 8 时首张卡片末行会被提示栏覆盖, 因此最小高度为 9.
+        # MD 风格 app bar: 整行强调色反白, 与底部提示栏呼应.
+        self._add(
+            0,
+            0,
+            pad_text(" " + title, width),
+            accent | curses.A_REVERSE | curses.A_BOLD,
+            width,
+        )
+        # 高度 7 时首张卡片末行会被提示栏覆盖, 因此最小高度为 8.
         # 宽度低于最小栏宽时仍按实际宽度画单栏, 不因过窄拒绝渲染.
         if height < MIN_BOARD_HEIGHT or width < 1:
             message = self.context.get("too_small", "Terminal is too small.")
@@ -1285,8 +1292,9 @@ class KanbanTui:
             zip(states, column_geometry(width, len(states)))
         ):
             if separator:
+                divider = self.colors.get("muted", curses.A_DIM)
                 for y in range(2, height - 1):
-                    self._add(y, x + column_width, self.glyphs["vbar"], curses.A_DIM, 1)
+                    self._add(y, x + column_width, self.glyphs["vbar"], divider, 1)
             self._render_column(
                 state,
                 x,
@@ -1336,14 +1344,20 @@ class KanbanTui:
         else:
             heading_attr = state_color | curses.A_BOLD
         self._add(2, x, pad_text(f" {heading_text}", width), heading_attr, width)
-        self._add(3, x, self.glyphs["hbar"] * width, curses.A_DIM, width)
+        self._add(
+            3,
+            x,
+            self.glyphs["hbar"] * width,
+            self.colors.get("muted", curses.A_DIM),
+            width,
+        )
         if not tasks:
             empty = self.context.get("empty", "No tasks")
             self._add(body_top, x + 1, empty, curses.A_DIM, max(0, width - 2))
             return
 
         content_width = max(1, width - 2)
-        # 卡片之间用空行分隔 (CARD_HEIGHT 含 1 行间隙), 不画分隔线.
+        # 紧凑卡片: 3 行内容 (标题/ID/元信息) 加 1 行空行间隔.
         for row, task in enumerate(tasks[scroll : scroll + capacity]):
             y = body_top + row * CARD_HEIGHT
             selected = focused and str(task.get("task_id") or "") == str(
@@ -1362,24 +1376,18 @@ class KanbanTui:
             assignee = task.get("assignee") or self.context.get(
                 "unassigned", "Unassigned"
             )
+            dot = self.glyphs["dot"]
+            meta_head = str(group_or_type)
+            meta_tail = f" {dot} {assignee} {dot} {task.get('time') or '-'}"
+            highlight = self._highlight_attr(state, curses.A_BOLD)
             lines = (
                 (str(task.get("title") or task.get("task_id") or ""), curses.A_BOLD),
                 (str(task.get("task_id") or ""), self.colors.get("id", 0)),
-                (str(group_or_type), self.colors.get("group", 0)),
-                (f"{assignee} | {task.get('time') or '-'}", curses.A_DIM),
             )
             for offset, (line, attr) in enumerate(lines):
                 if selected:
                     # 整卡反色加粗, 彩底选中比只反色状态色更易辨认.
-                    attr = self._highlight_attr(state, curses.A_BOLD)
-                    # 左侧留 1 列: 选中时画靠左竖线, 未选中保持空白.
-                    self._add(
-                        y + offset,
-                        x,
-                        self.glyphs["bar"],
-                        state_color | curses.A_BOLD,
-                        1,
-                    )
+                    attr = highlight
                 self._add(
                     y + offset,
                     x + 1,
@@ -1387,6 +1395,38 @@ class KanbanTui:
                     attr,
                     content_width,
                 )
+            # 元信息行: 任务组/类型保持色相, 负责人和时间弱化显示.
+            meta_y = y + 2
+            if selected:
+                self._add(
+                    meta_y,
+                    x + 1,
+                    pad_text(meta_head + meta_tail, content_width),
+                    highlight,
+                    content_width,
+                )
+            else:
+                head = clip_text(meta_head, content_width)
+                self._add(meta_y, x + 1, head, self.colors.get("group", 0))
+                used = display_width(head)
+                if used < content_width:
+                    self._add(
+                        meta_y,
+                        x + 1 + used,
+                        meta_tail,
+                        curses.A_DIM,
+                        content_width - used,
+                    )
+            if selected:
+                # 左侧留 1 列: 选中时画靠左竖线, 未选中保持空白.
+                for offset in range(3):
+                    self._add(
+                        y + offset,
+                        x,
+                        self.glyphs["bar"],
+                        state_color | curses.A_BOLD,
+                        1,
+                    )
 
     def _footer_attr(self, error: bool = False) -> int:
         # 提示栏用强调色反白, 与状态色的选中卡和栏目高亮区分.

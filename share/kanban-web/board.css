@@ -1,54 +1,98 @@
+/* Material Design 2 theme: baseline palette, Roboto type scale, dp elevation. */
 :root {
-  --background: oklch(100% 0 0);
-  --foreground: oklch(14.5% 0 0);
-  --card: oklch(100% 0 0);
-  --card-foreground: oklch(14.5% 0 0);
-  --primary: oklch(20.5% 0 0);
-  --primary-foreground: oklch(98.5% 0 0);
-  --muted: oklch(97% 0 0);
-  --muted-foreground: oklch(55.6% 0 0);
-  --accent: oklch(97% 0 0);
-  --border: oklch(92.2% 0 0);
-  --input: oklch(92.2% 0 0);
-  --ring: oklch(70.8% 0 0);
-  --radius: 0.5rem;
-  --amber-100: oklch(96.2% 0.059 95.617);
-  --amber-800: oklch(47.3% 0.137 46.201);
-  --sky-100: oklch(95.1% 0.026 236.824);
-  --sky-800: oklch(44.3% 0.11 240.79);
-  --emerald-100: oklch(95% 0.052 163.051);
-  --emerald-800: oklch(43.2% 0.095 166.913);
-  --violet-100: oklch(94.6% 0.033 307.174);
-  --violet-800: oklch(43.8% 0.218 303.724);
-  --rose-100: oklch(94.1% 0.03 12.58);
-  --rose-800: oklch(45.5% 0.188 13.697);
-  font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", sans-serif;
+  --radius: 4px;
+  --primary: #6200ee;
+  --primary-variant: #3700b3;
+  --on-primary: #ffffff;
+  --secondary: #018786;
+  --background: #fafafa;
+  --surface: #ffffff;
+  --on-surface: rgba(0, 0, 0, 0.87);
+  --on-surface-medium: rgba(0, 0, 0, 0.6);
+  --on-surface-faint: rgba(0, 0, 0, 0.38);
+  --outline: rgba(0, 0, 0, 0.12);
+  --state-layer: rgba(0, 0, 0, 0.04);
+  --field: rgba(0, 0, 0, 0.06);
+  --error: #b00020;
+  --app-bar-bg: var(--primary);
+  --app-bar-fg: var(--on-primary);
+  --app-bar-fg-medium: rgba(255, 255, 255, 0.74);
+  --backlog-container: #e0f7fa;
+  --backlog-on: #006064;
+  --todo-container: #ffecb3;
+  --todo-on: #7a5200;
+  --working-container: #e3f2fd;
+  --working-on: #1565c0;
+  --done-container: #e8f5e9;
+  --done-on: #2e7d32;
+  --archived-container: #f3e5f5;
+  --archived-on: #6a1b9a;
+  --trash-container: #ffebee;
+  --trash-on: #c62828;
+  --type-container: #eceff1;
+  --type-on: #455a64;
+  --large-container: #ede7f6;
+  --large-on: #512da8;
+  --group-container: #fff8e1;
+  --group-on: #6d4c00;
+  --elevation-1:
+    0 2px 1px -1px rgba(0, 0, 0, 0.2),
+    0 1px 1px 0 rgba(0, 0, 0, 0.14),
+    0 1px 3px 0 rgba(0, 0, 0, 0.12);
+  --elevation-4:
+    0 2px 4px -1px rgba(0, 0, 0, 0.2),
+    0 4px 5px 0 rgba(0, 0, 0, 0.14),
+    0 1px 10px 0 rgba(0, 0, 0, 0.12);
+  --elevation-8:
+    0 5px 5px -3px rgba(0, 0, 0, 0.2),
+    0 8px 10px 1px rgba(0, 0, 0, 0.14),
+    0 3px 14px 2px rgba(0, 0, 0, 0.12);
+  --elevation-24:
+    0 11px 15px -7px rgba(0, 0, 0, 0.2),
+    0 24px 38px 3px rgba(0, 0, 0, 0.14),
+    0 9px 46px 8px rgba(0, 0, 0, 0.12);
+  font-family: Roboto, "Segoe UI", "Helvetica Neue", "Noto Sans SC",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: oklch(14.5% 0 0);
-    --foreground: oklch(98.5% 0 0);
-    --card: oklch(20.5% 0 0);
-    --card-foreground: oklch(98.5% 0 0);
-    --primary: oklch(98.5% 0 0);
-    --primary-foreground: oklch(20.5% 0 0);
-    --muted: oklch(26.9% 0 0);
-    --muted-foreground: oklch(70.8% 0 0);
-    --accent: oklch(26.9% 0 0);
-    --border: oklch(26.9% 0 0);
-    --input: oklch(26.9% 0 0);
-    --ring: oklch(55.6% 0 0);
-    --amber-100: oklch(41.4% 0.112 45.904);
-    --amber-800: oklch(92.4% 0.12 95.746);
-    --sky-100: oklch(39.1% 0.09 240.876);
-    --sky-800: oklch(90.1% 0.058 230.902);
-    --emerald-100: oklch(37.8% 0.077 168.94);
-    --emerald-800: oklch(90.5% 0.093 164.15);
-    --violet-100: oklch(38% 0.14 303);
-    --violet-800: oklch(94% 0.04 307);
-    --rose-100: oklch(41% 0.14 14);
-    --rose-800: oklch(94% 0.03 12);
+    /* MD2 dark theme: #121212 background, elevation via lighter surfaces. */
+    --primary: #bb86fc;
+    --primary-variant: #3700b3;
+    --on-primary: #000000;
+    --secondary: #03dac6;
+    --background: #121212;
+    --surface: #1e1e1e;
+    --on-surface: rgba(255, 255, 255, 0.87);
+    --on-surface-medium: rgba(255, 255, 255, 0.6);
+    --on-surface-faint: rgba(255, 255, 255, 0.38);
+    --outline: rgba(255, 255, 255, 0.12);
+    --state-layer: rgba(255, 255, 255, 0.06);
+    --field: rgba(255, 255, 255, 0.08);
+    --error: #cf6679;
+    /* 深色 app bar 用表面色而非主色, 遵循 MD2 dark 指南. */
+    --app-bar-bg: #272727;
+    --app-bar-fg: rgba(255, 255, 255, 0.87);
+    --app-bar-fg-medium: rgba(255, 255, 255, 0.6);
+    --backlog-container: #00363d;
+    --backlog-on: #80deea;
+    --todo-container: #4a3a00;
+    --todo-on: #ffe082;
+    --working-container: #0d3a66;
+    --working-on: #90caf9;
+    --done-container: #1b4620;
+    --done-on: #a5d6a7;
+    --archived-container: #46165e;
+    --archived-on: #ce93d8;
+    --trash-container: #5c1a1a;
+    --trash-on: #ef9a9a;
+    --type-container: #37474f;
+    --type-on: #cfd8dc;
+    --large-container: #38265c;
+    --large-on: #d1c4e9;
+    --group-container: #453a14;
+    --group-on: #ffe082;
   }
 }
 
@@ -68,52 +112,51 @@ body {
   margin: 0;
   min-height: 100%;
   background: var(--background);
-  color: var(--foreground);
-}
-
-body {
-  background-image:
-    radial-gradient(circle at top left, color-mix(in oklab, var(--sky-100) 55%, transparent), transparent 42%),
-    linear-gradient(180deg, color-mix(in oklab, var(--muted) 55%, transparent), transparent 28%);
+  color: var(--on-surface);
 }
 
 .page {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  max-width: 1600px;
-  margin: 0 auto;
-  padding: 1.5rem;
+  padding: 0 0 1.5rem;
 }
 
+/* Top app bar: primary color surface with 4dp elevation. */
 .page-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.125rem;
+  padding: 0.75rem 1.5rem;
+  background: var(--app-bar-bg);
+  color: var(--app-bar-fg);
+  box-shadow: var(--elevation-4);
 }
 
 .page-header h1 {
   margin: 0;
-  font-size: 1.5rem;
-  font-weight: 600;
+  font-size: 1.25rem;
+  font-weight: 500;
+  letter-spacing: 0.0125em;
 }
 
 .page-description {
   margin: 0;
   max-width: 48rem;
-  color: var(--muted-foreground);
-  font-size: 0.875rem;
+  color: var(--app-bar-fg-medium);
+  font-size: 0.8125rem;
 }
 
 .page-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem 0.75rem;
-  min-height: 3.5rem;
-  padding: 0.625rem 0.75rem;
-  border-block: 1px solid var(--border);
-  background: color-mix(in oklab, var(--muted) 20%, transparent);
+  gap: 0.75rem;
+  margin: 0 1.5rem;
+  min-height: 3rem;
 }
 
 .toolbar-group {
@@ -138,49 +181,79 @@ body {
   font: inherit;
 }
 
+/* Filled text field: tonal fill, bottom line, primary focus indicator. */
 .input {
-  width: min(100%, 220px);
+  width: min(100%, 240px);
   min-width: 12rem;
-  height: 2.25rem;
+  height: 2.5rem;
   padding: 0 0.75rem;
-  border: 1px solid var(--input);
-  border-radius: calc(var(--radius) - 2px);
-  background: var(--background);
-  color: var(--foreground);
+  border: 0;
+  border-bottom: 1px solid var(--on-surface-medium);
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--field);
+  color: var(--on-surface);
+  transition: background-color 120ms ease;
+}
+
+.input::placeholder {
+  color: var(--on-surface-medium);
+}
+
+.input:hover {
+  background: var(--state-layer);
 }
 
 .input:focus {
-  outline: 2px solid color-mix(in oklab, var(--ring) 50%, transparent);
-  outline-offset: 1px;
+  outline: none;
+  border-bottom-color: var(--primary);
+  box-shadow: 0 1px 0 0 var(--primary);
 }
 
+/* Contained button: primary fill, 4dp radius, medium label. */
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
   height: 2.25rem;
-  padding: 0 0.875rem;
+  padding: 0 1rem;
   border: 1px solid transparent;
-  border-radius: calc(var(--radius) - 2px);
+  border-radius: var(--radius);
   background: var(--primary);
-  color: var(--primary-foreground);
+  color: var(--on-primary);
+  font-weight: 500;
+  letter-spacing: 0.03em;
   cursor: pointer;
+  box-shadow: var(--elevation-1);
+  transition: box-shadow 120ms ease, background-color 120ms ease;
 }
 
+.button:hover {
+  box-shadow: var(--elevation-4);
+}
+
+/* Outlined button: transparent fill, primary label. */
 .button.outline {
   background: transparent;
-  border-color: var(--border);
-  color: var(--foreground);
+  border-color: var(--outline);
+  color: var(--primary);
+  box-shadow: none;
+}
+
+.button.outline:hover {
+  background: var(--state-layer);
 }
 
 .button.outline[aria-pressed="true"],
 .button.secondary {
-  background: var(--muted);
+  background: var(--field);
 }
 
-.button:hover {
-  opacity: 0.92;
+.button:focus-visible,
+.input:focus-visible,
+.task-card:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
 }
 
 @media (pointer: coarse) {
@@ -191,7 +264,7 @@ body {
 }
 
 .refresh-status {
-  color: var(--muted-foreground);
+  color: var(--on-surface-medium);
   font-size: 0.75rem;
   white-space: nowrap;
 }
@@ -201,6 +274,7 @@ body {
   grid-template-columns: 1fr;
   gap: 0.75rem;
   align-items: stretch;
+  margin: 0 1.5rem;
 }
 
 @media (min-width: 48rem) {
@@ -220,13 +294,13 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+/* Columns are tonal sheets; cards float on them with elevation. */
 .column {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: color-mix(in oklab, var(--muted) 30%, transparent);
+  background: var(--state-layer);
 }
 
 .column-header {
@@ -234,19 +308,45 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid var(--border);
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--outline);
 }
 
 .column-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   margin: 0;
   font-size: 0.875rem;
-  font-weight: 600;
+  font-weight: 500;
+  letter-spacing: 0.00714em;
 }
 
+/* State-colored leading dot, matching each column's accent. */
+.column-header h2::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--on-surface-faint);
+}
+
+.column[data-state="backlog"] .column-header h2::before { background: var(--backlog-on); }
+.column[data-state="todo"] .column-header h2::before { background: var(--todo-on); }
+.column[data-state="working"] .column-header h2::before { background: var(--working-on); }
+.column[data-state="done"] .column-header h2::before { background: var(--done-on); }
+.column[data-state="archived"] .column-header h2::before { background: var(--archived-on); }
+.column[data-state="trash"] .column-header h2::before { background: var(--trash-on); }
+
 .column-count {
-  color: var(--muted-foreground);
+  min-width: 1.5rem;
+  padding: 0 0.375rem;
+  border-radius: 999px;
+  background: var(--field);
+  color: var(--on-surface-medium);
   font-size: 0.75rem;
+  line-height: 1.25rem;
+  text-align: center;
 }
 
 .column-body {
@@ -263,28 +363,38 @@ body {
 .column-empty {
   margin: 0;
   padding: 1.5rem 0;
-  color: var(--muted-foreground);
+  color: var(--on-surface-faint);
   font-size: 0.75rem;
   text-align: center;
 }
 
+/* Card: 1dp resting elevation, 4dp on hover, state-colored leading strip. */
 .task-card {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
   padding: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: calc(var(--radius) - 2px);
-  background: var(--card);
-  color: var(--card-foreground);
-  box-shadow: 0 1px 2px color-mix(in oklab, black 5%, transparent);
+  border: 0;
+  border-left: 3px solid var(--on-surface-faint);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--on-surface);
+  box-shadow: var(--elevation-1);
   cursor: pointer;
   text-align: left;
+  transition: box-shadow 120ms ease;
 }
 
 .task-card:hover {
-  border-color: color-mix(in oklab, var(--primary) 50%, transparent);
+  box-shadow: var(--elevation-4);
 }
+
+.task-card[data-state="backlog"] { border-left-color: var(--backlog-on); }
+.task-card[data-state="todo"] { border-left-color: var(--todo-on); }
+.task-card[data-state="working"] { border-left-color: var(--working-on); }
+.task-card[data-state="done"] { border-left-color: var(--done-on); }
+.task-card[data-state="archived"] { border-left-color: var(--archived-on); }
+.task-card[data-state="trash"] { border-left-color: var(--trash-on); }
 
 .task-title {
   margin: 0;
@@ -294,6 +404,7 @@ body {
   -webkit-line-clamp: 3;
   font-size: 0.875rem;
   font-weight: 500;
+  line-height: 1.4;
 }
 
 .task-meta {
@@ -311,62 +422,69 @@ body {
   gap: 0.375rem;
 }
 
+/* Chips: stadium shape with tonal container colors. */
 .badge {
   display: inline-flex;
   align-items: center;
-  border-radius: calc(var(--radius) - 4px);
-  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  padding: 0.0625rem 0.5rem;
   font-size: 0.75rem;
+  font-weight: 500;
   line-height: 1.25rem;
   border: 1px solid transparent;
 }
 
 .badge.secondary {
-  background: var(--muted);
-  color: var(--foreground);
+  background: var(--field);
+  color: var(--on-surface-medium);
 }
 
 .badge.outline {
-  border-color: var(--border);
-  color: var(--muted-foreground);
+  border-color: var(--outline);
+  color: var(--on-surface-medium);
 }
 
 .badge.type {
-  background: var(--sky-100);
-  color: var(--sky-800);
+  background: var(--type-container);
+  color: var(--type-on);
 }
 
 .badge.large {
-  background: var(--violet-100);
-  color: var(--violet-800);
+  background: var(--large-container);
+  color: var(--large-on);
 }
 
 .badge.working {
-  background: var(--sky-100);
-  color: var(--sky-800);
+  background: var(--working-container);
+  color: var(--working-on);
 }
 
 .badge.done {
-  background: var(--emerald-100);
-  color: var(--emerald-800);
+  background: var(--done-container);
+  color: var(--done-on);
 }
 
-.badge.archived,
+.badge.archived {
+  background: var(--archived-container);
+  color: var(--archived-on);
+}
+
 .badge.trash {
-  background: var(--rose-100);
-  color: var(--rose-800);
+  background: var(--trash-container);
+  color: var(--trash-on);
 }
 
 .task-assignee,
 .task-time {
-  color: var(--muted-foreground);
+  color: var(--on-surface-medium);
   font-size: 0.75rem;
 }
 
 .task-id {
   margin: 0;
-  color: var(--muted-foreground);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--on-surface-medium);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
   font-size: 0.7rem;
   overflow-wrap: anywhere;
 }
@@ -378,12 +496,15 @@ body {
   min-width: 0;
   height: auto;
   margin: 0;
+  border-radius: var(--radius);
   white-space: normal;
   overflow-wrap: anywhere;
-  background: var(--amber-100);
-  color: var(--amber-800);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--group-container);
+  color: var(--group-on);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
   font-size: 0.7rem;
+  font-weight: 400;
   line-height: 1.35;
 }
 
@@ -392,8 +513,9 @@ body {
   place-items: center;
   gap: 0.75rem;
   min-height: 16rem;
+  margin: 0 1.5rem;
   padding: 2rem;
-  border: 1px dashed var(--border);
+  border: 1px dashed var(--outline);
   border-radius: var(--radius);
   text-align: center;
 }
@@ -401,27 +523,29 @@ body {
 .empty-state h2 {
   margin: 0;
   font-size: 1.125rem;
+  font-weight: 500;
 }
 
 .empty-state p {
   margin: 0;
-  color: var(--muted-foreground);
+  color: var(--on-surface-medium);
 }
 
+/* Dialog: 24dp elevation, no border, 4dp radius. */
 .task-dialog {
   width: min(48rem, calc(100vw - 2rem));
   max-height: 92vh;
   padding: 0;
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
-  background: var(--card);
-  color: var(--card-foreground);
-  box-shadow: 0 10px 30px color-mix(in oklab, black 18%, transparent);
+  background: var(--surface);
+  color: var(--on-surface);
+  box-shadow: var(--elevation-24);
 }
 
 .task-dialog::backdrop {
-  background: color-mix(in oklab, black 45%, transparent);
+  background: rgba(0, 0, 0, 0.5);
 }
 
 .task-dialog-form {
@@ -438,18 +562,19 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid var(--border);
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--outline);
 }
 
 .task-dialog-header h2 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: 1.25rem;
+  font-weight: 500;
 }
 
 .task-dialog-meta {
   margin: 0.35rem 0 0;
-  color: var(--muted-foreground);
+  color: var(--on-surface-medium);
   font-size: 0.8125rem;
 }
 
@@ -457,12 +582,12 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   margin: 0;
-  padding: 1rem 1.25rem 1.25rem;
+  padding: 1rem 1.5rem 1.5rem;
   overflow: auto;
 }
 
 .markdown-body {
-  color: var(--card-foreground);
+  color: var(--on-surface);
   font-size: 0.875rem;
   line-height: 1.6;
   word-break: break-word;
@@ -483,7 +608,7 @@ body {
 .markdown-body h5,
 .markdown-body h6 {
   margin: 1.25em 0 0.5em;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.3;
 }
 
@@ -520,30 +645,31 @@ body {
 
 .markdown-body blockquote {
   padding: 0.15rem 0.85rem;
-  border-left: 3px solid var(--border);
-  color: var(--muted-foreground);
+  border-left: 3px solid var(--outline);
+  color: var(--on-surface-medium);
 }
 
 .markdown-body hr {
   margin: 1.25em 0;
   border: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--outline);
 }
 
 .markdown-body code {
   padding: 0.1em 0.35em;
-  border-radius: 0.25rem;
-  background: color-mix(in oklab, var(--muted) 80%, transparent);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  border-radius: var(--radius);
+  background: var(--field);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
   font-size: 0.85em;
 }
 
 .markdown-body pre.md-code {
   padding: 0.75rem 0.9rem;
   overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: calc(var(--radius) - 2px);
-  background: color-mix(in oklab, var(--muted) 45%, transparent);
+  border: 1px solid var(--outline);
+  border-radius: var(--radius);
+  background: var(--state-layer);
 }
 
 .markdown-body pre.md-code code {
@@ -554,7 +680,7 @@ body {
 }
 
 .markdown-body a {
-  color: inherit;
+  color: var(--primary);
   text-decoration: underline;
   text-underline-offset: 2px;
 }

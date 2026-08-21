@@ -2703,7 +2703,7 @@ N/A
             ],
         }
 
-        short = FakeScreen(8, 40)
+        short = FakeScreen(7, 40)
         tui = kanban_tui.KanbanTui(
             short,
             single=True,
@@ -2718,7 +2718,7 @@ N/A
             any("Terminal is too small." in text for _y, _x, text in short.writes)
         )
 
-        tall = FakeScreen(9, 40)
+        tall = FakeScreen(8, 40)
         tui = kanban_tui.KanbanTui(
             tall,
             single=True,
@@ -2730,11 +2730,11 @@ N/A
         tui.model.set_board(board)
         tui._render_board()
         card_rows = [y for y, _x, text in tall.writes if "codex" in text]
-        footer_rows = [y for y, _x, text in tall.writes if y == 8]
-        # 9 行时卡片末行 (负责人/时间) 在第 7 行, 页脚独占第 8 行.
-        self.assertEqual([7], card_rows)
+        footer_rows = [y for y, _x, text in tall.writes if y == 7]
+        # 8 行时卡片末行 (元信息) 在第 6 行, 页脚独占第 7 行.
+        self.assertEqual([6], card_rows)
         self.assertTrue(footer_rows)
-        self.assertFalse(any(y == 8 for y in card_rows))
+        self.assertFalse(any(y == 7 for y in card_rows))
 
     def test_tui_text_helpers_handle_wide_characters(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
@@ -3225,7 +3225,9 @@ N/A
         self.assertIn("width: fit-content", group_css)
         self.assertIn("[hidden]", css)
         self.assertIn("display: none !important", css)
-        self.assertIn("border-radius: calc(var(--radius) - 4px)", css)
+        # MD2 chips 用 stadium 形状; 任务组徽章保留小圆角以容纳换行.
+        self.assertIn("border-radius: 999px", css)
+        self.assertIn("border-radius: var(--radius)", group_css)
 
     def test_web_sse_only_publishes_content_changes(self) -> None:
         import queue
