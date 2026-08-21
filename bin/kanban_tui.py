@@ -29,7 +29,7 @@ FANCY_GLYPHS = {
     "vbar": "│",
     "bar": "▎",
     "hbar": "─",
-    "dashed": "┄",
+    "dashed": "- ",
     "left": "‹",
     "right": "›",
 }
@@ -37,7 +37,7 @@ ASCII_GLYPHS = {
     "vbar": "|",
     "bar": ">",
     "hbar": "-",
-    "dashed": "-",
+    "dashed": "- ",
     "left": "<",
     "right": ">",
 }
@@ -1324,10 +1324,10 @@ class KanbanTui:
         for row, task in enumerate(tasks[scroll : scroll + capacity]):
             y = body_top + row * CARD_HEIGHT
             if row > 0:
-                # 卡片之间用虚线分割, 与栏目标题下的实线区分层级.
-                self._add(
-                    y - 1, x, self.glyphs["dashed"] * width, curses.A_DIM, width
-                )
+                # 卡片之间用稀疏的 "- " 虚线, 比栏目标题下的实线更不显眼.
+                # 预先裁到栏宽, 避免 clip_text 在行尾补 "...".
+                dashed_line = (self.glyphs["dashed"] * width)[:width]
+                self._add(y - 1, x, dashed_line, curses.A_DIM, width)
             selected = focused and str(task.get("task_id") or "") == str(
                 self.model.selected_ids.get(state) or ""
             )
