@@ -22,6 +22,8 @@ MIN_COLUMN_WIDTH = 10
 MAX_COLUMN_WIDTH = 120
 COLUMN_WIDTH_STEP = 5
 MIN_BOARD_HEIGHT = 9
+BODY_TOP = 4
+MOUSE_SCROLL_STEP = 3
 
 FANCY_GLYPHS = {"vbar": "│", "bar": "▎", "hbar": "─", "left": "‹", "right": "›"}
 ASCII_GLYPHS = {"vbar": "|", "bar": ">", "hbar": "-", "left": "<", "right": ">"}
@@ -280,6 +282,61 @@ def column_geometry(width: int, count: int) -> list[tuple[int, int, bool]]:
     return layout
 
 
+def column_task_window(
+    model: "BoardModel",
+    state: str,
+    body_height: int,
+) -> tuple[list[dict], int, int]:
+    """返回 (tasks, scroll, capacity), scroll 与渲染逻辑一致并写回 model."""
+    tasks = model.tasks_for(state)
+    capacity = max(1, (body_height + 1) // CARD_HEIGHT)
+    if not tasks:
+        model.scrolls[state] = 0
+        return tasks, 0, capacity
+    task_ids = [str(task.get("task_id") or "") for task in tasks]
+    selected_id = model.selected_ids[state]
+    try:
+        selected_index = task_ids.index(selected_id)
+    except ValueError:
+        selected_index = 0
+        model.selected_ids[state] = task_ids[0]
+        model.selected_indexes[state] = 0
+    scroll = model.scrolls[state]
+    if selected_index < scroll:
+        scroll = selected_index
+    elif selected_index >= scroll + capacity:
+        scroll = selected_index - capacity + 1
+    scroll = max(0, min(scroll, max(0, len(tasks) - capacity)))
+    model.scrolls[state] = scroll
+    return tasks, scroll, capacity
+
+
+def mouse_wheel_delta(bstate: int) -> int:
+    button4 = getattr(curses, "BUTTON4_PRESSED", 0)
+    button5 = getattr(curses, "BUTTON5_PRESSED", 0)
+    if button4 and bstate & button4:
+        return -1
+    if button5 and bstate & button5:
+        return 1
+    return 0
+
+
+def mouse_left_clicked(bstate: int) -> bool:
+    # CLICKED 优先; 无 CLICKED 位时回退 PRESSED (部分终端不合成 CLICKED).
+    if bstate & curses.BUTTON1_DOUBLE_CLICKED:
+        return True
+    if bstate & curses.BUTTON1_CLICKED:
+        return True
+    return bool(
+        bstate & curses.BUTTON1_PRESSED
+        and not (bstate & curses.BUTTON1_RELEASED)
+    )
+
+
+def mouse_left_double_clicked(bstate: int) -> bool:
+    return bool(bstate & curses.BUTTON1_DOUBLE_CLICKED)
+
+
 class ScreenBuffer:
     def __init__(self, height: int, width: int) -> None:
         self.height = height
@@ -440,6 +497,23 @@ class BoardModel:
     def move_column(self, delta: int) -> None:
         self.column_index = (self.column_index + delta) % len(self.states)
 
+    def focus_state(self, state: str) -> bool:
+        if state not in self.states:
+            return False
+        self.column_index = self.states.index(state)
+        return True
+
+    def select_task_index(self, state: str, index: int) -> bool:
+        if not self.focus_state(state):
+            return False
+        tasks = self.tasks_for(state)
+        if not tasks:
+            return False
+        index = max(0, min(len(tasks) - 1, index))
+        self.selected_ids[state] = str(tasks[index].get("task_id") or "")
+        self.selected_indexes[state] = index
+        return True
+
     def ensure_column_visible(self, visible_count: int) -> None:
         visible_count = max(1, min(visible_count, len(self.states)))
         if self.column_index < self.column_offset:
@@ -532,9 +606,11 @@ class KanbanTui:
         self.cursor_pos: Optional[tuple[int, int]] = None
         self.prefs_error = ""
         self.highlight_colors: dict[str, int] = {}
+        self.mouse_enabled = False
 
     def run(self, initial_board: dict) -> None:
         self._init_style()
+        self._enable_mouse()
         self.model.set_board(initial_board)
         self.screen.keypad(True)
         self.screen.timeout(200)
@@ -547,6 +623,10 @@ class KanbanTui:
                 key = None
             if key == curses.KEY_RESIZE:
                 self._render(force=True)
+            elif key == curses.KEY_MOUSE:
+                self._handle_mouse()
+                if self.running:
+                    self._render()
             elif key is not None:
                 if self.detail is not None:
                     self._handle_detail_key(key)
@@ -559,6 +639,23 @@ class KanbanTui:
             if time.monotonic() - self.last_refresh >= self.refresh_interval:
                 if self._refresh():
                     self._render()
+
+    def _enable_mouse(self) -> None:
+        mask = (
+            curses.BUTTON1_PRESSED
+            | curses.BUTTON1_RELEASED
+            | curses.BUTTON1_CLICKED
+            | curses.BUTTON1_DOUBLE_CLICKED
+        )
+        for name in ("BUTTON4_PRESSED", "BUTTON5_PRESSED"):
+            value = getattr(curses, name, 0)
+            if value:
+                mask |= value
+        try:
+            available, _old = curses.mousemask(mask)
+            self.mouse_enabled = bool(available)
+        except curses.error:
+            self.mouse_enabled = False
 
     def _init_style(self) -> None:
         encoding = getattr(self.screen, "encoding", "") or "ascii"
@@ -758,8 +855,8 @@ class KanbanTui:
         self._reveal_detail_line(matches[0], self._detail_lines())
 
     def _page_size(self) -> int:
-        # 与 _render_column 的卡片容量保持一致: body_top=4, 页脚占 1 行.
-        return max(1, (self.screen.getmaxyx()[0] - 4) // CARD_HEIGHT)
+        # 与 _render_column 的卡片容量保持一致: body_top=BODY_TOP, 页脚占 1 行.
+        return max(1, (self.screen.getmaxyx()[0] - BODY_TOP) // CARD_HEIGHT)
 
     def _page(self, direction: int) -> None:
         # 选中项和视口同步移动一整页, 渲染时再保证选中项可见.
@@ -774,6 +871,138 @@ class KanbanTui:
                 max(0, task_count - page),
             ),
         )
+
+    def _visible_column_layout(self) -> list[tuple[str, int, int]]:
+        width = self.screen.getmaxyx()[1]
+        count = visible_column_count(
+            width,
+            len(self.model.states),
+            single=self.model.single,
+            column_width=self.column_width,
+        )
+        states = self.model.visible_states(count)
+        return [
+            (state, x, column_width)
+            for state, (x, column_width, _separator) in zip(
+                states, column_geometry(width, len(states))
+            )
+        ]
+
+    def _handle_mouse(self) -> None:
+        if not self.mouse_enabled:
+            return
+        try:
+            _id, x, y, _z, bstate = curses.getmouse()
+        except curses.error:
+            return
+        if self.detail is not None:
+            self._handle_detail_mouse(x, y, bstate)
+        elif self.searching:
+            self._handle_search_mouse(x, y, bstate)
+        else:
+            self._handle_board_mouse(x, y, bstate)
+
+    def _handle_search_mouse(self, x: int, y: int, bstate: int) -> None:
+        if not mouse_left_clicked(bstate):
+            return
+        # 点到搜索行外则结束编辑并保留当前查询.
+        if y != 1:
+            self.searching = False
+            self._set_cursor(False)
+
+    def _handle_detail_mouse(self, x: int, y: int, bstate: int) -> None:
+        if self.detail_searching:
+            if mouse_left_clicked(bstate) and y != 2:
+                self._apply_detail_search()
+            return
+        delta = mouse_wheel_delta(bstate)
+        if delta:
+            self._scroll_detail_by(delta * MOUSE_SCROLL_STEP)
+            return
+        # 详情页左键暂不关闭, 避免误触; 滚轮负责滚动.
+
+    def _handle_board_mouse(self, x: int, y: int, bstate: int) -> None:
+        delta = mouse_wheel_delta(bstate)
+        if delta:
+            target = self._hit_column_at(x, y)
+            if target is not None:
+                self.model.focus_state(target)
+            self.model.move_task(delta)
+            return
+        if not mouse_left_clicked(bstate):
+            return
+        height, width = self.screen.getmaxyx()
+        if height < MIN_BOARD_HEIGHT or width < 1:
+            return
+        if y == 1:
+            self.searching = True
+            self._set_cursor(True)
+            return
+        if y >= height - 1:
+            return
+        hit = self._hit_board(x, y)
+        if hit is None:
+            return
+        kind = hit[0]
+        if kind == "nav":
+            self.model.move_column(hit[1])
+            return
+        if kind == "column":
+            self.model.focus_state(hit[1])
+            return
+        if kind == "task":
+            _kind, state, index = hit
+            self.model.select_task_index(state, index)
+            if mouse_left_double_clicked(bstate):
+                self._open_detail()
+
+    def _hit_column_at(self, x: int, y: int) -> Optional[str]:
+        if y < 2:
+            return None
+        for state, col_x, col_width in self._visible_column_layout():
+            if col_x <= x < col_x + col_width:
+                return state
+        return None
+
+    def _hit_board(self, x: int, y: int) -> Optional[tuple]:
+        height, _width = self.screen.getmaxyx()
+        layout = self._visible_column_layout()
+        if not layout:
+            return None
+        body_height = height - BODY_TOP - 1
+        for index, (state, col_x, col_width) in enumerate(layout):
+            if not (col_x <= x < col_x + col_width):
+                continue
+            local_x = x - col_x
+            first_visible = index == 0
+            last_visible = index == len(layout) - 1
+            single_nav = self.model.single or (
+                first_visible and last_visible and len(self.model.states) > 1
+            )
+            if y == 2 and single_nav and len(self.model.states) > 1:
+                # 单栏标题两侧的 ‹ › 用于切栏.
+                if local_x <= 2:
+                    return ("nav", -1)
+                if local_x >= max(0, col_width - 3):
+                    return ("nav", 1)
+            if y <= 3:
+                return ("column", state)
+            if y < BODY_TOP or body_height <= 0:
+                return ("column", state)
+            tasks, scroll, capacity = column_task_window(
+                self.model, state, body_height
+            )
+            if not tasks:
+                return ("column", state)
+            row = (y - BODY_TOP) // CARD_HEIGHT
+            if row < 0 or row >= capacity:
+                return ("column", state)
+            task_index = scroll + row
+            if task_index >= len(tasks):
+                return ("column", state)
+            # 卡片间隙行仍算该卡.
+            return ("task", state, task_index)
+        return None
 
     def _handle_board_key(self, key) -> None:
         if key in ("q", "Q"):
@@ -1015,7 +1244,7 @@ class KanbanTui:
         states = self.model.visible_states(count)
         more_left = self.model.column_offset > 0
         more_right = self.model.column_offset + len(states) < len(self.model.states)
-        body_top = 4
+        body_top = BODY_TOP
         body_height = height - body_top - 1
         for index, (state, (x, column_width, separator)) in enumerate(
             zip(states, column_geometry(width, len(states)))
@@ -1050,7 +1279,9 @@ class KanbanTui:
         more_left: bool = False,
         more_right: bool = False,
     ) -> None:
-        tasks = self.model.tasks_for(state)
+        tasks, scroll, capacity = column_task_window(
+            self.model, state, body_height
+        )
         label = self.context.get("state_labels", {}).get(state, state)
         state_color = self.colors.get(state, 0)
         heading_text = f"{label} ({len(tasks)})"
@@ -1075,28 +1306,13 @@ class KanbanTui:
             self._add(body_top, x + 2, empty, curses.A_DIM, max(0, width - 3))
             return
 
-        # 最后一张卡不需要卡片间的空行, 因此容量按 body_height + 1 计算.
-        capacity = max(1, (body_height + 1) // CARD_HEIGHT)
-        task_ids = [str(task.get("task_id") or "") for task in tasks]
-        selected_id = self.model.selected_ids[state]
-        try:
-            selected_index = task_ids.index(selected_id)
-        except ValueError:
-            selected_index = 0
-            self.model.selected_ids[state] = task_ids[0]
-        scroll = self.model.scrolls[state]
-        if selected_index < scroll:
-            scroll = selected_index
-        elif selected_index >= scroll + capacity:
-            scroll = selected_index - capacity + 1
-        scroll = max(0, min(scroll, max(0, len(tasks) - capacity)))
-        self.model.scrolls[state] = scroll
-
         content_width = max(1, width - 3)
         for row, task in enumerate(tasks[scroll : scroll + capacity]):
             task_index = scroll + row
             y = body_top + row * CARD_HEIGHT
-            selected = focused and task_index == selected_index
+            selected = focused and str(task.get("task_id") or "") == str(
+                self.model.selected_ids.get(state) or ""
+            )
             group_or_type = task.get("task_group") or " / ".join(
                 value
                 for value in (

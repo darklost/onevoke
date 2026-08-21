@@ -1694,6 +1694,177 @@ N/A
         model.toggle_archived()
         self.assertEqual("done", model.current_state)
 
+    def test_tui_mouse_selects_columns_tasks_and_scrolls_detail(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+        import curses
+        from unittest import mock
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 120
+
+            def bkgd(self, _char, attr=0):
+                pass
+
+        board = {
+            "generated_at": "2026-08-21 18:00:00",
+            "tasks": [
+                {
+                    "task_id": "20260821-one-task",
+                    "title": "一号",
+                    "state": "backlog",
+                    "type": "Feature",
+                    "kind": "small",
+                    "assignee": "",
+                    "time": "-",
+                },
+                {
+                    "task_id": "20260821-two-task",
+                    "title": "二号",
+                    "state": "backlog",
+                    "type": "Feature",
+                    "kind": "small",
+                    "assignee": "",
+                    "time": "-",
+                },
+                {
+                    "task_id": "20260821-todo-task",
+                    "title": "待办",
+                    "state": "todo",
+                    "type": "Feature",
+                    "kind": "small",
+                    "assignee": "",
+                    "time": "-",
+                },
+            ],
+        }
+        detail_docs = {
+            "20260821-one-task": {
+                "task_id": "20260821-one-task",
+                "title": "一号",
+                "state": "backlog",
+                "document": "line1\nline2\nline3\nline4\nline5\nline6\n",
+            },
+            "20260821-two-task": {
+                "task_id": "20260821-two-task",
+                "title": "二号",
+                "state": "backlog",
+                "document": "line1\nline2\nline3\nline4\nline5\nline6\n",
+            },
+        }
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=False,
+            refresh_interval=60,
+            context={},
+            get_board=lambda: board,
+            get_task=lambda task_id: detail_docs[task_id],
+            theme="dark",
+        )
+        tui.mouse_enabled = True
+        tui.model.set_board(board)
+        self.assertEqual("backlog", tui.model.current_state)
+
+        self.assertEqual(-1, kanban_tui.mouse_wheel_delta(curses.BUTTON4_PRESSED))
+        self.assertEqual(1, kanban_tui.mouse_wheel_delta(curses.BUTTON5_PRESSED))
+        self.assertTrue(kanban_tui.mouse_left_clicked(curses.BUTTON1_CLICKED))
+        self.assertTrue(kanban_tui.mouse_left_double_clicked(curses.BUTTON1_DOUBLE_CLICKED))
+
+        # 点 todo 栏标题切换栏目.
+        layout = tui._visible_column_layout()
+        self.assertGreaterEqual(len(layout), 2)
+        todo_state, todo_x, _todo_w = layout[1]
+        self.assertEqual("todo", todo_state)
+        with mock.patch.object(
+            kanban_tui.curses,
+            "getmouse",
+            return_value=(0, todo_x + 1, 2, 0, curses.BUTTON1_CLICKED),
+        ):
+            tui._handle_mouse()
+        self.assertEqual("todo", tui.model.current_state)
+
+        # 点 backlog 第二张卡选中.
+        backlog_state, backlog_x, _bw = layout[0]
+        card_y = kanban_tui.BODY_TOP + kanban_tui.CARD_HEIGHT
+        with mock.patch.object(
+            kanban_tui.curses,
+            "getmouse",
+            return_value=(0, backlog_x + 2, card_y, 0, curses.BUTTON1_CLICKED),
+        ):
+            tui._handle_mouse()
+        self.assertEqual("backlog", tui.model.current_state)
+        self.assertEqual("20260821-two-task", tui.model.selected_ids["backlog"])
+
+        # 双击打开详情.
+        with mock.patch.object(
+            kanban_tui.curses,
+            "getmouse",
+            return_value=(
+                0,
+                backlog_x + 2,
+                card_y,
+                0,
+                curses.BUTTON1_DOUBLE_CLICKED,
+            ),
+        ):
+            tui._handle_mouse()
+        self.assertIsNotNone(tui.detail)
+        self.assertEqual("20260821-two-task", tui.detail["task_id"])
+
+        # 详情页滚轮下滚.
+        before = tui.detail_scroll
+        with mock.patch.object(
+            kanban_tui.curses,
+            "getmouse",
+            return_value=(0, 1, 10, 0, curses.BUTTON5_PRESSED),
+        ):
+            tui._handle_mouse()
+        self.assertEqual(before + kanban_tui.MOUSE_SCROLL_STEP, tui.detail_scroll)
+
+        # 单击搜索行进入搜索.
+        tui._close_detail()
+        with mock.patch.object(
+            kanban_tui.curses,
+            "getmouse",
+            return_value=(0, 2, 1, 0, curses.BUTTON1_CLICKED),
+        ):
+            tui._handle_mouse()
+        self.assertTrue(tui.searching)
+
+        # 单栏标题左右箭头切栏.
+        tui.searching = False
+        tui.model.single = True
+        tui.model.column_index = 0
+        with mock.patch.object(
+            kanban_tui.curses,
+            "getmouse",
+            return_value=(0, 0, 2, 0, curses.BUTTON1_CLICKED),
+        ):
+            tui._handle_mouse()
+        self.assertEqual("done", tui.model.current_state)
+
+        # 鼠标不可用时忽略事件.
+        tui.mouse_enabled = False
+        tui.model.column_index = 0
+        with mock.patch.object(
+            kanban_tui.curses,
+            "getmouse",
+            return_value=(0, todo_x + 1, 2, 0, curses.BUTTON1_CLICKED),
+        ):
+            tui._handle_mouse()
+        self.assertEqual("backlog", tui.model.current_state)
+
+        model_focus = kanban_tui.BoardModel()
+        model_focus.set_board(board)
+        self.assertTrue(model_focus.focus_state("todo"))
+        self.assertTrue(model_focus.select_task_index("backlog", 1))
+        self.assertEqual("20260821-two-task", model_focus.selected_ids["backlog"])
+        self.assertEqual("backlog", model_focus.current_state)
+
     def test_tui_fits_visible_columns_and_keeps_focus_on_screen(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:

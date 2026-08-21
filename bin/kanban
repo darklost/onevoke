@@ -1234,12 +1234,12 @@ def tui_page_context() -> dict:
             "dark": t("深色", "dark"),
         },
         "help": t(
-            "方向键/hjkl 移动 | -/= 栏宽 | PgUp/PgDn 翻页 | / 搜索 | Enter 详情 | a 存档栏目 | t 主题 | r 刷新 | q 退出",
-            "arrows/hjkl move | -/= width | PgUp/PgDn page | / search | Enter detail | a archives | t theme | r refresh | q quit",
+            "方向键/hjkl/鼠标 移动 | 双击详情 | 滚轮翻卡 | -/= 栏宽 | PgUp/PgDn 翻页 | / 搜索 | Enter 详情 | a 存档栏目 | t 主题 | r 刷新 | q 退出",
+            "arrows/hjkl/mouse move | double-click detail | wheel cards | -/= width | PgUp/PgDn page | / search | Enter detail | a archives | t theme | r refresh | q quit",
         ),
         "detail_help": t(
-            "jk 滚动 | Ctrl-d/u 半页 | Ctrl-f/b 整页 | gg/G | / 搜索 n/N | q/Esc 返回",
-            "jk scroll | Ctrl-d/u half | Ctrl-f/b page | gg/G | / search n/N | q/Esc back",
+            "jk/滚轮 滚动 | Ctrl-d/u 半页 | Ctrl-f/b 整页 | gg/G | / 搜索 n/N | q/Esc 返回",
+            "jk/wheel scroll | Ctrl-d/u half | Ctrl-f/b page | gg/G | / search n/N | q/Esc back",
         ),
         "no_match": t("无匹配", "no match"),
         "state_labels": WEB_STATUS_LABELS[lang],
