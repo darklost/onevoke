@@ -643,7 +643,6 @@ class KanbanTui:
     def _enable_mouse(self) -> None:
         mask = (
             curses.BUTTON1_PRESSED
-            | curses.BUTTON1_RELEASED
             | curses.BUTTON1_CLICKED
             | curses.BUTTON1_DOUBLE_CLICKED
         )
