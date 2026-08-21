@@ -1867,6 +1867,11 @@ N/A
             self.assertEqual(40, kanban_tui.load_column_width())
             prefs.write_text('{"column_width": "wide"}\n', encoding="utf-8")
             self.assertEqual(40, kanban_tui.load_column_width())
+            prefs.write_text(
+                '{"column_width": ' + ("9" * 5000) + "}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(40, kanban_tui.load_column_width())
 
         class FakeScreen:
             def getmaxyx(self):
@@ -2007,7 +2012,7 @@ N/A
             column_width=40,
         )
         both.prefs_error = (
-            "[Errno 13] Permission denied: '/home/dualf/.config/onevoke/tui.json'"
+            f"[Errno 13] Permission denied: '{self.home / '.config' / 'onevoke' / 'tui.json'}'"
         )
         both.model.refresh_error = "board unavailable"
         both._render_footer(24, 80)

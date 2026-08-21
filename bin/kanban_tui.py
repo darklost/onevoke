@@ -168,7 +168,8 @@ def load_column_width(default: int = DEFAULT_COLUMN_WIDTH) -> int:
         return fallback
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, ValueError):
+        # ValueError 覆盖 JSONDecodeError, 以及超大整数转换失败.
         return fallback
     if not isinstance(raw, dict):
         return fallback
