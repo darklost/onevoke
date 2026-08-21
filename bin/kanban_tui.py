@@ -788,18 +788,29 @@ class KanbanTui:
         stamp = self.model.generated_at or "-"
         theme_label = self.context.get("theme_labels", {}).get(self.theme, self.theme)
         width_label = self.context.get("width", "Width")
-        toolbar_right = (
-            f"{width_label} {self.column_width} | "
-            f"{self.context.get('theme', 'Theme')} {theme_label} | "
+        width_token = f"{width_label} {self.column_width}"
+        width_token_span = display_width(width_token)
+        toolbar_extra = (
+            f" | {self.context.get('theme', 'Theme')} {theme_label} | "
             f"{mode} | {self.context.get('updated', 'Updated')} {stamp}"
         )
-        toolbar_left_width = max(
-            12,
+        preferred_left = max(
             display_width(query_prefix) + 4,
+            min(12, width // 3),
             width // 3,
         )
-        toolbar_right_width = max(0, width - toolbar_left_width - 1)
-        toolbar_right = clip_text(toolbar_right, toolbar_right_width)
+        # 栏宽数值优先保留完整可见, 必要时压缩搜索区.
+        toolbar_left_width = min(
+            preferred_left,
+            max(0, width - width_token_span - 1),
+        )
+        remaining = max(0, width - toolbar_left_width - 1)
+        if remaining >= width_token_span:
+            toolbar_right = width_token + clip_text(
+                toolbar_extra, remaining - width_token_span
+            )
+        else:
+            toolbar_right = clip_text(width_token, remaining)
         if self.searching:
             search_attr = accent | curses.A_BOLD
         elif query_text:

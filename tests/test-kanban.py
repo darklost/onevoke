@@ -1940,7 +1940,7 @@ N/A
             def move(self, y, x):
                 pass
 
-        narrow = FooterScreen(30)
+        narrow = FooterScreen(20)
         visible = kanban_tui.KanbanTui(
             narrow,
             single=False,
@@ -1966,6 +1966,31 @@ N/A
         visible._render_board()
         toolbar = " ".join(text for y, _x, text, _attr in narrow.writes if y == 1)
         self.assertIn("40", toolbar)
+
+        wide_value = FooterScreen(20)
+        visible.screen = wide_value
+        visible.column_width = 120
+        wide_value.writes.clear()
+        visible._render_board()
+        wide_toolbar = " ".join(text for y, _x, text, _attr in wide_value.writes if y == 1)
+        self.assertIn("120", wide_toolbar)
+
+        chinese = FooterScreen(20)
+        visible.screen = chinese
+        visible.column_width = 40
+        visible.context = {
+            **visible.context,
+            "search": "搜索",
+            "width": "栏宽",
+            "theme": "主题",
+            "theme_labels": {"auto": "自动"},
+            "active": "活跃栏目",
+            "updated": "更新于",
+        }
+        chinese.writes.clear()
+        visible._render_board()
+        chinese_toolbar = " ".join(text for y, _x, text, _attr in chinese.writes if y == 1)
+        self.assertIn("40", chinese_toolbar)
 
         footer_screen = FooterScreen(80)
         both = kanban_tui.KanbanTui(
