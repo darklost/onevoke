@@ -720,6 +720,7 @@ class KanbanTui:
             # 选中/焦点用显式底色再反色; 默认底 (-1) 上反色在部分终端对比不足.
             highlight_background = THEME_BACKGROUNDS[variant]
         else:
+            variant = self.theme
             palette = THEME_PALETTES[self.theme]
             background = THEME_BACKGROUNDS[self.theme]
         for index, name in enumerate(COLOR_NAMES, start=1):
@@ -750,9 +751,30 @@ class KanbanTui:
         self.colors["id"] = self.colors.get("working", 0)
         self.colors["group"] = self.colors.get("todo", 0)
         self.colors["error"] = self.colors.get("trash", 0)
+        self.colors["muted"] = self._muted_attr(variant, background)
         self._set_background(
             0 if self.theme == "auto" else self.colors.get("text", 0)
         )
+
+    def _muted_attr(self, variant: str, background: int) -> int:
+        """接近背景色的弱化前景, 用于卡片分隔线; 不支持时回退 A_DIM."""
+        muted_index = 1 + 2 * len(COLOR_NAMES)
+        if getattr(curses, "COLORS", 0) >= 256:
+            # 256 色: 深底用暗灰, 浅底用亮灰, 都只比背景略微可见.
+            foreground = 252 if variant == "light" else 238
+            try:
+                curses.init_pair(muted_index, foreground, background)
+                return curses.color_pair(muted_index)
+            except (curses.error, ValueError):
+                return curses.A_DIM
+        if variant != "light":
+            # 8 色深底: 亮黑 (BOLD 黑) 近似深灰.
+            try:
+                curses.init_pair(muted_index, curses.COLOR_BLACK, background)
+                return curses.color_pair(muted_index) | curses.A_BOLD
+            except (curses.error, ValueError):
+                return curses.A_DIM
+        return curses.A_DIM
 
     def _highlight_attr(self, color_name: str, extra: int = 0) -> int:
         # auto 的选中/焦点走显式底色色对, 其余主题直接反色状态色.
@@ -1324,10 +1346,16 @@ class KanbanTui:
         for row, task in enumerate(tasks[scroll : scroll + capacity]):
             y = body_top + row * CARD_HEIGHT
             if row > 0:
-                # 卡片之间用稀疏的 "- " 虚线, 比栏目标题下的实线更不显眼.
+                # 卡片之间用稀疏的 "- " 虚线, 前景取接近背景的弱化色.
                 # 预先裁到栏宽, 避免 clip_text 在行尾补 "...".
                 dashed_line = (self.glyphs["dashed"] * width)[:width]
-                self._add(y - 1, x, dashed_line, curses.A_DIM, width)
+                self._add(
+                    y - 1,
+                    x,
+                    dashed_line,
+                    self.colors.get("muted", curses.A_DIM),
+                    width,
+                )
             selected = focused and str(task.get("task_id") or "") == str(
                 self.model.selected_ids.get(state) or ""
             )

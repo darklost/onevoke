@@ -2464,11 +2464,19 @@ N/A
             highlight_pairs = {
                 index: value
                 for index, value in pairs.items()
-                if index > len(kanban_tui.COLOR_NAMES)
+                if len(kanban_tui.COLOR_NAMES)
+                < index
+                <= 2 * len(kanban_tui.COLOR_NAMES)
             }
             self.assertTrue(all(bg == -1 for _fg, bg in base_pairs.values()))
             self.assertTrue(
                 all(bg == curses.COLOR_BLACK for _fg, bg in highlight_pairs.values())
+            )
+            # 8 色 auto 深底: 分隔线弱化色用亮黑, 背景沿用终端默认.
+            muted_index = 1 + 2 * len(kanban_tui.COLOR_NAMES)
+            self.assertEqual((curses.COLOR_BLACK, -1), pairs[muted_index])
+            self.assertEqual(
+                (muted_index << 8) | curses.A_BOLD, tui.colors["muted"]
             )
             # 背景未知时仅正文回退到终端默认前景色; backlog 保持色相.
             self.assertEqual(-1, pairs[1][0])
