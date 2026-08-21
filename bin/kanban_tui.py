@@ -789,8 +789,8 @@ class KanbanTui:
         theme_label = self.context.get("theme_labels", {}).get(self.theme, self.theme)
         width_label = self.context.get("width", "Width")
         toolbar_right = (
-            f"{self.context.get('theme', 'Theme')} {theme_label} | "
             f"{width_label} {self.column_width} | "
+            f"{self.context.get('theme', 'Theme')} {theme_label} | "
             f"{mode} | {self.context.get('updated', 'Updated')} {stamp}"
         )
         toolbar_left_width = max(
@@ -949,7 +949,8 @@ class KanbanTui:
         return self.colors.get("accent", 0) | curses.A_REVERSE
 
     def _status_error(self) -> str:
-        parts = [part for part in (self.prefs_error, self.model.error) if part]
+        # 看板/详情错误优先, 避免长偏好路径把刷新失败裁掉.
+        parts = [part for part in (self.model.error, self.prefs_error) if part]
         return " | ".join(parts)
 
     def _render_footer(self, height: int, width: int) -> None:

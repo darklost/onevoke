@@ -1924,6 +1924,71 @@ N/A
         status = failing._status_error()
         self.assertIn("disk full", status)
         self.assertIn("board unavailable", status)
+        self.assertLess(status.index("board unavailable"), status.index("disk full"))
+
+        class FooterScreen:
+            def __init__(self, width: int) -> None:
+                self.width = width
+                self.writes = []
+
+            def getmaxyx(self):
+                return 24, self.width
+
+            def addstr(self, y, x, text, attr=0):
+                self.writes.append((y, x, text, attr))
+
+            def move(self, y, x):
+                pass
+
+        narrow = FooterScreen(30)
+        visible = kanban_tui.KanbanTui(
+            narrow,
+            single=False,
+            refresh_interval=30,
+            context={
+                "title": "Task Board",
+                "search": "Search",
+                "theme": "Theme",
+                "theme_labels": {"auto": "auto"},
+                "width": "Width",
+                "active": "active",
+                "updated": "Updated",
+                "state_labels": {state: state for state in STATES},
+                "size_labels": {"small": "small", "large": "large"},
+                "empty": "No tasks",
+                "error": "Error",
+            },
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+            column_width=40,
+        )
+        visible.model.set_board({"generated_at": "-", "tasks": []})
+        visible._render_board()
+        toolbar = " ".join(text for y, _x, text, _attr in narrow.writes if y == 1)
+        self.assertIn("40", toolbar)
+
+        footer_screen = FooterScreen(80)
+        both = kanban_tui.KanbanTui(
+            footer_screen,
+            single=False,
+            refresh_interval=30,
+            context={
+                "error": "Error",
+                "state_labels": {state: state for state in STATES},
+                "size_labels": {"small": "small", "large": "large"},
+            },
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+            column_width=40,
+        )
+        both.prefs_error = (
+            "[Errno 13] Permission denied: '/home/dualf/.config/onevoke/tui.json'"
+        )
+        both.model.refresh_error = "board unavailable"
+        both._render_footer(24, 80)
+        footer = next(text for y, _x, text, _attr in footer_screen.writes if y == 23)
+        self.assertIn("board unavailable", footer)
+        self.assertTrue(footer.index("board unavailable") < footer.index("Permission"))
 
     def test_tui_page_keys_move_selection_by_page_and_clamp(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
