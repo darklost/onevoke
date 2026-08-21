@@ -2748,6 +2748,10 @@ N/A
         self.assertEqual("08-21 18:00", kanban_tui.compact_time("2026-08-21 18:00"))
         self.assertEqual("-", kanban_tui.compact_time("-"))
         self.assertEqual("08-21 18:00", kanban_tui.compact_time("08-21 18:00"))
+        self.assertEqual(
+            "terminal-group", kanban_tui.compact_group("20260820-terminal-group")
+        )
+        self.assertEqual("custom-group", kanban_tui.compact_group("custom-group"))
         self.assertEqual("A B C", kanban_tui.clip_text("A\rB\x1bC", 10))
         self.assertEqual(["任务", "标题"], kanban_tui.wrap_text("任务标题", 4))
         task = {

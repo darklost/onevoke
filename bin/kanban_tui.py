@@ -178,6 +178,13 @@ def compact_time(value: str) -> str:
     return value
 
 
+def compact_group(value: str) -> str:
+    """去掉任务组的 YYYYMMDD- 日期前缀, 卡片上只留组名."""
+    if len(value) > 9 and value[:8].isdigit() and value[8] == "-":
+        return value[9:]
+    return value
+
+
 def task_matches(task: dict, keyword: str) -> bool:
     needle = keyword.strip().casefold()
     if not needle:
@@ -1370,23 +1377,28 @@ class KanbanTui:
             selected = focused and str(task.get("task_id") or "") == str(
                 self.model.selected_ids.get(state) or ""
             )
-            group_or_type = task.get("task_group") or " / ".join(
-                value
-                for value in (
-                    str(task.get("type") or "-"),
-                    self.context.get("size_labels", {}).get(
-                        task.get("kind"), str(task.get("kind") or "-")
-                    ),
+            task_group = str(task.get("task_group") or "")
+            if task_group:
+                group_or_type = compact_group(task_group)
+            else:
+                group_or_type = " / ".join(
+                    value
+                    for value in (
+                        str(task.get("type") or "-"),
+                        self.context.get("size_labels", {}).get(
+                            task.get("kind"), str(task.get("kind") or "-")
+                        ),
+                    )
+                    if value
                 )
-                if value
-            )
             assignee = task.get("assignee") or self.context.get(
                 "unassigned", "Unassigned"
             )
             dot = self.glyphs["dot"]
-            meta_head = str(group_or_type)
             meta_time = compact_time(str(task.get("time") or "-"))
-            meta_tail = f" {dot} {assignee} {dot} {meta_time}"
+            # 顺序: 时间 · 负责人 · 任务组/类型.
+            meta_head = f"{meta_time} {dot} {assignee} {dot} "
+            meta_tail = group_or_type
             highlight = self._highlight_attr(state, curses.A_BOLD)
             lines = (
                 (str(task.get("title") or task.get("task_id") or ""), curses.A_BOLD),
@@ -1403,7 +1415,7 @@ class KanbanTui:
                     attr,
                     content_width,
                 )
-            # 元信息行: 任务组/类型保持色相, 负责人和时间弱化显示.
+            # 元信息行: 时间和负责人弱化显示, 任务组/类型保持色相.
             meta_y = y + 2
             if selected:
                 self._add(
@@ -1415,14 +1427,14 @@ class KanbanTui:
                 )
             else:
                 head = clip_text(meta_head, content_width)
-                self._add(meta_y, x + 1, head, self.colors.get("group", 0))
+                self._add(meta_y, x + 1, head, curses.A_DIM)
                 used = display_width(head)
                 if used < content_width:
                     self._add(
                         meta_y,
                         x + 1 + used,
                         meta_tail,
-                        curses.A_DIM,
+                        self.colors.get("group", 0),
                         content_width - used,
                     )
             if selected:
