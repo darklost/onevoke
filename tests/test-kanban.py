@@ -2299,15 +2299,17 @@ N/A
             self.assertTrue(
                 all(bg == curses.COLOR_BLACK for _fg, bg in highlight_pairs.values())
             )
-            # 背景未知时 backlog 和文本回退到终端默认前景色.
+            # 背景未知时仅正文回退到终端默认前景色; backlog 保持色相.
             self.assertEqual(-1, pairs[1][0])
-            self.assertEqual(-1, pairs[2][0])
-            # 高亮色对把 -1 前景落实成白字, 反色后仍可读.
             self.assertEqual(
-                curses.COLOR_WHITE, pairs[1 + len(kanban_tui.COLOR_NAMES)][0]
+                kanban_tui.THEME_PALETTES["dark"]["backlog"], pairs[2][0]
             )
             self.assertEqual(
-                curses.COLOR_WHITE, pairs[2 + len(kanban_tui.COLOR_NAMES)][0]
+                kanban_tui.THEME_PALETTES["dark"]["backlog"],
+                pairs[2 + len(kanban_tui.COLOR_NAMES)][0],
+            )
+            self.assertEqual(
+                curses.COLOR_WHITE, pairs[1 + len(kanban_tui.COLOR_NAMES)][0]
             )
             self.assertEqual(0, screen.background)
             self.assertEqual(

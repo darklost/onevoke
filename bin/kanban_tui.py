@@ -31,17 +31,19 @@ THEMES = ("auto", "light", "dark")
 THEME_PALETTES = {
     "dark": {
         "text": curses.COLOR_WHITE,
-        "backlog": curses.COLOR_WHITE,
+        # backlog 不用白/黑: 与正文同色时栏目标题不像栏目, 选中反色也不如彩底醒目.
+        "backlog": curses.COLOR_CYAN,
         "todo": curses.COLOR_YELLOW,
-        "working": curses.COLOR_CYAN,
+        "working": curses.COLOR_BLUE,
         "done": curses.COLOR_GREEN,
-        "archived": curses.COLOR_BLUE,
+        "archived": curses.COLOR_MAGENTA,
         "trash": curses.COLOR_RED,
         "accent": curses.COLOR_MAGENTA,
     },
     "light": {
         "text": curses.COLOR_BLACK,
-        "backlog": curses.COLOR_BLACK,
+        # 浅色终端里 BLACK|BOLD 常被渲染成亮黑/灰, 未选中栏目标题几乎看不见.
+        "backlog": curses.COLOR_CYAN,
         "todo": curses.COLOR_YELLOW,
         "working": curses.COLOR_BLUE,
         "done": curses.COLOR_GREEN,
@@ -602,12 +604,10 @@ class KanbanTui:
             variant = "light" if light_background else "dark"
             palette = dict(THEME_PALETTES[variant])
             if light_background is None:
-                # 背景未知时文本和 backlog 用终端默认前景色, 避免浅色终端白底白字.
+                # 背景未知时仅正文用终端默认前景; backlog 保持色相, 避免栏目标题发灰.
                 palette["text"] = -1
-                palette["backlog"] = -1
             background = -1
-            # 选中/焦点用显式底色再反色; 默认底 (-1) 上反色会把浅色终端的
-            # 黑字 backlog 变成「默认前景(黑) + 黑底」, 几乎看不见.
+            # 选中/焦点用显式底色再反色; 默认底 (-1) 上反色在部分终端对比不足.
             highlight_background = THEME_BACKGROUNDS[variant]
         else:
             palette = THEME_PALETTES[self.theme]
@@ -1116,10 +1116,14 @@ class KanbanTui:
                 (str(group_or_type), self.colors.get("group", 0)),
                 (f"{assignee} | {task.get('time') or '-'}", curses.A_DIM),
             )
-            bar_attr = state_color | (curses.A_BOLD if selected else curses.A_DIM)
+            if selected:
+                bar_attr = self._highlight_attr(state, curses.A_BOLD)
+            else:
+                bar_attr = state_color | curses.A_DIM
             for offset, (line, attr) in enumerate(lines):
                 if selected:
-                    attr = self._highlight_attr(state, attr & curses.A_BOLD)
+                    # 整卡反色加粗, 彩底选中比只反色状态色更易辨认.
+                    attr = self._highlight_attr(state, curses.A_BOLD)
                 self._add(y + offset, x, self.glyphs["bar"], bar_attr, 1)
                 self._add(
                     y + offset,
