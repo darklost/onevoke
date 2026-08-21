@@ -162,19 +162,22 @@ def prefs_path() -> Path:
 
 
 def load_column_width(default: int = DEFAULT_COLUMN_WIDTH) -> int:
+    fallback = clamp_column_width(default)
     path = prefs_path()
     if not path.is_file():
-        return clamp_column_width(default)
+        return fallback
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
-        return clamp_column_width(default)
+        return fallback
     if not isinstance(raw, dict):
-        return clamp_column_width(default)
+        return fallback
     value = raw.get("column_width", default)
     if isinstance(value, bool) or not isinstance(value, int):
-        return clamp_column_width(default)
-    return clamp_column_width(value)
+        return fallback
+    if value < MIN_COLUMN_WIDTH or value > MAX_COLUMN_WIDTH:
+        return fallback
+    return value
 
 
 def save_column_width(width: int) -> None:

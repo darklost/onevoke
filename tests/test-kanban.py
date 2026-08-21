@@ -1862,7 +1862,9 @@ N/A
             self.assertTrue(prefs.is_file())
             self.assertEqual(0o600, prefs.stat().st_mode & 0o777)
             prefs.write_text('{"column_width": 999}\n', encoding="utf-8")
-            self.assertEqual(kanban_tui.MAX_COLUMN_WIDTH, kanban_tui.load_column_width())
+            self.assertEqual(40, kanban_tui.load_column_width())
+            prefs.write_text('{"column_width": 0}\n', encoding="utf-8")
+            self.assertEqual(40, kanban_tui.load_column_width())
             prefs.write_text('{"column_width": "wide"}\n', encoding="utf-8")
             self.assertEqual(40, kanban_tui.load_column_width())
 
