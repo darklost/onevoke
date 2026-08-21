@@ -949,7 +949,8 @@ class KanbanTui:
         return self.colors.get("accent", 0) | curses.A_REVERSE
 
     def _status_error(self) -> str:
-        return self.prefs_error or self.model.error
+        parts = [part for part in (self.prefs_error, self.model.error) if part]
+        return " | ".join(parts)
 
     def _render_footer(self, height: int, width: int) -> None:
         status_error = self._status_error()

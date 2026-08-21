@@ -1920,6 +1920,10 @@ N/A
         self.assertEqual(35, failing.column_width)
         self.assertIn("disk full", failing.prefs_error)
         self.assertIn("disk full", failing._status_error())
+        failing.model.refresh_error = "board unavailable"
+        status = failing._status_error()
+        self.assertIn("disk full", status)
+        self.assertIn("board unavailable", status)
 
     def test_tui_page_keys_move_selection_by_page_and_clamp(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
