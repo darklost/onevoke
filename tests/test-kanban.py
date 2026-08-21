@@ -2745,6 +2745,9 @@ N/A
 
         self.assertEqual(4, kanban_tui.display_width("任务"))
         self.assertEqual("任...", kanban_tui.clip_text("任务标题", 5))
+        self.assertEqual("08-21 18:00", kanban_tui.compact_time("2026-08-21 18:00"))
+        self.assertEqual("-", kanban_tui.compact_time("-"))
+        self.assertEqual("08-21 18:00", kanban_tui.compact_time("08-21 18:00"))
         self.assertEqual("A B C", kanban_tui.clip_text("A\rB\x1bC", 10))
         self.assertEqual(["任务", "标题"], kanban_tui.wrap_text("任务标题", 4))
         task = {

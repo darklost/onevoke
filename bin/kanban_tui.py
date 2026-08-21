@@ -171,6 +171,13 @@ def wrap_text(text: str, width: int) -> list[str]:
     return result or [""]
 
 
+def compact_time(value: str) -> str:
+    """去掉 YYYY- 年份前缀: 任务 ID 已含年月日, 卡片时间只留月日时分."""
+    if len(value) > 5 and value[:4].isdigit() and value[4] == "-":
+        return value[5:]
+    return value
+
+
 def task_matches(task: dict, keyword: str) -> bool:
     needle = keyword.strip().casefold()
     if not needle:
@@ -1378,7 +1385,8 @@ class KanbanTui:
             )
             dot = self.glyphs["dot"]
             meta_head = str(group_or_type)
-            meta_tail = f" {dot} {assignee} {dot} {task.get('time') or '-'}"
+            meta_time = compact_time(str(task.get("time") or "-"))
+            meta_tail = f" {dot} {assignee} {dot} {meta_time}"
             highlight = self._highlight_attr(state, curses.A_BOLD)
             lines = (
                 (str(task.get("title") or task.get("task_id") or ""), curses.A_BOLD),
