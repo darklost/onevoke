@@ -51,10 +51,28 @@ THEME_PALETTES = {
     },
 }
 THEME_BACKGROUNDS = {"light": curses.COLOR_WHITE, "dark": curses.COLOR_BLACK}
+COLOR_NAMES = (
+    "text",
+    "backlog",
+    "todo",
+    "working",
+    "done",
+    "archived",
+    "trash",
+    "accent",
+)
 
 
 class KanbanTuiError(Exception):
     pass
+
+
+def terminal_light_background() -> Optional[bool]:
+    """COLORFGBG 背景色: 7/15 为浅色, 有值但非浅色为深色, 缺失则未知."""
+    background_code = os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1]
+    if not background_code:
+        return None
+    return background_code in {"7", "15"}
 
 
 def display_width(text: str) -> int:
@@ -511,6 +529,7 @@ class KanbanTui:
         self.prev_frame: Optional[ScreenBuffer] = None
         self.cursor_pos: Optional[tuple[int, int]] = None
         self.prefs_error = ""
+        self.highlight_colors: dict[str, int] = {}
 
     def run(self, initial_board: dict) -> None:
         self._init_style()
@@ -570,40 +589,65 @@ class KanbanTui:
     def _apply_theme(self) -> None:
         self.prev_frame = None
         self.colors = {}
+        self.highlight_colors = {}
         if not self.has_colors:
             return
+        highlight_background = None
         if self.theme == "auto":
             if not self.has_default_colors:
                 # auto 降级为纯属性渲染时清除显式主题遗留的窗口背景.
                 self._set_background(0)
                 return
-            background_code = os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1]
-            light_background = background_code in {"7", "15"}
-            palette = dict(THEME_PALETTES["light" if light_background else "dark"])
-            if not background_code:
+            light_background = terminal_light_background()
+            variant = "light" if light_background else "dark"
+            palette = dict(THEME_PALETTES[variant])
+            if light_background is None:
                 # 背景未知时文本和 backlog 用终端默认前景色, 避免浅色终端白底白字.
                 palette["text"] = -1
                 palette["backlog"] = -1
             background = -1
+            # 选中/焦点用显式底色再反色; 默认底 (-1) 上反色会把浅色终端的
+            # 黑字 backlog 变成「默认前景(黑) + 黑底」, 几乎看不见.
+            highlight_background = THEME_BACKGROUNDS[variant]
         else:
             palette = THEME_PALETTES[self.theme]
             background = THEME_BACKGROUNDS[self.theme]
-        for index, name in enumerate(
-            ("text", "backlog", "todo", "working", "done", "archived", "trash", "accent"),
-            start=1,
-        ):
+        for index, name in enumerate(COLOR_NAMES, start=1):
             try:
                 curses.init_pair(index, palette[name], background)
             except (curses.error, ValueError):
                 # 终端颜色对不足 (COLOR_PAIRS 小) 时保留已建颜色, 缺失项回退到属性 0.
                 continue
             self.colors[name] = curses.color_pair(index)
+        if highlight_background is not None:
+            highlight_palette = dict(palette)
+            fallback_fg = (
+                curses.COLOR_BLACK
+                if highlight_background == curses.COLOR_WHITE
+                else curses.COLOR_WHITE
+            )
+            for name, foreground in highlight_palette.items():
+                if foreground == -1:
+                    highlight_palette[name] = fallback_fg
+            for index, name in enumerate(COLOR_NAMES, start=1 + len(COLOR_NAMES)):
+                try:
+                    curses.init_pair(
+                        index, highlight_palette[name], highlight_background
+                    )
+                except (curses.error, ValueError):
+                    continue
+                self.highlight_colors[name] = curses.color_pair(index)
         self.colors["id"] = self.colors.get("working", 0)
         self.colors["group"] = self.colors.get("todo", 0)
         self.colors["error"] = self.colors.get("trash", 0)
         self._set_background(
             0 if self.theme == "auto" else self.colors.get("text", 0)
         )
+
+    def _highlight_attr(self, color_name: str, extra: int = 0) -> int:
+        # auto 的选中/焦点走显式底色色对, 其余主题直接反色状态色.
+        base = self.highlight_colors.get(color_name, self.colors.get(color_name, 0))
+        return base | curses.A_REVERSE | extra
 
     def _set_cursor(self, visible: bool) -> None:
         try:
@@ -1021,9 +1065,10 @@ class KanbanTui:
                 heading_text = f"{self.glyphs['left']} {heading_text}"
             if last_visible and more_right:
                 heading_text = f"{heading_text} {self.glyphs['right']}"
-        heading_attr = state_color | curses.A_BOLD
         if focused:
-            heading_attr |= curses.A_REVERSE
+            heading_attr = self._highlight_attr(state, curses.A_BOLD)
+        else:
+            heading_attr = state_color | curses.A_BOLD
         self._add(2, x, pad_text(f" {heading_text}", width), heading_attr, width)
         if not tasks:
             empty = self.context.get("empty", "No tasks")
@@ -1074,7 +1119,7 @@ class KanbanTui:
             bar_attr = state_color | (curses.A_BOLD if selected else curses.A_DIM)
             for offset, (line, attr) in enumerate(lines):
                 if selected:
-                    attr = state_color | curses.A_REVERSE | (attr & curses.A_BOLD)
+                    attr = self._highlight_attr(state, attr & curses.A_BOLD)
                 self._add(y + offset, x, self.glyphs["bar"], bar_attr, 1)
                 self._add(
                     y + offset,

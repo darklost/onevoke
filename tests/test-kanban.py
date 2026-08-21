@@ -2269,6 +2269,7 @@ N/A
             self.assertEqual(
                 tui.colors["accent"] | curses.A_REVERSE, footer
             )
+            self.assertEqual({}, tui.highlight_colors)
 
             pairs.clear()
             tui._handle_board_key("t")
@@ -2284,11 +2285,88 @@ N/A
             pairs.clear()
             tui._handle_board_key("t")
             self.assertEqual("auto", tui.theme)
-            self.assertTrue(all(bg == -1 for _fg, bg in pairs.values()))
+            base_pairs = {
+                index: value
+                for index, value in pairs.items()
+                if index <= len(kanban_tui.COLOR_NAMES)
+            }
+            highlight_pairs = {
+                index: value
+                for index, value in pairs.items()
+                if index > len(kanban_tui.COLOR_NAMES)
+            }
+            self.assertTrue(all(bg == -1 for _fg, bg in base_pairs.values()))
+            self.assertTrue(
+                all(bg == curses.COLOR_BLACK for _fg, bg in highlight_pairs.values())
+            )
             # 背景未知时 backlog 和文本回退到终端默认前景色.
             self.assertEqual(-1, pairs[1][0])
             self.assertEqual(-1, pairs[2][0])
+            # 高亮色对把 -1 前景落实成白字, 反色后仍可读.
+            self.assertEqual(
+                curses.COLOR_WHITE, pairs[1 + len(kanban_tui.COLOR_NAMES)][0]
+            )
+            self.assertEqual(
+                curses.COLOR_WHITE, pairs[2 + len(kanban_tui.COLOR_NAMES)][0]
+            )
             self.assertEqual(0, screen.background)
+            self.assertEqual(
+                tui.highlight_colors["backlog"] | curses.A_REVERSE | curses.A_BOLD,
+                tui._highlight_attr("backlog", curses.A_BOLD),
+            )
+
+    def test_tui_auto_theme_light_terminal_uses_readable_selection(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+        import curses
+        from unittest import mock
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 100
+
+            def bkgd(self, _char, attr=0):
+                pass
+
+        pairs = {}
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=60,
+            context={},
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+            theme="auto",
+        )
+        with mock.patch.object(kanban_tui.curses, "has_colors", return_value=True), \
+                mock.patch.object(kanban_tui.curses, "use_default_colors"), \
+                mock.patch.object(
+                    kanban_tui.curses,
+                    "init_pair",
+                    side_effect=lambda index, fg, bg: pairs.__setitem__(
+                        index, (fg, bg)
+                    ),
+                ), \
+                mock.patch.object(
+                    kanban_tui.curses,
+                    "color_pair",
+                    side_effect=lambda index: index << 8,
+                ), \
+                mock.patch.dict(kanban_tui.os.environ, {"COLORFGBG": "0;15"}):
+            tui._init_style()
+            light = kanban_tui.THEME_PALETTES["light"]
+            self.assertEqual(light["backlog"], pairs[2][0])
+            self.assertEqual(-1, pairs[2][1])
+            highlight_backlog = pairs[2 + len(kanban_tui.COLOR_NAMES)]
+            self.assertEqual(light["backlog"], highlight_backlog[0])
+            self.assertEqual(curses.COLOR_WHITE, highlight_backlog[1])
+            self.assertEqual(
+                tui.highlight_colors["backlog"] | curses.A_REVERSE,
+                tui._highlight_attr("backlog"),
+            )
 
     def test_tui_theme_survives_terminal_with_few_color_pairs(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
