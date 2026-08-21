@@ -1343,19 +1343,9 @@ class KanbanTui:
             return
 
         content_width = max(1, width - 2)
+        # 卡片之间用空行分隔 (CARD_HEIGHT 含 1 行间隙), 不画分隔线.
         for row, task in enumerate(tasks[scroll : scroll + capacity]):
             y = body_top + row * CARD_HEIGHT
-            if row > 0:
-                # 卡片之间用稀疏的 "- " 虚线, 前景取接近背景的弱化色.
-                # 预先裁到栏宽, 避免 clip_text 在行尾补 "...".
-                dashed_line = (self.glyphs["dashed"] * width)[:width]
-                self._add(
-                    y - 1,
-                    x,
-                    dashed_line,
-                    self.colors.get("muted", curses.A_DIM),
-                    width,
-                )
             selected = focused and str(task.get("task_id") or "") == str(
                 self.model.selected_ids.get(state) or ""
             )
