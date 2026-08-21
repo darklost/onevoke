@@ -1702,15 +1702,17 @@ N/A
             sys.path.pop(0)
 
         self.assertEqual(1, kanban_tui.visible_column_count(20, 4))
+        self.assertEqual(1, kanban_tui.visible_column_count(39, 4))
         self.assertEqual(1, kanban_tui.visible_column_count(40, 4))
-        self.assertEqual(2, kanban_tui.visible_column_count(41, 4))
-        self.assertEqual(3, kanban_tui.visible_column_count(62, 4))
-        self.assertEqual(4, kanban_tui.visible_column_count(83, 4))
-        self.assertEqual(1, kanban_tui.visible_column_count(80, 4, single=True))
-        for width, count in ((41, 2), (62, 3), (83, 4)):
+        self.assertEqual(1, kanban_tui.visible_column_count(80, 4))
+        self.assertEqual(2, kanban_tui.visible_column_count(81, 4))
+        self.assertEqual(3, kanban_tui.visible_column_count(122, 4))
+        self.assertEqual(4, kanban_tui.visible_column_count(163, 4))
+        self.assertEqual(1, kanban_tui.visible_column_count(160, 4, single=True))
+        for width, count in ((81, 2), (122, 3), (163, 4)):
             layout = kanban_tui.column_geometry(width, count)
             self.assertEqual(count, len(layout))
-            self.assertTrue(all(column_width >= 20 for _x, column_width, _sep in layout))
+            self.assertTrue(all(column_width >= 40 for _x, column_width, _sep in layout))
             last_x, last_width, last_sep = layout[-1]
             self.assertFalse(last_sep)
             self.assertEqual(width, last_x + last_width)
@@ -1756,6 +1758,7 @@ N/A
             "state_labels": {state: state for state in STATES},
             "size_labels": {"small": "small", "large": "large"},
             "empty": "No tasks",
+            "too_small": "Terminal is too small.",
         }
         board = {
             "generated_at": "2026-08-21 00:00:00",
@@ -1769,7 +1772,7 @@ N/A
             ],
         }
 
-        narrow = FakeScreen(62)
+        narrow = FakeScreen(122)
         tui = kanban_tui.KanbanTui(
             narrow,
             single=False,
@@ -1809,9 +1812,13 @@ N/A
         )
         tui.model.set_board(board)
         tui._render_board()
+        self.assertFalse(
+            any("too small" in text.lower() for _y, _x, text in one_column.writes)
+        )
         single_headings = [text for y, _x, text in one_column.writes if y == 2]
         self.assertEqual(1, len(single_headings))
         self.assertIn("backlog", single_headings[0])
+        self.assertEqual([(0, 20, False)], kanban_tui.column_geometry(20, 1))
 
         wide = FakeScreen(80)
         tui = kanban_tui.KanbanTui(
@@ -2241,7 +2248,7 @@ N/A
             "state_labels": {state: state for state in STATES},
             "size_labels": {"small": "small", "large": "large"},
         }
-        for width in (32, 40):
+        for width in (40, 50):
             screen = FakeScreen(24, width)
             tui = kanban_tui.KanbanTui(
                 screen,

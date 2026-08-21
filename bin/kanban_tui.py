@@ -15,7 +15,7 @@ from typing import Optional
 ACTIVE_STATES = ("backlog", "todo", "working", "done")
 ALL_STATES = ACTIVE_STATES + ("archived", "trash")
 CARD_HEIGHT = 5
-MIN_COLUMN_WIDTH = 20
+MIN_COLUMN_WIDTH = 40
 MIN_BOARD_HEIGHT = 9
 
 FANCY_GLYPHS = {"vbar": "│", "bar": "▎", "hbar": "─", "left": "‹", "right": "›"}
@@ -684,7 +684,8 @@ class KanbanTui:
         accent = self.colors.get("accent", 0)
         self._add(0, 0, title, accent | curses.A_BOLD, width)
         # 高度 8 时首张卡片末行会被提示栏覆盖, 因此最小高度为 9.
-        if height < MIN_BOARD_HEIGHT or width < MIN_COLUMN_WIDTH:
+        # 宽度低于最小栏宽时仍按实际宽度画单栏, 不因过窄拒绝渲染.
+        if height < MIN_BOARD_HEIGHT or width < 1:
             message = self.context.get("too_small", "Terminal is too small.")
             self._add(2, 0, message, curses.A_BOLD, width)
             quit_help = self.context.get("quit_help", "q quit")
