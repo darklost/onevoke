@@ -1300,15 +1300,18 @@ class KanbanTui:
         else:
             heading_attr = state_color | curses.A_BOLD
         self._add(2, x, pad_text(f" {heading_text}", width), heading_attr, width)
+        self._add(3, x, self.glyphs["hbar"] * width, curses.A_DIM, width)
         if not tasks:
             empty = self.context.get("empty", "No tasks")
-            self._add(body_top, x + 2, empty, curses.A_DIM, max(0, width - 3))
+            self._add(body_top, x + 1, empty, curses.A_DIM, max(0, width - 2))
             return
 
-        content_width = max(1, width - 3)
+        content_width = max(1, width - 2)
         for row, task in enumerate(tasks[scroll : scroll + capacity]):
-            task_index = scroll + row
             y = body_top + row * CARD_HEIGHT
+            if row > 0:
+                # 卡片之间的间隔行画横线, 与栏目分隔线一起形成网格.
+                self._add(y - 1, x, self.glyphs["hbar"] * width, curses.A_DIM, width)
             selected = focused and str(task.get("task_id") or "") == str(
                 self.model.selected_ids.get(state) or ""
             )
@@ -1331,18 +1334,21 @@ class KanbanTui:
                 (str(group_or_type), self.colors.get("group", 0)),
                 (f"{assignee} | {task.get('time') or '-'}", curses.A_DIM),
             )
-            if selected:
-                bar_attr = self._highlight_attr(state, curses.A_BOLD)
-            else:
-                bar_attr = state_color | curses.A_DIM
             for offset, (line, attr) in enumerate(lines):
                 if selected:
                     # 整卡反色加粗, 彩底选中比只反色状态色更易辨认.
                     attr = self._highlight_attr(state, curses.A_BOLD)
-                self._add(y + offset, x, self.glyphs["bar"], bar_attr, 1)
+                    # 左侧留 1 列: 选中时画靠左竖线, 未选中保持空白.
+                    self._add(
+                        y + offset,
+                        x,
+                        self.glyphs["bar"],
+                        state_color | curses.A_BOLD,
+                        1,
+                    )
                 self._add(
                     y + offset,
-                    x + 2,
+                    x + 1,
                     pad_text(line, content_width),
                     attr,
                     content_width,
