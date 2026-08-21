@@ -5,17 +5,22 @@ import json
 import locale
 import os
 import sys
+import tempfile
 import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
 ACTIVE_STATES = ("backlog", "todo", "working", "done")
 ALL_STATES = ACTIVE_STATES + ("archived", "trash")
 CARD_HEIGHT = 5
-MIN_COLUMN_WIDTH = 40
+DEFAULT_COLUMN_WIDTH = 40
+MIN_COLUMN_WIDTH = 10
+MAX_COLUMN_WIDTH = 120
+COLUMN_WIDTH_STEP = 5
 MIN_BOARD_HEIGHT = 9
 
 FANCY_GLYPHS = {"vbar": "│", "bar": "▎", "hbar": "─", "left": "‹", "right": "›"}
@@ -145,11 +150,66 @@ def board_content_key(tasks: list[dict]) -> str:
     return json.dumps(tasks, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def visible_column_count(width: int, total: int, *, single: bool = False) -> int:
+def clamp_column_width(width: int) -> int:
+    return max(MIN_COLUMN_WIDTH, min(MAX_COLUMN_WIDTH, int(width)))
+
+
+def prefs_path() -> Path:
+    override = os.environ.get("ONEVOKE_CONFIG")
+    if override:
+        return Path(override).expanduser().with_name("tui.json")
+    return Path.home() / ".config" / "onevoke" / "tui.json"
+
+
+def load_column_width(default: int = DEFAULT_COLUMN_WIDTH) -> int:
+    path = prefs_path()
+    if not path.is_file():
+        return clamp_column_width(default)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return clamp_column_width(default)
+    if not isinstance(raw, dict):
+        return clamp_column_width(default)
+    value = raw.get("column_width", default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return clamp_column_width(default)
+    return clamp_column_width(value)
+
+
+def save_column_width(width: int) -> None:
+    path = prefs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"column_width": clamp_column_width(width)}
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def visible_column_count(
+    width: int,
+    total: int,
+    *,
+    single: bool = False,
+    column_width: int = DEFAULT_COLUMN_WIDTH,
+) -> int:
     if single or total <= 1:
         return 1
+    preferred = clamp_column_width(column_width)
     # n 栏需要 n 个最小宽度和 n-1 条分隔线.
-    maximum = max(1, (width + 1) // (MIN_COLUMN_WIDTH + 1))
+    maximum = max(1, (width + 1) // (preferred + 1))
     return min(total, maximum)
 
 
@@ -391,11 +451,15 @@ class KanbanTui:
         get_board: Callable[[], dict],
         get_task: Callable[[str], dict],
         theme: str = "auto",
+        column_width: int = DEFAULT_COLUMN_WIDTH,
+        persist_column_width: Optional[Callable[[int], None]] = None,
     ) -> None:
         self.screen = screen
         self.model = BoardModel(single=single)
         self.refresh_interval = refresh_interval
         self.theme = theme
+        self.column_width = clamp_column_width(column_width)
+        self.persist_column_width = persist_column_width
         self.has_colors = False
         self.has_default_colors = False
         self.context = context
@@ -411,6 +475,7 @@ class KanbanTui:
         self.frame: Optional[ScreenBuffer] = None
         self.prev_frame: Optional[ScreenBuffer] = None
         self.cursor_pos: Optional[tuple[int, int]] = None
+        self.prefs_error = ""
 
     def run(self, initial_board: dict) -> None:
         self._init_style()
@@ -597,10 +662,28 @@ class KanbanTui:
         elif key in ("t", "T"):
             self.theme = THEMES[(THEMES.index(self.theme) + 1) % len(THEMES)]
             self._apply_theme()
+        elif key in ("-", "_"):
+            self._adjust_column_width(-COLUMN_WIDTH_STEP)
+        elif key in ("=", "+"):
+            self._adjust_column_width(COLUMN_WIDTH_STEP)
         elif key in ("r", "R"):
             self._refresh()
         elif key in ("\n", "\r", curses.KEY_ENTER):
             self._open_detail()
+
+    def _adjust_column_width(self, delta: int) -> None:
+        next_width = clamp_column_width(self.column_width + delta)
+        if next_width == self.column_width:
+            return
+        self.column_width = next_width
+        if self.persist_column_width is None:
+            self.prefs_error = ""
+            return
+        try:
+            self.persist_column_width(self.column_width)
+            self.prefs_error = ""
+        except Exception as error:  # 记住失败时仍保留本次会话中的新宽度.
+            self.prefs_error = str(error)
 
     def _handle_search_key(self, key) -> None:
         if key in ("\n", "\r", curses.KEY_ENTER):
@@ -701,8 +784,10 @@ class KanbanTui:
         )
         stamp = self.model.generated_at or "-"
         theme_label = self.context.get("theme_labels", {}).get(self.theme, self.theme)
+        width_label = self.context.get("width", "Width")
         toolbar_right = (
             f"{self.context.get('theme', 'Theme')} {theme_label} | "
+            f"{width_label} {self.column_width} | "
             f"{mode} | {self.context.get('updated', 'Updated')} {stamp}"
         )
         toolbar_left_width = max(
@@ -733,7 +818,10 @@ class KanbanTui:
                     pass
 
         count = visible_column_count(
-            width, len(self.model.states), single=self.model.single
+            width,
+            len(self.model.states),
+            single=self.model.single,
+            column_width=self.column_width,
         )
         states = self.model.visible_states(count)
         more_left = self.model.column_offset > 0
@@ -857,21 +945,25 @@ class KanbanTui:
             return self.colors.get("error", 0) | curses.A_REVERSE | curses.A_BOLD
         return self.colors.get("accent", 0) | curses.A_REVERSE
 
+    def _status_error(self) -> str:
+        return self.prefs_error or self.model.error
+
     def _render_footer(self, height: int, width: int) -> None:
-        if self.model.error:
-            footer = f"{self.context.get('error', 'Error')}: {self.model.error}"
+        status_error = self._status_error()
+        if status_error:
+            footer = f"{self.context.get('error', 'Error')}: {status_error}"
         elif self.searching:
             footer = self.context.get("search_help", "Enter apply | Esc clear")
         else:
             footer = self.context.get(
                 "help",
-                "arrows/hjkl move | / search | Enter detail | a archive | r refresh | q quit",
+                "arrows/hjkl move | -/= width | / search | Enter detail | a archive | r refresh | q quit",
             )
         self._add(
             height - 1,
             0,
             pad_text(" " + footer, width),
-            self._footer_attr(bool(self.model.error)),
+            self._footer_attr(bool(status_error)),
             width,
         )
 
@@ -923,8 +1015,9 @@ class KanbanTui:
             self._add(3 + index, 0, line, attr, width - 1)
         visible_end = min(len(lines), self.detail_scroll + body_height)
         position = f"{self.detail_scroll + 1}-{visible_end}/{len(lines)}"
-        if self.model.error:
-            footer = f"{self.context.get('error', 'Error')}: {self.model.error}"
+        status_error = self._status_error()
+        if status_error:
+            footer = f"{self.context.get('error', 'Error')}: {status_error}"
         else:
             help_text = self.context.get(
                 "detail_help", "arrows/jk scroll | PgUp/PgDn | q/Esc back"
@@ -934,7 +1027,7 @@ class KanbanTui:
             height - 1,
             0,
             pad_text(" " + footer, width),
-            self._footer_attr(bool(self.model.error)),
+            self._footer_attr(bool(status_error)),
             width,
         )
 
@@ -947,9 +1040,14 @@ def run(
     get_board: Callable[[], dict],
     get_task: Callable[[str], dict],
     theme: str = "auto",
+    column_width: Optional[int] = None,
+    persist_column_width: Optional[Callable[[int], None]] = None,
 ) -> None:
     if theme not in THEMES:
         raise KanbanTuiError(f"unknown theme: {theme}")
+    preferred_width = (
+        DEFAULT_COLUMN_WIDTH if column_width is None else clamp_column_width(column_width)
+    )
 
     try:
         initial_board = get_board()
@@ -970,6 +1068,8 @@ def run(
             get_board=get_board,
             get_task=get_task,
             theme=theme,
+            column_width=preferred_width,
+            persist_column_width=persist_column_width,
         ).run(initial_board)
 
     try:

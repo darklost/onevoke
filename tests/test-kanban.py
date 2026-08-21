@@ -1837,6 +1837,88 @@ N/A
         self.assertIn("working", forced[0])
         self.assertNotIn("todo", forced[0])
 
+    def test_tui_column_width_keys_adjust_and_persist(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        config_dir = self.home / ".config" / "onevoke"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "config.json"
+        prefs = config_dir / "tui.json"
+        self.env["ONEVOKE_CONFIG"] = str(config_path)
+        self.assertFalse(prefs.exists())
+        with mock.patch.dict(os.environ, {"ONEVOKE_CONFIG": str(config_path)}):
+            self.assertEqual(40, kanban_tui.load_column_width())
+            self.assertEqual(2, kanban_tui.visible_column_count(100, 4, column_width=40))
+            self.assertEqual(3, kanban_tui.visible_column_count(100, 4, column_width=30))
+            self.assertEqual(4, kanban_tui.visible_column_count(100, 4, column_width=20))
+            self.assertEqual(1, kanban_tui.visible_column_count(80, 4, column_width=40))
+
+            kanban_tui.save_column_width(35)
+            self.assertEqual(35, kanban_tui.load_column_width())
+            self.assertTrue(prefs.is_file())
+            self.assertEqual(0o600, prefs.stat().st_mode & 0o777)
+            prefs.write_text('{"column_width": 999}\n', encoding="utf-8")
+            self.assertEqual(kanban_tui.MAX_COLUMN_WIDTH, kanban_tui.load_column_width())
+            prefs.write_text('{"column_width": "wide"}\n', encoding="utf-8")
+            self.assertEqual(40, kanban_tui.load_column_width())
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 120
+
+        saved = []
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=False,
+            refresh_interval=30,
+            context={},
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+            column_width=40,
+            persist_column_width=saved.append,
+        )
+        tui._handle_board_key("-")
+        self.assertEqual(35, tui.column_width)
+        self.assertEqual([35], saved)
+        tui._handle_board_key("=")
+        self.assertEqual(40, tui.column_width)
+        self.assertEqual([35, 40], saved)
+        tui._handle_board_key("+")
+        self.assertEqual(45, tui.column_width)
+        tui._handle_board_key("_")
+        self.assertEqual(40, tui.column_width)
+
+        tui.column_width = kanban_tui.MIN_COLUMN_WIDTH
+        tui._handle_board_key("-")
+        self.assertEqual(kanban_tui.MIN_COLUMN_WIDTH, tui.column_width)
+        tui.column_width = kanban_tui.MAX_COLUMN_WIDTH
+        before = len(saved)
+        tui._handle_board_key("=")
+        self.assertEqual(kanban_tui.MAX_COLUMN_WIDTH, tui.column_width)
+        self.assertEqual(before, len(saved))
+
+        def fail_persist(_width: int) -> None:
+            raise OSError("disk full")
+
+        failing = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=False,
+            refresh_interval=30,
+            context={},
+            get_board=lambda: {"tasks": []},
+            get_task=lambda _task_id: {},
+            column_width=40,
+            persist_column_width=fail_persist,
+        )
+        failing._handle_board_key("-")
+        self.assertEqual(35, failing.column_width)
+        self.assertIn("disk full", failing.prefs_error)
+        self.assertIn("disk full", failing._status_error())
+
     def test_tui_page_keys_move_selection_by_page_and_clamp(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:
