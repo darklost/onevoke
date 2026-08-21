@@ -183,8 +183,11 @@ body {
 
 /* Filled text field: tonal fill, bottom line, primary focus indicator. */
 .input {
-  width: min(100%, 240px);
-  min-width: 12rem;
+  /* 自适应宽度: 占满工具栏剩余空间, 设上限避免超宽屏拉过长. */
+  flex: 1 1 auto;
+  width: auto;
+  min-width: min(100%, 14rem);
+  max-width: 40rem;
   height: 2.5rem;
   padding: 0 0.75rem;
   border: 0;
