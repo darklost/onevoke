@@ -235,6 +235,46 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("Usage: onevoke-review.sh <agent>", result.stderr)
 
+    def test_invalid_config_language_falls_back_to_env(self) -> None:
+        config_path = self.root / "onevoke-config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "invalid",
+                    "launcher": "tmux",
+                    "language": "cn",
+                    "reviewers": {
+                        "PM": "codex",
+                        "CSA": "codex",
+                        "Hacker": "codex",
+                        "QA": "codex",
+                    },
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = {
+            key: value
+            for key, value in self.env.items()
+            if key not in ("ONEVOKE_LANG", "ONEVOKE_LANG_CLI")
+        }
+        env.update({
+            "ONEVOKE_CONFIG": str(config_path),
+            "ONEVOKE_LANG": "en",
+        })
+        result = subprocess.run(
+            [str(REVIEWER)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Usage: onevoke-review.sh <agent>", result.stderr)
+
     def test_unsupported_agent_is_rejected(self) -> None:
         result = subprocess.run(
             [str(REVIEWER), "other"],

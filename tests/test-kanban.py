@@ -1682,6 +1682,37 @@ N/A
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(INSTALLED_EN, result.stdout)
 
+    def test_installer_ignores_invalid_config_language(self) -> None:
+        install_home = self.root / "install-invalid-config-home"
+        config_dir = install_home / ".config" / "onevoke"
+        config_dir.mkdir(parents=True)
+        config_dir.joinpath("config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "invalid",
+                    "launcher": "tmux",
+                    "language": "cn",
+                    "reviewers": {role: "codex" for role in ("PM", "CSA", "Hacker", "QA")},
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
+            env=install_env(install_home, ONEVOKE_LANG="en"),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(INSTALLED_EN, result.stdout)
+
     def test_web_help_and_invalid_refresh(self) -> None:
         help_text = self.run_command("web", "--help").stdout
         self.assertIn("--host", help_text)

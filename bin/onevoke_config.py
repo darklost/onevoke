@@ -87,12 +87,13 @@ def _explicit_config_language(raw: object) -> str | None:
 
 
 def configured_language() -> str | None:
-    """Return explicitly saved language from config.json, or None."""
+    """Return explicitly saved language from a valid config.json, or None."""
     try:
         path = config_path()
         if not path.is_file():
             return None
         raw = json.loads(path.read_text(encoding="utf-8"))
+        validate_config(raw)
         return _explicit_config_language(raw)
     except (OSError, UnicodeError, json.JSONDecodeError, ConfigError):
         return None
@@ -123,19 +124,11 @@ def _effective_locale() -> str:
 
 
 def bind_effective_language() -> None:
-    try:
-        if not config_path().is_file():
-            bind_config_language(None)
-            return
-        load_config()
-        raw = json.loads(config_path().read_text(encoding="utf-8"))
-        language = _explicit_config_language(raw)
-        if language is None:
-            bind_config_language(None)
-        else:
-            bind_config_language({"language": language})
-    except (OSError, UnicodeError, json.JSONDecodeError, ConfigError):
+    language = configured_language()
+    if language is None:
         bind_config_language(None)
+    else:
+        bind_config_language({"language": language})
 
 
 def language_is_chinese() -> bool:
