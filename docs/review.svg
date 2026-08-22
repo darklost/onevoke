@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1136" viewBox="0 0 1600 1136" role="img" aria-labelledby="rv-title rv-desc">
   <title id="rv-title">Onevoke 审核流程</title>
-  <desc id="rv-desc">任务命中审核白名单后进入三阶段串行审核: PM 核对实现是否达到 task context, CSA 与 Hacker 按触发条件运行并把安全 finding 交用户决策, QA 固定在最后核对功能, 回归与代码质量; 每次修复只重跑当前阶段, 通过后展示全部未处理项再进入集成. 只有经主代理核实的 blocking, high, medium 必修.</desc>
+  <desc id="rv-desc">任务命中审核白名单后, 先按「审核环节」解析 PM/CSA/Hacker/QA 是否运行 (review_stages 与项目规则可覆盖), 跳过的标 N/A. 实际运行的角色按 PM、CSA/Hacker、QA 三阶段串行; QA 若运行则固定最后. 每次修复只重跑当前阶段, 通过后展示全部未处理项再进入集成. 只有经主代理核实的 blocking, high, medium 必修.</desc>
 
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
@@ -32,7 +32,7 @@
   <rect width="1600" height="1136" fill="url(#bg)"/>
 
   <text x="64" y="80" class="s h1">Onevoke 审核流程</text>
-  <text x="64" y="118" class="s h2">PM → 安全角色 → QA 三阶段串行, 每次修复只重跑当前阶段</text>
+  <text x="64" y="118" class="s h2">先解析审核环节, 再按 PM → 安全角色 → QA 串行; QA 若运行则固定最后</text>
   <text x="1536" y="112" text-anchor="end" class="s tag">唯一入口: onevoke-review.sh</text>
   <line x1="64" y1="150" x2="1536" y2="150" stroke="#e2e8f0" stroke-width="1.5"/>
 
@@ -43,7 +43,7 @@
   <text x="152" y="234" class="s pt">是否命中审核白名单</text>
   <text x="152" y="260" class="s pn">9 条触发条目按任务实际改动判定, 不看标题或标签</text>
   <rect x="152" y="288" width="214" height="32" rx="16" fill="#e7f6f4" stroke="#9fd6cf" stroke-width="1.5"/>
-  <text x="170" y="309" class="s" font-size="14" fill="#0f766e">命中 → 进入三阶段审核</text>
+  <text x="170" y="309" class="s" font-size="14" fill="#0f766e">命中 → 解析环节并进入审核</text>
   <rect x="382" y="288" width="368" height="32" rx="16" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1.5"/>
   <text x="400" y="309" class="s" font-size="14" fill="#475569">未命中 → 说明改动范围后集成, 禁静默跳过</text>
 
@@ -54,7 +54,7 @@
   <rect x="96" y="404" width="40" height="40" rx="12" fill="#4f46e5"/>
   <text x="116" y="431" text-anchor="middle" class="s num">1</text>
   <text x="152" y="426" class="s pt">PM 审核</text>
-  <text x="152" y="452" class="s pn">核对实现是否完整达到 task context; 按审核档案免跑时标 N/A 通过</text>
+  <text x="152" y="452" class="s pn">核对 task context; 按环节策略或审核档案免跑时标 N/A</text>
   <rect x="96" y="472" width="716" height="48" rx="12" fill="#f5f6ff" stroke="#dfe2fd" stroke-width="1.5"/>
   <path d="M124 487 A9 9 0 1 1 115 496" fill="none" stroke="#4338ca" stroke-width="2" stroke-linecap="round"/>
   <path d="M111 497 L119 497 L115 489 Z" fill="#4338ca"/>
@@ -67,7 +67,7 @@
   <rect x="96" y="604" width="40" height="40" rx="12" fill="#7c3aed"/>
   <text x="116" y="631" text-anchor="middle" class="s num">2</text>
   <text x="152" y="626" class="s pt">CSA / Hacker</text>
-  <text x="152" y="652" class="s pn">按触发条件选, 两者均触发可并行; 均未触发标 N/A 直接通过</text>
+  <text x="152" y="652" class="s pn">按环节策略与触发条件决定; required 可越过触发; 均未运行标 N/A</text>
   <rect x="96" y="672" width="716" height="80" rx="12" fill="#faf8ff" stroke="#e5d9fb" stroke-width="1.5"/>
   <text x="120" y="700" class="s" font-size="15" fill="#6d28d9">经主代理核实的 blocking / high / medium → 交用户决策</text>
   <text x="788" y="700" text-anchor="end" class="s" font-size="13" fill="#8b5cf6">15 分钟无决策 → 超时忽略</text>
@@ -85,7 +85,7 @@
   <rect x="96" y="836" width="40" height="40" rx="12" fill="#0d9488"/>
   <text x="116" y="863" text-anchor="middle" class="s num">3</text>
   <text x="152" y="858" class="s pt">QA 审核</text>
-  <text x="152" y="884" class="s pn">必跑且固定最后: 功能正确性, 回归, 测试与代码质量</text>
+  <text x="152" y="884" class="s pn">实际运行时固定最后; 功能、回归与代码质量; 按环节策略跳过则标 N/A</text>
   <rect x="96" y="904" width="716" height="48" rx="12" fill="#eefaf8" stroke="#cbeae5" stroke-width="1.5"/>
   <path d="M124 919 A9 9 0 1 1 115 928" fill="none" stroke="#0f766e" stroke-width="2" stroke-linecap="round"/>
   <path d="M111 929 L119 929 L115 921 Z" fill="#0f766e"/>

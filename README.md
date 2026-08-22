@@ -89,7 +89,7 @@ kanban rules
 
 ## 3. 审核
 
-任务命中审核白名单后, 由 `onevoke-review.sh` 按 PM -> 安全角色 -> QA 三阶段串行审核, QA 固定在最后; 每次修复只重跑当前阶段. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
+任务命中审核白名单后, 由 `onevoke-review.sh` 按 PM -> 安全角色 -> QA 三阶段串行审核; 各角色是否运行由 `review_stages` 与项目规则决定, 实际运行的 QA 固定在最后. 每次修复只重跑当前阶段. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
 
 全局默认哪些环节运行可在 `~/.config/onevoke/config.json` 的 `review_stages` 配置 (`auto` / `skip` / `required`), 项目规则或当前任务指令可覆盖. 用 `onevoke config` 查看当前值.
 
