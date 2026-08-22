@@ -2345,6 +2345,98 @@ N/A
         self.assertEqual([0, 2], kanban_tui.line_match_indexes(["Alpha", "beta", "ALPHA"], "alpha"))
         self.assertEqual([(2, 5)], kanban_tui.match_spans("xxABCyy", "abc"))
 
+    def test_tui_copy_and_selection_helpers(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual("lpha\nbe", kanban_tui.extract_char_selection(
+            ["alpha", "beta"],
+            (0, 1),
+            (1, 2),
+        ))
+        self.assertEqual("beta", kanban_tui.extract_line_selection(
+            ["alpha", "beta", "gamma"],
+            (1, 0),
+            (1, 3),
+        ))
+        self.assertEqual(1, kanban_tui.display_column_to_char_index("a中b", 2))
+        self.assertEqual(3, kanban_tui.char_index_to_display_column("a中b", 2))
+
+        class FakeScreen:
+            def getmaxyx(self):
+                return 24, 100
+
+        copied: list[str] = []
+
+        def fake_copy(text: str) -> tuple[bool, str]:
+            copied.append(text)
+            return True, ""
+
+        board = {
+            "generated_at": "2026-08-22 12:00:00",
+            "tasks": [
+                {
+                    "task_id": "20260822-copy-task",
+                    "title": "复制测试",
+                    "state": "todo",
+                    "type": "Feature",
+                    "kind": "small",
+                    "assignee": "",
+                    "time": "-",
+                },
+            ],
+        }
+        tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=60,
+            context={"copied": "Copied"},
+            get_board=lambda: board,
+            get_task=lambda task_id: {
+                "task_id": task_id,
+                "title": "复制测试",
+                "state": "todo",
+                "document": "line one\nline two\nline three\n",
+            },
+            copy_to_clipboard_fn=fake_copy,
+        )
+        tui.model.set_board(board)
+        tui.model.column_index = tui.model.states.index("todo")
+        tui._copy_selected_task_id()
+        self.assertEqual(["20260822-copy-task"], copied)
+
+        tui.detail = tui.get_task("20260822-copy-task")
+        tui.detail_cursor = (0, 0)
+        tui._handle_detail_key("j")
+        self.assertEqual((1, 0), tui.detail_cursor)
+        tui._detail_toggle_select("char")
+        for _ in range(len("line two")):
+            tui._handle_detail_key("l")
+        tui._detail_yank()
+        self.assertEqual(["20260822-copy-task", "line two"], copied)
+        self.assertIsNone(tui.detail_select_mode)
+
+        tui.detail_cursor = (0, 0)
+        tui._detail_toggle_select("char")
+        tui._detail_move_cursor(0, 4)
+        tui._detail_yank()
+        self.assertEqual(["20260822-copy-task", "line two", "line"], copied)
+        self.assertIsNone(tui.detail_select_mode)
+
+        tui.detail_cursor = (1, 0)
+        tui._detail_toggle_select("line")
+        self.assertEqual("line", tui.detail_select_mode)
+        tui._detail_yank()
+        self.assertEqual(["20260822-copy-task", "line two", "line", "line two"], copied)
+
+        tui.mouse_select_anchor = ("board", "20260822-copy-task", 0, 0, 20)
+        tui.mouse_select_cursor = ("board", "20260822-copy-task", 0, 4, 20)
+        text = tui._extract_board_mouse_selection()
+        self.assertEqual("复制测", text[:3])
+
     def test_tui_theme_key_cycles_and_run_rejects_unknown_theme(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:
@@ -3135,7 +3227,7 @@ N/A
         with mock.patch.object(kanban_tui.KanbanTui, "_init_style"), mock.patch.object(
             tui, "_render", side_effect=counted_render
         ), mock.patch.object(
-            kanban_tui.time, "monotonic", side_effect=[30, 30, 31]
+            kanban_tui.time, "monotonic", side_effect=[30, 30, 31, 31, 31]
         ):
             tui.run({"generated_at": "0", "tasks": []})
         self.assertEqual(1, calls["board"])

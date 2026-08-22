@@ -4,6 +4,8 @@ import curses
 import json
 import locale
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -23,7 +25,9 @@ MAX_COLUMN_WIDTH = 120
 COLUMN_WIDTH_STEP = 5
 MIN_BOARD_HEIGHT = 8
 BODY_TOP = 4
+DETAIL_BODY_TOP = 3
 MOUSE_SCROLL_STEP = 3
+COPY_NOTICE_SECONDS = 2.0
 
 FANCY_GLYPHS = {
     "vbar": "│",
@@ -365,6 +369,154 @@ def mouse_left_double_clicked(bstate: int) -> bool:
     return bool(bstate & curses.BUTTON1_DOUBLE_CLICKED)
 
 
+def mouse_button1_released(bstate: int) -> bool:
+    return bool(bstate & curses.BUTTON1_RELEASED)
+
+
+def mouse_button1_dragging(bstate: int) -> bool:
+    report = getattr(curses, "REPORT_MOUSE_POSITION", 0)
+    if report and bstate & report:
+        return True
+    return bool(
+        bstate & curses.BUTTON1_PRESSED
+        and not (bstate & curses.BUTTON1_RELEASED)
+        and not (bstate & curses.BUTTON1_CLICKED)
+        and not (bstate & curses.BUTTON1_DOUBLE_CLICKED)
+    )
+
+
+def copy_to_clipboard(text: str) -> tuple[bool, str]:
+    if not text:
+        return False, ""
+    payload = text.encode("utf-8")
+    for command in (
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+        ["pbcopy"],
+    ):
+        if shutil.which(command[0]) is None:
+            continue
+        try:
+            subprocess.run(
+                command,
+                input=payload,
+                check=True,
+                timeout=2,
+            )
+            return True, ""
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False, "clipboard unavailable"
+
+
+def display_column_to_char_index(text: str, display_col: int) -> int:
+    if display_col <= 0:
+        return 0
+    used = 0
+    index = 0
+    for char in text:
+        char_width = (
+            0
+            if unicodedata.combining(char)
+            else 2
+            if unicodedata.east_asian_width(char) in "WF"
+            else 1
+        )
+        if used + char_width > display_col:
+            break
+        used += char_width
+        index += 1
+    return index
+
+
+def char_index_to_display_column(text: str, char_index: int) -> int:
+    used = 0
+    for index, char in enumerate(text):
+        if index >= char_index:
+            break
+        char_width = (
+            0
+            if unicodedata.combining(char)
+            else 2
+            if unicodedata.east_asian_width(char) in "WF"
+            else 1
+        )
+        used += char_width
+    return used
+
+
+def ordered_points(
+    anchor: tuple[int, int],
+    cursor: tuple[int, int],
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    if anchor <= cursor:
+        return anchor, cursor
+    return cursor, anchor
+
+
+def extract_char_selection(
+    lines: list[str],
+    anchor: tuple[int, int],
+    cursor: tuple[int, int],
+) -> str:
+    start, end = ordered_points(anchor, cursor)
+    start_line, start_col = start
+    end_line, end_col = end
+    if not lines:
+        return ""
+    start_line = max(0, min(start_line, len(lines) - 1))
+    end_line = max(0, min(end_line, len(lines) - 1))
+    if start_line == end_line:
+        line = lines[start_line]
+        return line[start_col : max(start_col, min(end_col, len(line)))]
+    chunks = [lines[start_line][start_col:]]
+    for line_index in range(start_line + 1, end_line):
+        chunks.append(lines[line_index])
+    end_line_text = lines[end_line]
+    chunks.append(end_line_text[: max(0, min(end_col, len(end_line_text)))])
+    return "\n".join(chunks)
+
+
+def extract_line_selection(
+    lines: list[str],
+    anchor: tuple[int, int],
+    cursor: tuple[int, int],
+) -> str:
+    start, end = ordered_points(anchor, cursor)
+    start_line = max(0, min(start[0], len(lines) - 1))
+    end_line = max(0, min(end[0], len(lines) - 1))
+    if not lines:
+        return ""
+    return "\n".join(lines[start_line : end_line + 1])
+
+
+def selection_spans_for_line(
+    line_index: int,
+    line: str,
+    anchor: tuple[int, int],
+    cursor: tuple[int, int],
+    *,
+    line_mode: bool,
+) -> list[tuple[int, int]]:
+    start, end = ordered_points(anchor, cursor)
+    start_line, start_col = start
+    end_line, end_col = end
+    if line_mode:
+        if start_line <= line_index <= end_line:
+            return [(0, len(line))]
+        return []
+    if line_index < start_line or line_index > end_line:
+        return []
+    if start_line == end_line:
+        return [(start_col, min(end_col, len(line)))]
+    if line_index == start_line:
+        return [(start_col, len(line))]
+    if line_index == end_line:
+        return [(0, min(end_col, len(line)))]
+    return [(0, len(line))]
+
+
 class ScreenBuffer:
     def __init__(self, height: int, width: int) -> None:
         self.height = height
@@ -606,6 +758,7 @@ class KanbanTui:
         theme: str = "auto",
         column_width: int = DEFAULT_COLUMN_WIDTH,
         persist_column_width: Optional[Callable[[int], None]] = None,
+        copy_to_clipboard_fn: Optional[Callable[[str], tuple[bool, str]]] = None,
     ) -> None:
         self.screen = screen
         self.model = BoardModel(single=single)
@@ -618,6 +771,7 @@ class KanbanTui:
         self.context = context
         self.get_board = get_board
         self.get_task = get_task
+        self.copy_to_clipboard_fn = copy_to_clipboard_fn or copy_to_clipboard
         self.searching = False
         self.detail: Optional[dict] = None
         self.detail_scroll = 0
@@ -625,6 +779,15 @@ class KanbanTui:
         self.detail_query = ""
         self.detail_match_index = 0
         self.detail_pending_g = False
+        self.detail_select_mode: Optional[str] = None
+        self.detail_anchor: Optional[tuple[int, int]] = None
+        self.detail_cursor: tuple[int, int] = (0, 0)
+        self.mouse_selecting = False
+        self.mouse_select_anchor: Optional[tuple[str, int, int]] = None
+        self.mouse_select_cursor: Optional[tuple[str, int, int]] = None
+        self.copy_notice = ""
+        self.copy_notice_until = 0.0
+        self.suppress_click = False
         self.last_refresh = time.monotonic()
         self.running = True
         self.colors: dict[str, int] = {}
@@ -671,10 +834,11 @@ class KanbanTui:
     def _enable_mouse(self) -> None:
         mask = (
             curses.BUTTON1_PRESSED
+            | curses.BUTTON1_RELEASED
             | curses.BUTTON1_CLICKED
             | curses.BUTTON1_DOUBLE_CLICKED
         )
-        for name in ("BUTTON4_PRESSED", "BUTTON5_PRESSED"):
+        for name in ("BUTTON4_PRESSED", "BUTTON5_PRESSED", "REPORT_MOUSE_POSITION"):
             value = getattr(curses, name, 0)
             if value:
                 mask |= value
@@ -843,7 +1007,9 @@ class KanbanTui:
         try:
             self.detail = self.get_task(str(selected.get("task_id") or ""))
             self.detail_scroll = 0
+            self.detail_cursor = (0, 0)
             self._reset_detail_search()
+            self._reset_mouse_selection()
             self.model.detail_error = ""
         except Exception as error:
             self.model.detail_error = str(error)
@@ -852,13 +1018,281 @@ class KanbanTui:
         self.detail = None
         self.detail_scroll = 0
         self._reset_detail_search()
+        self._reset_mouse_selection()
 
     def _reset_detail_search(self) -> None:
         self.detail_searching = False
         self.detail_query = ""
         self.detail_match_index = 0
         self.detail_pending_g = False
+        self._reset_detail_selection()
         self._set_cursor(False)
+
+    def _reset_detail_selection(self) -> None:
+        self.detail_select_mode = None
+        self.detail_anchor = None
+
+    def _reset_mouse_selection(self) -> None:
+        self.mouse_selecting = False
+        self.mouse_select_anchor = None
+        self.mouse_select_cursor = None
+
+    def _notify_copy(self, text: str, *, success: bool, error: str = "") -> None:
+        if success:
+            preview = clip_text(text.replace("\n", " "), 40)
+            copied = self.context.get("copied", "Copied")
+            self.copy_notice = f"{copied}: {preview}"
+        else:
+            label = self.context.get("copy_failed", "Copy failed")
+            detail = error or self.context.get(
+                "clipboard_unavailable", "clipboard unavailable"
+            )
+            self.copy_notice = f"{label}: {detail}"
+        self.copy_notice_until = time.monotonic() + COPY_NOTICE_SECONDS
+
+    def _copy_text(self, text: str) -> bool:
+        success, error = self.copy_to_clipboard_fn(text)
+        self._notify_copy(text, success=success, error=error)
+        return success
+
+    def _copy_selected_task_id(self) -> None:
+        selected = self.model.selected_task()
+        if selected is None:
+            return
+        task_id = str(selected.get("task_id") or "")
+        if task_id:
+            self._copy_text(task_id)
+
+    def _card_meta_line(self, task: dict) -> str:
+        task_group = str(task.get("task_group") or "")
+        if task_group:
+            group_or_type = compact_group(task_group)
+        else:
+            group_or_type = " / ".join(
+                value
+                for value in (
+                    str(task.get("type") or "-"),
+                    self.context.get("size_labels", {}).get(
+                        task.get("kind"), str(task.get("kind") or "-")
+                    ),
+                )
+                if value
+            )
+        assignee = task.get("assignee") or self.context.get(
+            "unassigned", "Unassigned"
+        )
+        dot = self.glyphs["dot"]
+        meta_time = compact_time(str(task.get("time") or "-"))
+        return f"{meta_time} {dot} {assignee} {dot} {group_or_type}"
+
+    def _board_card_lines(self, task: dict, content_width: int) -> list[str]:
+        return [
+            clip_text(str(task.get("title") or task.get("task_id") or ""), content_width),
+            clip_text(str(task.get("task_id") or ""), content_width),
+            clip_text(self._card_meta_line(task), content_width),
+        ]
+
+    def _board_card_hit(
+        self, x: int, y: int
+    ) -> Optional[tuple[str, str, int, int, int]]:
+        hit = self._hit_board(x, y)
+        if hit is None or hit[0] != "task":
+            return None
+        _kind, state, task_index = hit
+        height, _width = self.screen.getmaxyx()
+        body_height = height - BODY_TOP - 1
+        tasks, scroll, _capacity = column_task_window(
+            self.model, state, body_height
+        )
+        if task_index < scroll or task_index >= len(tasks):
+            return None
+        task = tasks[task_index]
+        layout = self._visible_column_layout()
+        col_x = 0
+        col_width = 1
+        for layout_state, layout_x, layout_width in layout:
+            if layout_state == state:
+                col_x = layout_x
+                col_width = layout_width
+                break
+        if not (col_x <= x < col_x + col_width):
+            return None
+        row = (y - BODY_TOP) // CARD_HEIGHT
+        line_in_card = min(2, max(0, y - BODY_TOP - row * CARD_HEIGHT))
+        content_width = max(1, col_width - 2)
+        display_col = max(0, x - col_x - 1)
+        lines = self._board_card_lines(task, content_width)
+        char_col = display_column_to_char_index(lines[line_in_card], display_col)
+        task_id = str(task.get("task_id") or "")
+        return ("board", task_id, line_in_card, char_col, content_width)
+
+    def _detail_hit(self, x: int, y: int) -> Optional[tuple[str, int, int]]:
+        if y < DETAIL_BODY_TOP:
+            return None
+        height, width = self.screen.getmaxyx()
+        body_height = height - 4
+        if y >= DETAIL_BODY_TOP + body_height:
+            return None
+        line_index = self.detail_scroll + (y - DETAIL_BODY_TOP)
+        lines = self._detail_lines()
+        if line_index < 0 or line_index >= len(lines):
+            return None
+        display_col = max(0, min(x, width - 1))
+        char_col = display_column_to_char_index(lines[line_index], display_col)
+        return ("detail", line_index, char_col)
+
+    def _extract_board_mouse_selection(self) -> str:
+        if self.mouse_select_anchor is None or self.mouse_select_cursor is None:
+            return ""
+        if self.mouse_select_anchor[0] != "board" or self.mouse_select_cursor[0] != "board":
+            return ""
+        task_id = self.mouse_select_anchor[1]
+        if task_id != self.mouse_select_cursor[1]:
+            return ""
+        task = next(
+            (
+                item
+                for item in self.model.tasks
+                if str(item.get("task_id") or "") == task_id
+            ),
+            None,
+        )
+        if task is None:
+            return ""
+        content_width = self.mouse_select_anchor[4]
+        lines = self._board_card_lines(task, content_width)
+        anchor = (self.mouse_select_anchor[2], self.mouse_select_anchor[3])
+        cursor = (self.mouse_select_cursor[2], self.mouse_select_cursor[3])
+        return extract_char_selection(lines, anchor, cursor)
+
+    def _extract_detail_mouse_selection(self) -> str:
+        if self.mouse_select_anchor is None or self.mouse_select_cursor is None:
+            return ""
+        if self.mouse_select_anchor[0] != "detail" or self.mouse_select_cursor[0] != "detail":
+            return ""
+        lines = self._detail_lines()
+        anchor = (self.mouse_select_anchor[1], self.mouse_select_anchor[2])
+        cursor = (self.mouse_select_cursor[1], self.mouse_select_cursor[2])
+        return extract_char_selection(lines, anchor, cursor)
+
+    def _finish_mouse_selection(self) -> None:
+        if not self.mouse_selecting:
+            return
+        if self.mouse_select_anchor is None or self.mouse_select_cursor is None:
+            self._reset_mouse_selection()
+            return
+        if self.mouse_select_anchor[0] == "board":
+            text = self._extract_board_mouse_selection()
+        else:
+            text = self._extract_detail_mouse_selection()
+        self._reset_mouse_selection()
+        if text:
+            self._copy_text(text)
+
+    def _detail_toggle_select(self, mode: str) -> None:
+        if self.detail_select_mode == mode:
+            self._reset_detail_selection()
+            return
+        self.detail_select_mode = mode
+        self._reset_mouse_selection()
+        line, col = self.detail_cursor
+        lines = self._detail_lines()
+        if mode == "line":
+            line = max(0, min(len(lines) - 1, line))
+            self.detail_anchor = (line, 0)
+            self.detail_cursor = (line, len(lines[line]) if lines else 0)
+        else:
+            self.detail_anchor = (line, col)
+
+    def _detail_yank(self) -> None:
+        if self.detail_select_mode is None or self.detail_anchor is None:
+            return
+        lines = self._detail_lines()
+        if self.detail_select_mode == "line":
+            text = extract_line_selection(lines, self.detail_anchor, self.detail_cursor)
+        else:
+            text = extract_char_selection(lines, self.detail_anchor, self.detail_cursor)
+        if text:
+            self._copy_text(text)
+        self._reset_detail_selection()
+
+    def _detail_move_cursor(self, delta_line: int, delta_col: int) -> None:
+        lines = self._detail_lines()
+        if not lines:
+            return
+        line, col = self.detail_cursor
+        line = max(0, min(len(lines) - 1, line + delta_line))
+        line_text = lines[line]
+        if delta_col:
+            col = max(0, min(len(line_text), col + delta_col))
+        elif delta_line:
+            col = min(col, len(line_text))
+        self.detail_cursor = (line, col)
+        self._reveal_detail_line(line, lines)
+        if self.detail_select_mode == "line" and self.detail_anchor is not None:
+            anchor_line = self.detail_anchor[0]
+            start, end = ordered_points((anchor_line, 0), (line, 0))
+            self.detail_anchor = (start[0], 0)
+            end_line_text = lines[end[0]]
+            self.detail_cursor = (end[0], len(end_line_text))
+
+    def _detail_selection_active(self) -> bool:
+        return (
+            self.detail_select_mode is not None
+            and self.detail_anchor is not None
+        )
+
+    def _render_line_segments(
+        self,
+        y: int,
+        x: int,
+        line: str,
+        base_attr: int,
+        spans: list[tuple[int, int]],
+        *,
+        width: int,
+        highlight_attr: int,
+        cursor_col: Optional[int] = None,
+    ) -> None:
+        if not spans and cursor_col is None:
+            self._add(y, x, pad_text(line, width), base_attr, width)
+            return
+        padded = pad_text(line, width)
+        column = 0
+        char_index = 0
+        while char_index < len(padded) and column < width:
+            char = padded[char_index]
+            char_width = display_width(char)
+            if char_width == 0:
+                char_index += 1
+                continue
+            in_span = any(start <= char_index < end for start, end in spans)
+            attr = highlight_attr if in_span else base_attr
+            if cursor_col == char_index:
+                attr |= curses.A_REVERSE
+            self._add(y, x + column, char, attr, width - column)
+            column += char_width
+            char_index += 1
+
+    def _footer_message(self, *, detail: bool = False) -> str:
+        if time.monotonic() < self.copy_notice_until and self.copy_notice:
+            return self.copy_notice
+        status_error = self._status_error()
+        if status_error:
+            return f"{self.context.get('error', 'Error')}: {status_error}"
+        if detail and self.detail_searching:
+            return self.context.get("search_help", "Enter apply | Esc clear")
+        if not detail and self.searching:
+            return self.context.get("search_help", "Enter apply | Esc clear")
+        if detail:
+            return self.context.get(
+                "detail_help",
+                "jk scroll | Ctrl-d/u half | Ctrl-f/b page | gg/G | v/V select y copy | / n N | q/Esc back",
+            )
+        return self.context.get(
+            "help",
+            "arrows/hjkl move | y copy id | drag copy | -/= width | / search | Enter detail | a archive | r refresh | q quit",
+        )
 
     def _detail_body_height(self) -> int:
         return max(1, self.screen.getmaxyx()[0] - 4)
@@ -964,13 +1398,65 @@ class KanbanTui:
             if mouse_left_clicked(bstate) and y != 2:
                 self._apply_detail_search()
             return
+        if mouse_button1_released(bstate):
+            if self.mouse_selecting:
+                moved = (
+                    self.mouse_select_anchor is not None
+                    and self.mouse_select_cursor is not None
+                    and self.mouse_select_anchor != self.mouse_select_cursor
+                )
+                self._finish_mouse_selection()
+                if moved:
+                    self.suppress_click = True
+            return
+        if self.mouse_selecting and (
+            mouse_button1_dragging(bstate) or (bstate & curses.BUTTON1_PRESSED)
+        ):
+            hit = self._detail_hit(x, y)
+            if hit is not None:
+                self.mouse_select_cursor = hit
+            return
+        if (bstate & curses.BUTTON1_PRESSED) and not mouse_left_clicked(bstate):
+            hit = self._detail_hit(x, y)
+            if hit is not None:
+                self.mouse_selecting = True
+                self.mouse_select_anchor = hit
+                self.mouse_select_cursor = hit
+            return
         delta = mouse_wheel_delta(bstate)
         if delta:
             self._scroll_detail_by(delta * MOUSE_SCROLL_STEP)
-            return
-        # 详情页左键暂不关闭, 避免误触; 滚轮负责滚动.
 
     def _handle_board_mouse(self, x: int, y: int, bstate: int) -> None:
+        if mouse_button1_released(bstate):
+            if self.mouse_selecting:
+                moved = (
+                    self.mouse_select_anchor is not None
+                    and self.mouse_select_cursor is not None
+                    and self.mouse_select_anchor != self.mouse_select_cursor
+                )
+                self._finish_mouse_selection()
+                if moved:
+                    self.suppress_click = True
+            return
+        if self.mouse_selecting and (
+            mouse_button1_dragging(bstate) or (bstate & curses.BUTTON1_PRESSED)
+        ):
+            hit = self._board_card_hit(x, y)
+            if (
+                hit is not None
+                and self.mouse_select_anchor is not None
+                and hit[1] == self.mouse_select_anchor[1]
+            ):
+                self.mouse_select_cursor = hit
+            return
+        if (bstate & curses.BUTTON1_PRESSED) and not mouse_left_clicked(bstate):
+            hit = self._board_card_hit(x, y)
+            if hit is not None:
+                self.mouse_selecting = True
+                self.mouse_select_anchor = hit
+                self.mouse_select_cursor = hit
+            return
         delta = mouse_wheel_delta(bstate)
         if delta:
             target = self._hit_column_at(x, y)
@@ -979,6 +1465,9 @@ class KanbanTui:
             self.model.move_task(delta)
             return
         if not mouse_left_clicked(bstate):
+            return
+        if self.suppress_click:
+            self.suppress_click = False
             return
         height, width = self.screen.getmaxyx()
         if height < MIN_BOARD_HEIGHT or width < 1:
@@ -1086,6 +1575,8 @@ class KanbanTui:
             self._adjust_column_width(COLUMN_WIDTH_STEP)
         elif key in ("r", "R"):
             self._refresh()
+        elif key == "y":
+            self._copy_selected_task_id()
         elif key in ("\n", "\r", curses.KEY_ENTER):
             self._open_detail()
 
@@ -1140,16 +1631,37 @@ class KanbanTui:
             self.detail_pending_g = False
             if key == "g":
                 self.detail_scroll = 0
+                self.detail_cursor = (0, 0)
                 return
-            # 未组成 gg 时继续处理本次按键 (例如 g 后按 G 仍跳到底).
+        if key in (curses.KEY_UP, "k", "K"):
+            self._detail_move_cursor(-1, 0)
+            return
+        if key in (curses.KEY_DOWN, "j", "J"):
+            self._detail_move_cursor(1, 0)
+            return
+        if key in (curses.KEY_LEFT, "h", "H"):
+            self._detail_move_cursor(0, -1)
+            return
+        if key in (curses.KEY_RIGHT, "l", "L"):
+            self._detail_move_cursor(0, 1)
+            return
+        if self._detail_selection_active():
+            if key == "y":
+                self._detail_yank()
+                return
+            if key == "v":
+                self._detail_toggle_select("char")
+                return
+            if key == "V":
+                self._detail_toggle_select("line")
+                return
+            if key in ("q", "Q", "\x1b", curses.KEY_BACKSPACE, "\b", "\x7f"):
+                self._reset_detail_selection()
+                return
         page_height = self._detail_body_height()
         half_page = max(1, page_height // 2)
         if key in ("q", "Q", "\x1b", curses.KEY_BACKSPACE, "\b", "\x7f"):
             self._close_detail()
-        elif key in (curses.KEY_UP, "k", "K"):
-            self._scroll_detail_by(-1)
-        elif key in (curses.KEY_DOWN, "j", "J"):
-            self._scroll_detail_by(1)
         elif key in (curses.KEY_PPAGE, "\x02"):  # Ctrl-b
             self._scroll_detail_by(-page_height)
         elif key in (curses.KEY_NPAGE, "\x06"):  # Ctrl-f
@@ -1161,8 +1673,13 @@ class KanbanTui:
         elif key == "g":
             self.detail_pending_g = True
         elif key in ("G", curses.KEY_END):
+            lines = self._detail_lines()
+            if lines:
+                last = len(lines) - 1
+                self.detail_cursor = (last, len(lines[last]))
             self.detail_scroll = sys.maxsize
         elif key == curses.KEY_HOME:
+            self.detail_cursor = (0, 0)
             self.detail_scroll = 0
         elif key == "/":
             self.detail_searching = True
@@ -1172,6 +1689,12 @@ class KanbanTui:
             self._jump_detail_match(1)
         elif key == "N":
             self._jump_detail_match(-1)
+        elif key == "v":
+            self._detail_toggle_select("char")
+        elif key == "V":
+            self._detail_toggle_select("line")
+        elif key == "y":
+            self._detail_yank()
     def _render(self, *, force: bool = False) -> None:
         height, width = self.screen.getmaxyx()
         self.cursor_pos = None
@@ -1371,43 +1894,82 @@ class KanbanTui:
             return
 
         content_width = max(1, width - 2)
+        select_highlight = curses.A_REVERSE | curses.A_BOLD
         # 紧凑卡片: 3 行内容 (标题/ID/元信息) 加 1 行空行间隔.
         for row, task in enumerate(tasks[scroll : scroll + capacity]):
             y = body_top + row * CARD_HEIGHT
             selected = focused and str(task.get("task_id") or "") == str(
                 self.model.selected_ids.get(state) or ""
             )
-            task_group = str(task.get("task_group") or "")
-            if task_group:
-                group_or_type = compact_group(task_group)
-            else:
-                group_or_type = " / ".join(
-                    value
-                    for value in (
-                        str(task.get("type") or "-"),
-                        self.context.get("size_labels", {}).get(
-                            task.get("kind"), str(task.get("kind") or "-")
-                        ),
-                    )
-                    if value
-                )
-            assignee = task.get("assignee") or self.context.get(
-                "unassigned", "Unassigned"
-            )
-            dot = self.glyphs["dot"]
-            meta_time = compact_time(str(task.get("time") or "-"))
-            # 顺序: 时间 · 负责人 · 任务组/类型.
-            meta_head = f"{meta_time} {dot} {assignee} {dot} "
-            meta_tail = group_or_type
+            task_id = str(task.get("task_id") or "")
             highlight = self._highlight_attr(state, curses.A_BOLD)
-            lines = (
-                (str(task.get("title") or task.get("task_id") or ""), curses.A_BOLD),
-                (str(task.get("task_id") or ""), self.colors.get("id", 0)),
+            card_lines = self._board_card_lines(task, content_width)
+            line_attrs = (
+                curses.A_BOLD,
+                self.colors.get("id", 0),
+                0,
             )
-            for offset, (line, attr) in enumerate(lines):
-                if selected:
-                    # 整卡反色加粗, 彩底选中比只反色状态色更易辨认.
-                    attr = highlight
+            mouse_anchor = None
+            mouse_cursor = None
+            if (
+                self.mouse_selecting
+                and self.mouse_select_anchor is not None
+                and self.mouse_select_cursor is not None
+                and self.mouse_select_anchor[0] == "board"
+                and self.mouse_select_anchor[1] == task_id
+            ):
+                mouse_anchor = (
+                    self.mouse_select_anchor[2],
+                    self.mouse_select_anchor[3],
+                )
+                mouse_cursor = (
+                    self.mouse_select_cursor[2],
+                    self.mouse_select_cursor[3],
+                )
+            for offset, (line, base_attr) in enumerate(
+                zip(card_lines, line_attrs)
+            ):
+                attr = highlight if selected else base_attr
+                spans: list[tuple[int, int]] = []
+                if mouse_anchor is not None and mouse_cursor is not None:
+                    spans = selection_spans_for_line(
+                        offset,
+                        line,
+                        mouse_anchor,
+                        mouse_cursor,
+                        line_mode=False,
+                    )
+                if spans:
+                    self._render_line_segments(
+                        y + offset,
+                        x + 1,
+                        line,
+                        attr,
+                        spans,
+                        width=content_width,
+                        highlight_attr=select_highlight | attr,
+                    )
+                    continue
+                if offset == 2 and not selected:
+                    meta_head = clip_text(
+                        f"{compact_time(str(task.get('time') or '-'))} "
+                        f"{self.glyphs['dot']} "
+                        f"{task.get('assignee') or self.context.get('unassigned', 'Unassigned')} "
+                        f"{self.glyphs['dot']} ",
+                        content_width,
+                    )
+                    self._add(y + offset, x + 1, meta_head, curses.A_DIM)
+                    used = display_width(meta_head)
+                    if used < content_width:
+                        tail = line[display_column_to_char_index(line, used):]
+                        self._add(
+                            y + offset,
+                            x + 1 + used,
+                            tail,
+                            self.colors.get("group", 0),
+                            content_width - used,
+                        )
+                    continue
                 self._add(
                     y + offset,
                     x + 1,
@@ -1415,28 +1977,6 @@ class KanbanTui:
                     attr,
                     content_width,
                 )
-            # 元信息行: 时间和负责人弱化显示, 任务组/类型保持色相.
-            meta_y = y + 2
-            if selected:
-                self._add(
-                    meta_y,
-                    x + 1,
-                    pad_text(meta_head + meta_tail, content_width),
-                    highlight,
-                    content_width,
-                )
-            else:
-                head = clip_text(meta_head, content_width)
-                self._add(meta_y, x + 1, head, curses.A_DIM)
-                used = display_width(head)
-                if used < content_width:
-                    self._add(
-                        meta_y,
-                        x + 1 + used,
-                        meta_tail,
-                        self.colors.get("group", 0),
-                        content_width - used,
-                    )
             if selected:
                 # 左侧留 1 列: 选中时画靠左竖线, 未选中保持空白.
                 for offset in range(3):
@@ -1460,21 +2000,12 @@ class KanbanTui:
         return " | ".join(parts)
 
     def _render_footer(self, height: int, width: int) -> None:
-        status_error = self._status_error()
-        if status_error:
-            footer = f"{self.context.get('error', 'Error')}: {status_error}"
-        elif self.searching:
-            footer = self.context.get("search_help", "Enter apply | Esc clear")
-        else:
-            footer = self.context.get(
-                "help",
-                "arrows/hjkl move | -/= width | / search | Enter detail | a archive | r refresh | q quit",
-            )
+        footer = self._footer_message(detail=False)
         self._add(
             height - 1,
             0,
             pad_text(" " + footer, width),
-            self._footer_attr(bool(status_error)),
+            self._footer_attr(bool(self._status_error())),
             width,
         )
 
@@ -1533,6 +2064,28 @@ class KanbanTui:
         visible_lines = lines[
             self.detail_scroll : self.detail_scroll + body_height
         ]
+        selection_anchor: Optional[tuple[int, int]] = None
+        selection_cursor: Optional[tuple[int, int]] = None
+        selection_line_mode = False
+        if self._detail_selection_active() and self.detail_anchor is not None:
+            selection_anchor = self.detail_anchor
+            selection_cursor = self.detail_cursor
+            selection_line_mode = self.detail_select_mode == "line"
+        elif (
+            self.mouse_selecting
+            and self.mouse_select_anchor is not None
+            and self.mouse_select_cursor is not None
+            and self.mouse_select_anchor[0] == "detail"
+        ):
+            selection_anchor = (
+                self.mouse_select_anchor[1],
+                self.mouse_select_anchor[2],
+            )
+            selection_cursor = (
+                self.mouse_select_cursor[1],
+                self.mouse_select_cursor[2],
+            )
+        select_highlight = accent | curses.A_REVERSE | curses.A_BOLD
         for index, line in enumerate(visible_lines):
             line_index = self.detail_scroll + index
             stripped = line.lstrip()
@@ -1542,13 +2095,40 @@ class KanbanTui:
                 base_attr = curses.A_DIM
             else:
                 base_attr = 0
+            select_spans: list[tuple[int, int]] = []
+            if selection_anchor is not None and selection_cursor is not None:
+                select_spans = selection_spans_for_line(
+                    line_index,
+                    line,
+                    selection_anchor,
+                    selection_cursor,
+                    line_mode=selection_line_mode,
+                )
+            cursor_col = None
+            if (
+                self.detail_select_mode != "line"
+                and self.detail_cursor[0] == line_index
+            ):
+                cursor_col = self.detail_cursor[1]
+            if select_spans or cursor_col is not None:
+                self._render_line_segments(
+                    DETAIL_BODY_TOP + index,
+                    0,
+                    line,
+                    base_attr,
+                    select_spans,
+                    width=width - 1,
+                    highlight_attr=select_highlight,
+                    cursor_col=cursor_col,
+                )
+                continue
             spans = (
                 match_spans(line, self.detail_query)
                 if self.detail_query.strip()
                 else []
             )
             if not spans:
-                self._add(3 + index, 0, line, base_attr, width - 1)
+                self._add(DETAIL_BODY_TOP + index, 0, line, base_attr, width - 1)
                 continue
             current = line_index == current_match_line
             match_attr = (
@@ -1561,40 +2141,54 @@ class KanbanTui:
             for start, end in spans:
                 if start > cursor:
                     chunk = line[cursor:start]
-                    self._add(3 + index, column, chunk, base_attr, width - 1 - column)
+                    self._add(
+                        DETAIL_BODY_TOP + index,
+                        column,
+                        chunk,
+                        base_attr,
+                        width - 1 - column,
+                    )
                     column += display_width(chunk)
                 chunk = line[start:end]
-                self._add(3 + index, column, chunk, match_attr, width - 1 - column)
+                self._add(
+                    DETAIL_BODY_TOP + index,
+                    column,
+                    chunk,
+                    match_attr,
+                    width - 1 - column,
+                )
                 column += display_width(chunk)
                 cursor = end
             if cursor < len(line):
                 chunk = line[cursor:]
-                self._add(3 + index, column, chunk, base_attr, width - 1 - column)
+                self._add(
+                    DETAIL_BODY_TOP + index,
+                    column,
+                    chunk,
+                    base_attr,
+                    width - 1 - column,
+                )
         visible_end = min(len(lines), self.detail_scroll + body_height)
         position = f"{self.detail_scroll + 1}-{visible_end}/{len(lines)}"
-        status_error = self._status_error()
-        if status_error:
-            footer = f"{self.context.get('error', 'Error')}: {status_error}"
-        elif self.detail_searching:
-            footer = self.context.get("search_help", "Enter apply | Esc clear")
-        else:
-            help_text = self.context.get(
-                "detail_help",
-                "jk scroll | Ctrl-d/u half | Ctrl-f/b page | gg/G | / n N | q/Esc back",
-            )
-            if self.detail_query.strip():
+        footer = self._footer_message(detail=True)
+        if time.monotonic() >= self.copy_notice_until or not self.copy_notice:
+            if self._status_error():
+                pass
+            elif self.detail_searching:
+                pass
+            elif self.detail_query.strip():
                 if matches:
                     match_info = f"{self.detail_match_index + 1}/{len(matches)}"
                 else:
                     match_info = self.context.get("no_match", "no match")
-                footer = f"{help_text} | {match_info} | {position}"
+                footer = f"{footer} | {match_info} | {position}"
             else:
-                footer = f"{help_text} | {position}"
+                footer = f"{footer} | {position}"
         self._add(
             height - 1,
             0,
             pad_text(" " + footer, width),
-            self._footer_attr(bool(status_error)),
+            self._footer_attr(bool(self._status_error())),
             width,
         )
 
