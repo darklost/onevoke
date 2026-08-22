@@ -80,6 +80,7 @@ class GrokReviewGateTest(unittest.TestCase):
             TMPDIR=str(self.tmp),
             # 隔离 Onevoke 配置, 避免读到本机真实模型设置.
             ONEVOKE_CONFIG=str(self.root / "onevoke-config.json"),
+            ONEVOKE_LANG="en",
             GROK_HOME=str(self.grok_home),
             GROK_REVIEW_BIN=str(self.fake_grok),
             GROK_REVIEW_CHECK_INTERVAL_SECONDS="1",

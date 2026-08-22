@@ -15,10 +15,20 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MERGER = PROJECT_ROOT / "bin" / "merge-worktree-memory.py"
+_LOCALE_VARS = ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
+
+
+def merger_env(**extra: str) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key not in _LOCALE_VARS}
+    env["ONEVOKE_LANG"] = "en"
+    env.update(extra)
+    return env
 
 _spec = importlib.util.spec_from_file_location("merge_worktree_memory", MERGER)
 merger = importlib.util.module_from_spec(_spec)
+sys.path.insert(0, str(MERGER.parent))
 _spec.loader.exec_module(merger)
+sys.path.pop(0)
 
 # 由被替换的 bash + awk + sha256sum 实现产出, 锁住与既有记忆文件中
 # merged-worktree-memory 标记的兼容性. 改动切分或归一化逻辑会让它失败.
@@ -128,7 +138,7 @@ class MergeTest(unittest.TestCase):
         path.write_bytes(data)
         return path
 
-    def run_merger(self, *args: str) -> subprocess.CompletedProcess:
+    def run_merger(self, *args: str, **env_overrides: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [
                 str(MERGER),
@@ -136,6 +146,7 @@ class MergeTest(unittest.TestCase):
                 "--target", str(self.target),
                 *args,
             ],
+            env=merger_env(**env_overrides),
             text=True,
             capture_output=True,
             check=False,
@@ -284,6 +295,7 @@ class MergeTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(other), "init", "-q"], check=True)
         result = subprocess.run(
             [str(MERGER), "--source", str(other), "--target", str(self.target)],
+            env=merger_env(),
             text=True,
             capture_output=True,
             check=False,
@@ -305,6 +317,7 @@ class MergeTest(unittest.TestCase):
     def test_source_equal_to_target_is_a_noop(self) -> None:
         result = subprocess.run(
             [str(MERGER), "--source", str(self.source), "--target", str(self.source)],
+            env=merger_env(),
             text=True,
             capture_output=True,
             check=False,
@@ -324,6 +337,7 @@ class MergeTest(unittest.TestCase):
 
         result = subprocess.run(
             [str(MERGER), "--source", str(bare), "--target", str(fresh_target)],
+            env=merger_env(),
             text=True,
             capture_output=True,
             check=False,
@@ -339,6 +353,7 @@ class MergeTest(unittest.TestCase):
 
         result = subprocess.run(
             [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
+            env=merger_env(),
             text=True,
             capture_output=True,
             check=False,
@@ -347,6 +362,18 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("Nothing to merge", result.stdout)
         self.assertEqual(b"### 09:30\n- kept\n", (self.target_memory / "keep.md").read_bytes())
+
+    def test_merge_messages_default_to_chinese_without_locale(self) -> None:
+        result = subprocess.run(
+            [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
+            env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("无需合并", result.stdout)
+        self.assertNotIn("Nothing to merge", result.stdout)
 
     def test_source_memory_symlink_file_fails_closed(self) -> None:
         """来源 `*.md` 若是软链, 必须失败, 禁止当空目录成功后清 worktree."""
@@ -358,6 +385,7 @@ class MergeTest(unittest.TestCase):
 
         result = subprocess.run(
             [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
+            env=merger_env(),
             text=True,
             capture_output=True,
             check=False,

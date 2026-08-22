@@ -78,6 +78,7 @@ class CodexReviewGateTest(unittest.TestCase):
             TMPDIR=str(self.tmp),
             # 隔离 Onevoke 配置, 避免读到本机真实模型设置.
             ONEVOKE_CONFIG=str(self.root / "onevoke-config.json"),
+            ONEVOKE_LANG="en",
             CODEX_HOME=str(self.codex_home),
             CODEX_REVIEW_BIN=str(self.fake_codex),
             CODEX_REVIEW_CHECK_INTERVAL_SECONDS="1",
@@ -137,6 +138,21 @@ class CodexReviewGateTest(unittest.TestCase):
 
         self.assertEqual(2, result.returncode)
         self.assertIn("Usage: onevoke-review.sh <agent>", result.stderr)
+
+    def test_default_locale_reports_chinese_usage(self) -> None:
+        env = {key: value for key, value in self.env.items() if key != "ONEVOKE_LANG"}
+        for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
+            env.pop(name, None)
+        result = subprocess.run(
+            [str(REVIEWER)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("用法: onevoke-review.sh", result.stderr)
+        self.assertNotIn("Usage: onevoke-review.sh", result.stderr)
 
     def test_unsupported_agent_is_rejected(self) -> None:
         result = subprocess.run(

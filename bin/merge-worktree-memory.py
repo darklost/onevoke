@@ -28,6 +28,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+_BIN = Path(__file__).resolve().parent
+if str(_BIN) not in sys.path:
+    sys.path.insert(0, str(_BIN))
+
+from onevoke_config import language_text
+
+t = language_text
+
 
 # 与 C locale 下 awk 的 [[:space:]] 对齐; 记录内不含换行.
 BLANK = re.compile(rb"^[ \t\v\f\r]*$")
@@ -45,8 +53,12 @@ SOURCE_STABLE_DELAY_SECONDS = 0.1
 
 
 def die(message: str) -> None:
-    print(f"ERROR: {message}", file=sys.stderr)
+    print(f"{t('错误', 'ERROR')}: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def die_both(zh: str, en: str) -> None:
+    die(t(zh, en))
 
 
 def split_lines(data: bytes) -> list[bytes]:
@@ -194,13 +206,22 @@ def scan_dirty_files(directory: Path) -> tuple[int, int]:
 def source_memory_identity(source_memory: Path) -> tuple[int, int]:
     """返回来源 memory 目录的 (dev, ino); 缺失/软链/非常规路径直接失败."""
     if source_memory.is_symlink():
-        die(f"source memory must not be a symlink: {source_memory}")
+        die_both(
+            f"来源 memory 不得为符号链接: {source_memory}",
+            f"source memory must not be a symlink: {source_memory}",
+        )
     try:
         info = source_memory.stat()
     except OSError as error:
-        die(f"source memory disappeared or unreadable: {source_memory}: {error}")
+        die_both(
+            f"来源 memory 消失或不可读: {source_memory}: {error}",
+            f"source memory disappeared or unreadable: {source_memory}: {error}",
+        )
     if not source_memory.is_dir():
-        die(f"source memory is not a directory: {source_memory}")
+        die_both(
+            f"来源 memory 不是目录: {source_memory}",
+            f"source memory is not a directory: {source_memory}",
+        )
     return info.st_dev, info.st_ino
 
 
@@ -210,14 +231,18 @@ def list_source_memory_files(source_memory: Path) -> list[Path]:
     files: list[Path] = []
     for path in sorted(source_memory.glob("*.md")):
         if path.is_symlink():
-            die(
+            die_both(
+                f"来源 memory 文件不得为符号链接: {path.name}; "
+                "拒绝成功退出以免 worktree 被清理",
                 f"source memory file must not be a symlink: {path.name}; "
-                "refusing success so the worktree is not cleaned"
+                "refusing success so the worktree is not cleaned",
             )
         if not path.is_file():
-            die(
+            die_both(
+                f"来源 memory 条目不是普通文件: {path.name}; "
+                "拒绝成功退出以免 worktree 被清理",
                 f"source memory entry is not a regular file: {path.name}; "
-                "refusing success so the worktree is not cleaned"
+                "refusing success so the worktree is not cleaned",
             )
         files.append(path)
     return files
@@ -225,54 +250,71 @@ def list_source_memory_files(source_memory: Path) -> list[Path]:
 
 def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
     """目录身份、成员与文件内容均须连续两次一致."""
-    last_error = "source memory files were unstable"
+    last_error = t(
+        "来源 memory 文件不稳定",
+        "source memory files were unstable",
+    )
     expected_identity = source_memory_identity(source_memory)
     for attempt in range(1, SOURCE_STABLE_ATTEMPTS + 1):
         try:
             if source_memory_identity(source_memory) != expected_identity:
-                die(
-                    f"source memory directory was replaced: {source_memory}"
+                die_both(
+                    f"来源 memory 目录被替换: {source_memory}",
+                    f"source memory directory was replaced: {source_memory}",
                 )
             names_first = [path.name for path in list_source_memory_files(source_memory)]
             first: dict[Path, bytes] = {}
             for path in list_source_memory_files(source_memory):
                 first[path] = path.read_bytes()
             if [path.name for path in first] != names_first:
-                last_error = (
+                last_error = t(
+                    f"列举来源 memory 时目录发生变化 (第 {attempt}/{SOURCE_STABLE_ATTEMPTS} 次)",
                     f"source memory directory changed while listing "
-                    f"(attempt {attempt}/{SOURCE_STABLE_ATTEMPTS})"
+                    f"(attempt {attempt}/{SOURCE_STABLE_ATTEMPTS})",
                 )
                 time.sleep(SOURCE_STABLE_DELAY_SECONDS)
                 continue
             time.sleep(SOURCE_STABLE_DELAY_SECONDS)
             if source_memory_identity(source_memory) != expected_identity:
-                die(
-                    f"source memory directory was replaced while reading: {source_memory}"
+                die_both(
+                    f"读取来源 memory 时目录被替换: {source_memory}",
+                    f"source memory directory was replaced while reading: {source_memory}",
                 )
             names_second = [path.name for path in list_source_memory_files(source_memory)]
             if names_second != names_first:
-                last_error = (
+                last_error = t(
+                    f"读取时来源 memory 目录成员发生变化 (第 {attempt}/{SOURCE_STABLE_ATTEMPTS} 次); "
+                    "Stop hook 可能仍在写入",
                     f"source memory directory membership changed while reading "
                     f"(attempt {attempt}/{SOURCE_STABLE_ATTEMPTS}); "
-                    "Stop hook may still be writing"
+                    "Stop hook may still be writing",
                 )
                 continue
             stable = True
             for path, data in first.items():
                 if not path.is_file():
-                    die(f"source memory file disappeared: {path}")
+                    die_both(
+                        f"来源 memory 文件消失: {path}",
+                        f"source memory file disappeared: {path}",
+                    )
                 if path.read_bytes() != data:
                     stable = False
-                    last_error = (
+                    last_error = t(
+                        f"读取时来源 memory 发生变化: {path.name} "
+                        f"(第 {attempt}/{SOURCE_STABLE_ATTEMPTS} 次); "
+                        "Stop hook 可能仍在写入",
                         f"source memory changed while reading: {path.name} "
                         f"(attempt {attempt}/{SOURCE_STABLE_ATTEMPTS}); "
-                        "Stop hook may still be writing"
+                        "Stop hook may still be writing",
                     )
                     break
             if stable:
                 return first
         except OSError as error:
-            last_error = f"failed to read source memory: {error}"
+            last_error = t(
+                f"读取来源 memory 失败: {error}",
+                f"failed to read source memory: {error}",
+            )
     die(last_error)
 
 
@@ -285,27 +327,37 @@ def assert_source_unchanged(
     try:
         identity = source_memory_identity(source_memory)
         if expected_identity is not None and identity != expected_identity:
-            die(
-                f"source memory directory was replaced after merge: {source_memory}"
+            die_both(
+                f"合并后来源 memory 目录被替换: {source_memory}",
+                f"source memory directory was replaced after merge: {source_memory}",
             )
         current_names = {path.name for path in list_source_memory_files(source_memory)}
     except OSError as error:
-        die(f"source memory unreadable after merge: {error}")
+        die_both(
+            f"合并后来源 memory 不可读: {error}",
+            f"source memory unreadable after merge: {error}",
+        )
     expected_names = {path.name for path in snapshots}
     if current_names != expected_names:
-        die(
+        die_both(
+            "合并后来源 memory 目录成员发生变化; 拒绝成功退出以免 worktree 被清理",
             "source memory directory membership changed after merge; "
-            "refusing success so the worktree is not cleaned"
+            "refusing success so the worktree is not cleaned",
         )
     for path, expected in snapshots.items():
         try:
             current = path.read_bytes()
         except OSError as error:
-            die(f"source memory unreadable after merge: {path}: {error}")
+            die_both(
+                f"合并后来源 memory 不可读: {path}: {error}",
+                f"source memory unreadable after merge: {path}: {error}",
+            )
         if current != expected:
-            die(
+            die_both(
+                f"合并后来源 memory 发生变化: {path.name}; "
+                "拒绝成功退出以免 worktree 被清理",
                 f"source memory changed after merge: {path.name}; "
-                "refusing success so the worktree is not cleaned"
+                "refusing success so the worktree is not cleaned",
             )
 
 
@@ -337,14 +389,20 @@ def resolve_roots(args: argparse.Namespace) -> tuple[str, str]:
     elif args.target:
         source_root = source_path
     else:
-        die("source must be inside a git worktree unless --target is provided")
+        die_both(
+            "未在 git worktree 内时必须提供 --target",
+            "source must be inside a git worktree unless --target is provided",
+        )
 
     if args.target:
         target_root = os.path.abspath(args.target)
     else:
         detected = detect_main_tree(source_root)
         if not detected:
-            die("could not detect main worktree; pass --target")
+            die_both(
+                "无法检测主 worktree; 请传入 --target",
+                "could not detect main worktree; pass --target",
+            )
         target_root = os.path.abspath(detected)
 
     return source_root, target_root
@@ -406,8 +464,13 @@ def merge_files(
             seen.add(entry_hash)
 
             if dry_run:
-                label = "entry" if kind == "entry" else "file entry"
-                print(f"Would merge {source_file.name} {label} {entry_hash}")
+                label = t("条目", "entry") if kind == "entry" else t("文件条目", "file entry")
+                print(
+                    t(
+                        f"将合并 {source_file.name} {label} {entry_hash}",
+                        f"Would merge {source_file.name} {label} {entry_hash}",
+                    )
+                )
             else:
                 with open(target_file, "ab") as handle:
                     handle.write(
@@ -418,18 +481,32 @@ def merge_files(
                     )
             merged += 1
 
-    print(f"Memory merge complete: merged={merged} skipped={skipped} empty_files={empty}")
-    print(f"Source: {source_root}")
-    print(f"Target: {target_root}")
+    print(
+        t(
+            f"记忆合并完成: merged={merged} skipped={skipped} empty_files={empty}",
+            f"Memory merge complete: merged={merged} skipped={skipped} empty_files={empty}",
+        )
+    )
+    print(t(f"来源: {source_root}", f"Source: {source_root}"))
+    print(t(f"目标: {target_root}", f"Target: {target_root}"))
 
     # 新条目写入前已清理. 不对目标整文件 rewrite, 避免与并发 append 竞态丢记录.
     if dry_run:
-        print(f"Would scan invalid UTF-8 in {target_memory} without rewriting live files")
+        print(
+            t(
+                f"将扫描 {target_memory} 中的非法 UTF-8, 不改写线上文件",
+                f"Would scan invalid UTF-8 in {target_memory} without rewriting live files",
+            )
+        )
     elif target_memory.is_dir():
         scanned, dirty = scan_dirty_files(target_memory)
         print(
-            f"scanned {scanned} markdown file(s), "
-            f"left {dirty} dirty file(s) unchanged to avoid concurrent loss"
+            t(
+                f"已扫描 {scanned} 个 markdown 文件, "
+                f"保留 {dirty} 个脏文件未改写以避免并发丢失",
+                f"scanned {scanned} markdown file(s), "
+                f"left {dirty} dirty file(s) unchanged to avoid concurrent loss",
+            )
         )
 
     if not dry_run:
@@ -441,15 +518,23 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
 
     # git 返回物理路径而 --target 可能是逻辑路径, 同一目录的两种写法要判等.
     if os.path.realpath(source_root) == os.path.realpath(target_root):
-        print("Source is the main worktree; no memory merge needed.")
+        print(t("来源即主 worktree; 无需合并 memory.", "Source is the main worktree; no memory merge needed."))
         return
 
     # 源 worktree 没有 .memsearch/memory 时是正常空操作: 常见于未装 memsearch,
     # 或已装但本 worktree 尚未产生记忆. 不创建任何目录, 以 0 退出.
     if not source_memory.is_dir() or source_memory.is_symlink():
         if source_memory.is_symlink():
-            die(f"source memory must not be a symlink: {source_memory}")
-        print(f"Nothing to merge: {source_memory} does not exist")
+            die_both(
+                f"来源 memory 不得为符号链接: {source_memory}",
+                f"source memory must not be a symlink: {source_memory}",
+            )
+        print(
+            t(
+                f"无需合并: {source_memory} 不存在",
+                f"Nothing to merge: {source_memory} does not exist",
+            )
+        )
         return
 
     source_identity = source_memory_identity(source_memory)
@@ -459,10 +544,20 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
     if not snapshots:
         # 再次确认空目录稳定后, 仍做一次合并后复核.
         if dry_run:
-            print(f"Nothing to merge: no memory files in {source_memory}")
+            print(
+                t(
+                    f"无需合并: {source_memory} 中没有 memory 文件",
+                    f"Nothing to merge: no memory files in {source_memory}",
+                )
+            )
             return
         assert_source_unchanged(source_memory, snapshots, source_identity)
-        print(f"Nothing to merge: no memory files in {source_memory}")
+        print(
+            t(
+                f"无需合并: {source_memory} 中没有 memory 文件",
+                f"Nothing to merge: no memory files in {source_memory}",
+            )
+        )
         return
 
     if dry_run:
@@ -481,7 +576,12 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         snapshots = read_stable_source_files(source_memory)
         if not snapshots:
             assert_source_unchanged(source_memory, snapshots, source_identity)
-            print(f"Nothing to merge: no memory files in {source_memory}")
+            print(
+                t(
+                    f"无需合并: {source_memory} 中没有 memory 文件",
+                    f"Nothing to merge: no memory files in {source_memory}",
+                )
+            )
             return
         merge_files(
             source_root, target_root, source_memory, snapshots, False, source_identity
@@ -490,21 +590,25 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Merge .memsearch/memory entries from a task worktree into the "
-        "main worktree. New entries are UTF-8 cleaned on write; existing target "
-        "files are scanned but not rewritten while they may still receive appends."
+        description=t(
+            "把任务 worktree 的 .memsearch/memory 条目并入主 worktree. "
+            "新条目写入前清理非法 UTF-8; 目标既有文件只扫描, 在仍可能被追加时不改写.",
+            "Merge .memsearch/memory entries from a task worktree into the "
+            "main worktree. New entries are UTF-8 cleaned on write; existing target "
+            "files are scanned but not rewritten while they may still receive appends.",
+        )
     )
     parser.add_argument(
         "--source", metavar="PATH",
-        help="Worktree to merge from. Defaults to the current directory.",
+        help=t("来源 worktree. 默认为当前目录.", "Worktree to merge from. Defaults to the current directory."),
     )
     parser.add_argument(
         "--target", metavar="PATH",
-        help="Main worktree to merge into. Defaults to the git common-dir parent.",
+        help=t("并入的主 worktree. 默认为 git common-dir 父目录.", "Main worktree to merge into. Defaults to the git common-dir parent."),
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Print what would be merged without writing files.",
+        help=t("只打印将合并的内容, 不写文件.", "Print what would be merged without writing files."),
     )
     args = parser.parse_args()
 

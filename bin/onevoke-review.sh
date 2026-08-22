@@ -4,10 +4,45 @@ set -euo pipefail
 umask 077
 export GIT_OPTIONAL_LOCKS=0
 
+onevoke_locale=""
+for _onevoke_var in ONEVOKE_LANG LC_ALL LC_MESSAGES LANG; do
+  eval "_onevoke_val=\${$_onevoke_var-}"
+  if [ -n "$_onevoke_val" ]; then
+    onevoke_locale="$_onevoke_val"
+    break
+  fi
+done
+case "$(printf '%s' "$onevoke_locale" | tr '[:upper:]' '[:lower:]')" in
+  en*) onevoke_zh=0 ;;
+  *) onevoke_zh=1 ;;
+esac
+
+t() {
+  if [ "$onevoke_zh" -eq 1 ]; then
+    printf '%s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
+user_error() {
+  if [ "$onevoke_zh" -eq 1 ]; then
+    echo "错误: $1" >&2
+  else
+    echo "Error: $1" >&2
+  fi
+}
+
 usage() {
-  echo "Usage: onevoke-review.sh <agent> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]" >&2
-  echo "Agents: codex, claude, grok" >&2
-  echo "Roles: PM, QA, CSA, CodeSecurityAnalyst, Hacker" >&2
+  if [ "$onevoke_zh" -eq 1 ]; then
+    echo "用法: onevoke-review.sh <agent> <CWD> <base-commit> <commit> <role> <task-goal|绝对 spec 路径> [review-context]" >&2
+    echo "Agent: codex, claude, grok" >&2
+    echo "角色: PM, QA, CSA, CodeSecurityAnalyst, Hacker" >&2
+  else
+    echo "Usage: onevoke-review.sh <agent> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]" >&2
+    echo "Agents: codex, claude, grok" >&2
+    echo "Roles: PM, QA, CSA, CodeSecurityAnalyst, Hacker" >&2
+  fi
 }
 
 if (($# < 1)); then
@@ -65,7 +100,7 @@ case "$AGENT" in
     INSPECTION_RULES="Use only read_file, grep, and list_dir to inspect code."
     ;;
   *)
-    echo "Error: unsupported reviewer agent: $AGENT" >&2
+    user_error "$(t "不支持的 reviewer agent: $AGENT" "unsupported reviewer agent: $AGENT")"
     exit 2
     ;;
 esac
@@ -102,7 +137,7 @@ readonly REASONING_EFFORT REVIEW_HOME HOME_VARIABLE CHECK_INTERVAL_VARIABLE
 readonly MAX_RUNTIME_VARIABLE OUTPUT_NAME INSPECTION_RULES
 
 fail() {
-  echo "Error: $1" >&2
+  user_error "$1"
   exit "${2:-2}"
 }
 
@@ -123,7 +158,7 @@ case "$ROLE_INPUT" in
   QA | qa) ROLE="QA" ;;
   CSA | csa | CodeSecurityAnalyst | codesecurityanalyst) ROLE="CSA" ;;
   Hacker | hacker) ROLE="Hacker" ;;
-  *) fail "unsupported role: $ROLE_INPUT" ;;
+  *) fail "$(t "不支持的角色: $ROLE_INPUT" "unsupported role: $ROLE_INPUT")" ;;
 esac
 readonly ROLE
 
@@ -133,25 +168,25 @@ readonly REVIEW_CONTEXT_TEXT
 TASK_SPEC_PATH=""
 if [[ "$TASK_INPUT" == /* ]]; then
   [[ -f "$TASK_INPUT" && -r "$TASK_INPUT" ]] ||
-    fail "spec path is not a readable file: $TASK_INPUT"
+    fail "$(t "spec 路径不是可读文件: $TASK_INPUT" "spec path is not a readable file: $TASK_INPUT")"
   TASK_SPEC_PATH=$(realpath -- "$TASK_INPUT") ||
-    fail "could not resolve spec path: $TASK_INPUT"
+    fail "$(t "无法解析 spec 路径: $TASK_INPUT" "could not resolve spec path: $TASK_INPUT")"
   TASK_CONTEXT="Authoritative spec file: $TASK_SPEC_PATH. Read it completely before reviewing."
 else
-  [[ -n "$TASK_INPUT" ]] || fail "task goal must not be empty"
+  [[ -n "$TASK_INPUT" ]] || fail "$(t "task goal 不能为空" "task goal must not be empty")"
   TASK_CONTEXT="Authoritative task goal: $TASK_INPUT"
 fi
 
-[[ "$CWD" == /* ]] || fail "CWD must be an absolute path: $CWD"
+[[ "$CWD" == /* ]] || fail "$(t "CWD 必须是绝对路径: $CWD" "CWD must be an absolute path: $CWD")"
 [[ "$REVIEW_HOME" == /* ]] ||
-  fail "$HOME_VARIABLE must be an absolute path: $REVIEW_HOME"
+  fail "$(t "$HOME_VARIABLE 必须是绝对路径: $REVIEW_HOME" "$HOME_VARIABLE must be an absolute path: $REVIEW_HOME")"
 [[ "$CHECK_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
-  fail "$CHECK_INTERVAL_VARIABLE must be a positive integer"
+  fail "$(t "$CHECK_INTERVAL_VARIABLE 必须是正整数" "$CHECK_INTERVAL_VARIABLE must be a positive integer")"
 [[ "$MAX_RUNTIME_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
-  fail "$MAX_RUNTIME_VARIABLE must be a positive integer"
+  fail "$(t "$MAX_RUNTIME_VARIABLE 必须是正整数" "$MAX_RUNTIME_VARIABLE must be a positive integer")"
 
 if ! ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null); then
-  fail "CWD is not inside a Git worktree: $CWD"
+  fail "$(t "CWD 不在 Git worktree 内: $CWD" "CWD is not inside a Git worktree: $CWD")"
 fi
 ROOT=$(cd "$ROOT" && pwd -P)
 readonly ROOT
@@ -163,11 +198,11 @@ paths_overlap() {
 
 TMP_ROOT=$(cd "${TMPDIR:-/tmp}" && pwd -P)
 [[ -d "$REVIEW_HOME" && -r "$REVIEW_HOME" && -w "$REVIEW_HOME" ]] ||
-  fail "$REVIEWER_NAME review home is not readable and writable: $REVIEW_HOME"
+  fail "$(t "$REVIEWER_NAME 审核目录不可读写: $REVIEW_HOME" "$REVIEWER_NAME review home is not readable and writable: $REVIEW_HOME")"
 STATE_ROOT=$(cd "$REVIEW_HOME" && pwd -P)
 readonly STATE_ROOT
 if paths_overlap "$ROOT" "$TMP_ROOT" || paths_overlap "$ROOT" "$STATE_ROOT"; then
-  fail "worktree overlaps a ${REVIEWER_NAME}-writable directory: $ROOT"
+  fail "$(t "worktree 与 ${REVIEWER_NAME} 可写目录重叠: $ROOT" "worktree overlaps a ${REVIEWER_NAME}-writable directory: $ROOT")"
 fi
 
 OID_LENGTH=$(git hash-object --stdin </dev/null | wc -c | tr -d ' ')
@@ -179,9 +214,9 @@ validate_commit() {
   local oid="$2"
   local type
 
-  [[ "$oid" =~ ^[0-9a-f]{$OID_LENGTH}$ ]] || fail "$name must be a full commit SHA"
-  type=$(git cat-file -t "$oid" 2>/dev/null) || fail "$name is not a Git object: $oid"
-  [[ "$type" == commit ]] || fail "$name is not a commit: $oid"
+  [[ "$oid" =~ ^[0-9a-f]{$OID_LENGTH}$ ]] || fail "$(t "$name 必须是完整 commit SHA" "$name must be a full commit SHA")"
+  type=$(git cat-file -t "$oid" 2>/dev/null) || fail "$(t "$name 不是 Git 对象: $oid" "$name is not a Git object: $oid")"
+  [[ "$type" == commit ]] || fail "$(t "$name 不是 commit: $oid" "$name is not a commit: $oid")"
 }
 
 git_status() {
@@ -192,20 +227,20 @@ git_status() {
 validate_commit base-commit "$BASE"
 validate_commit commit "$COMMIT"
 git merge-base --is-ancestor "$BASE" "$COMMIT" ||
-  fail "base-commit is not an ancestor of commit"
-[[ "$(git rev-parse HEAD)" == "$COMMIT" ]] || fail "worktree HEAD does not match commit"
-WORKTREE_STATUS=$(git_status) || fail "failed to inspect worktree status: $ROOT"
-[[ -z "$WORKTREE_STATUS" ]] || fail "worktree has uncommitted or untracked changes: $ROOT"
+  fail "$(t "base-commit 不是 commit 的祖先" "base-commit is not an ancestor of commit")"
+[[ "$(git rev-parse HEAD)" == "$COMMIT" ]] || fail "$(t "worktree HEAD 与 commit 不一致" "worktree HEAD does not match commit")"
+WORKTREE_STATUS=$(git_status) || fail "$(t "无法检查 worktree 状态: $ROOT" "failed to inspect worktree status: $ROOT")"
+[[ -z "$WORKTREE_STATUS" ]] || fail "$(t "worktree 有未提交或未跟踪文件: $ROOT" "worktree has uncommitted or untracked changes: $ROOT")"
 
 command -v "$REVIEW_BIN" >/dev/null 2>&1 ||
-  fail "$REVIEWER_NAME CLI is unavailable: $REVIEW_BIN" 127
+  fail "$(t "$REVIEWER_NAME CLI 不可用: $REVIEW_BIN" "$REVIEWER_NAME CLI is unavailable: $REVIEW_BIN")" 127
 
 RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/${AGENT}-review.XXXXXX")
 if [[ "$AGENT" == claude && -n "$TASK_SPEC_PATH" ]]; then
   CLAUDE_TASK_SPEC="$RUNTIME_DIR/task-spec.md"
   if ! install -m 0400 -- "$TASK_SPEC_PATH" "$CLAUDE_TASK_SPEC"; then
     rm -rf -- "$RUNTIME_DIR"
-    fail "could not snapshot spec file for Claude: $TASK_SPEC_PATH"
+    fail "$(t "无法为 Claude 快照 spec 文件: $TASK_SPEC_PATH" "could not snapshot spec file for Claude: $TASK_SPEC_PATH")"
   fi
   TASK_CONTEXT="Authoritative spec file: $CLAUDE_TASK_SPEC. Read it completely before reviewing."
 fi
@@ -244,7 +279,7 @@ cleanup() {
   trap - EXIT INT TERM
   stop_review
   if ((REVIEW_STARTED)) && ! target_is_unchanged; then
-    echo "Error: $REVIEWER_NAME review modified the target worktree: $ROOT" >&2
+    user_error "$(t "$REVIEWER_NAME 审核修改了目标 worktree: $ROOT" "$REVIEWER_NAME review modified the target worktree: $ROOT")"
     exit_code=2
   fi
   rm -rf -- "$RUNTIME_DIR"
@@ -482,7 +517,7 @@ next_check=$((START_SECONDS + CHECK_INTERVAL_SECONDS))
 while kill -0 "$REVIEW_PID" 2>/dev/null; do
   elapsed=$((SECONDS - START_SECONDS))
   if ((elapsed >= MAX_RUNTIME_SECONDS)); then
-    echo "Error: $REVIEWER_NAME review exceeded ${MAX_RUNTIME_SECONDS} seconds" >&2
+    user_error "$(t "$REVIEWER_NAME 审核超过 ${MAX_RUNTIME_SECONDS} 秒" "$REVIEWER_NAME review exceeded ${MAX_RUNTIME_SECONDS} seconds")"
     stop_review
     cat "$ERROR_FILE" >&2
     cat "$STDOUT_FILE"
@@ -490,7 +525,7 @@ while kill -0 "$REVIEW_PID" 2>/dev/null; do
     exit 124
   fi
   if ((SECONDS >= next_check)); then
-    echo "$REVIEWER_NAME review is still running after ${elapsed}s" >&2
+    echo "$(t "$REVIEWER_NAME 审核仍在运行, 已耗时 ${elapsed}s" "$REVIEWER_NAME review is still running after ${elapsed}s")" >&2
     tail -n 10 "$ERROR_FILE" >&2
     next_check=$((next_check + CHECK_INTERVAL_SECONDS))
   fi
@@ -514,7 +549,7 @@ fi
 if [[ "$AGENT" == codex ]]; then
   if [[ ! -s "$OUTPUT_FILE" ]]; then
     cat "$STDOUT_FILE"
-    fail "Codex review did not complete with review text" 1
+    fail "$(t "Codex 审核未完成, 缺少 review 文本" "Codex review did not complete with review text")" 1
   fi
   cat "$OUTPUT_FILE"
 elif [[ "$AGENT" == grok ]]; then
@@ -531,7 +566,7 @@ print(text)
 PY
   ); then
     cat "$OUTPUT_FILE"
-    fail "Grok review did not complete with review text" 1
+    fail "$(t "Grok 审核未完成, 缺少 review 文本" "Grok review did not complete with review text")" 1
   fi
   printf '%s\n' "$review_text"
 else
@@ -554,7 +589,7 @@ print(text)
 PY
   ); then
     cat "$OUTPUT_FILE"
-    fail "Claude review did not complete with review text" 1
+    fail "$(t "Claude 审核未完成, 缺少 review 文本" "Claude review did not complete with review text")" 1
   fi
   printf '%s\n' "$review_text"
 fi
