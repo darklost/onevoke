@@ -1787,6 +1787,20 @@ N/A
             tui._handle_mouse()
         self.assertEqual("todo", tui.model.current_state)
 
+        # 仅 PRESSED/RELEASED 时栏目标题仍可点击.
+        tui.model.column_index = 0
+        with mock.patch.object(
+            kanban_tui.curses,
+            "getmouse",
+            side_effect=[
+                (0, todo_x + 1, 2, 0, curses.BUTTON1_PRESSED),
+                (0, todo_x + 1, 2, 0, curses.BUTTON1_RELEASED),
+            ],
+        ):
+            tui._handle_mouse()
+            tui._handle_mouse()
+        self.assertEqual("todo", tui.model.current_state)
+
         # 点 backlog 第二张卡选中.
         backlog_state, backlog_x, _bw = layout[0]
         card_y = kanban_tui.BODY_TOP + kanban_tui.CARD_HEIGHT
@@ -2366,6 +2380,14 @@ N/A
         self.assertEqual(1, kanban_tui.display_column_to_char_index("a中b", 2))
         self.assertEqual(3, kanban_tui.char_index_to_display_column("a中b", 2))
         self.assertEqual(4, kanban_tui.display_column_to_caret_index("复制测试", 7))
+        self.assertEqual(
+            "hello",
+            kanban_tui.extract_mouse_char_selection(["hello"], (0, 4), (0, 0)),
+        )
+        self.assertEqual(
+            "",
+            kanban_tui.extract_mouse_char_selection(["hello"], (0, 2), (0, 2)),
+        )
         self.assertTrue(kanban_tui.mouse_left_pressed(curses.BUTTON1_PRESSED))
         self.assertFalse(kanban_tui.mouse_left_clicked(curses.BUTTON1_PRESSED))
         self.assertTrue(kanban_tui.mouse_left_clicked(curses.BUTTON1_CLICKED))
@@ -2438,7 +2460,7 @@ N/A
         self.assertEqual(["20260822-copy-task", "line two", "line", "line two"], copied)
 
         tui.mouse_select_anchor = ("board", "20260822-copy-task", 0, 0, 20)
-        tui.mouse_select_cursor = ("board", "20260822-copy-task", 0, 4, 20)
+        tui.mouse_select_cursor = ("board", "20260822-copy-task", 0, 3, 20)
         text = tui._extract_board_mouse_selection()
         self.assertEqual("复制测试", text)
 
@@ -2449,6 +2471,11 @@ N/A
         tui._handle_board_mouse(todo_x + 8, card_y, curses.BUTTON1_PRESSED)
         tui._handle_board_mouse(todo_x + 8, card_y, curses.BUTTON1_RELEASED)
         self.assertIn("复制测试", copied)
+        copied_len = len(copied)
+        tui._handle_board_mouse(todo_x + 5, card_y, curses.BUTTON1_PRESSED)
+        tui._handle_board_mouse(todo_x + 5, card_y, curses.BUTTON1_PRESSED)
+        tui._handle_board_mouse(todo_x + 5, card_y, curses.BUTTON1_RELEASED)
+        self.assertEqual(copied_len, len(copied))
 
         tui.detail = {
             "task_id": "20260822-copy-task",

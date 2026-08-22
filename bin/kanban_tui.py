@@ -483,6 +483,18 @@ def ordered_points(
     return cursor, anchor
 
 
+def extract_mouse_char_selection(
+    lines: list[str],
+    anchor: tuple[int, int],
+    cursor: tuple[int, int],
+) -> str:
+    start, end = ordered_points(anchor, cursor)
+    if start == end:
+        return ""
+    end = (end[0], end[1] + 1)
+    return extract_char_selection(lines, start, end)
+
+
 def extract_char_selection(
     lines: list[str],
     anchor: tuple[int, int],
@@ -1207,7 +1219,7 @@ class KanbanTui:
         lines = self._board_card_lines(task, content_width)
         anchor = (self.mouse_select_anchor[2], self.mouse_select_anchor[3])
         cursor = (self.mouse_select_cursor[2], self.mouse_select_cursor[3])
-        return extract_char_selection(lines, anchor, cursor)
+        return extract_mouse_char_selection(lines, anchor, cursor)
 
     def _extract_detail_mouse_selection(self) -> str:
         if self.mouse_select_anchor is None or self.mouse_select_cursor is None:
@@ -1476,19 +1488,20 @@ class KanbanTui:
             if self.mouse_selecting:
                 if self._mouse_selection_moved():
                     self._finish_mouse_selection()
-                    self.suppress_click = True
+                    if not (bstate & curses.BUTTON1_CLICKED):
+                        self.suppress_click = True
                 else:
                     self._reset_mouse_selection()
             return
         if self.mouse_selecting and (
             mouse_button1_dragging(bstate) or mouse_left_pressed(bstate)
         ):
-            hit = self._detail_hit(x, y, caret=True)
+            hit = self._detail_hit(x, y)
             if hit is not None:
                 self.mouse_select_cursor = hit
             return
         if mouse_left_pressed(bstate):
-            hit = self._detail_hit(x, y, caret=False)
+            hit = self._detail_hit(x, y)
             if hit is not None:
                 self.mouse_selecting = True
                 self.mouse_select_anchor = hit
@@ -1529,16 +1542,19 @@ class KanbanTui:
             if self.mouse_selecting:
                 if self._mouse_selection_moved():
                     self._finish_mouse_selection()
-                    self.suppress_click = True
+                    if not (bstate & curses.BUTTON1_CLICKED):
+                        self.suppress_click = True
                 else:
                     self._reset_mouse_selection()
                     if not (bstate & curses.BUTTON1_CLICKED):
                         self._handle_board_click(x, y, bstate)
+            elif not (bstate & curses.BUTTON1_CLICKED):
+                self._handle_board_click(x, y, bstate)
             return
         if self.mouse_selecting and (
             mouse_button1_dragging(bstate) or mouse_left_pressed(bstate)
         ):
-            hit = self._board_card_hit(x, y, caret=True)
+            hit = self._board_card_hit(x, y)
             if (
                 hit is not None
                 and self.mouse_select_anchor is not None
@@ -1547,7 +1563,7 @@ class KanbanTui:
                 self.mouse_select_cursor = hit
             return
         if mouse_left_pressed(bstate):
-            hit = self._board_card_hit(x, y, caret=False)
+            hit = self._board_card_hit(x, y)
             if hit is not None:
                 self.mouse_selecting = True
                 self.mouse_select_anchor = hit
@@ -2184,7 +2200,7 @@ class KanbanTui:
                 and self.detail_cursor[0] == line_index
             ):
                 cursor_col = self.detail_cursor[1]
-            if select_spans or cursor_col is not None:
+            if select_spans:
                 self._render_line_segments(
                     DETAIL_BODY_TOP + index,
                     0,
@@ -2202,7 +2218,19 @@ class KanbanTui:
                 else []
             )
             if not spans:
-                self._add(DETAIL_BODY_TOP + index, 0, line, base_attr, width - 1)
+                if cursor_col is not None:
+                    self._render_line_segments(
+                        DETAIL_BODY_TOP + index,
+                        0,
+                        line,
+                        base_attr,
+                        [],
+                        width=width - 1,
+                        highlight_attr=select_highlight,
+                        cursor_col=cursor_col,
+                    )
+                else:
+                    self._add(DETAIL_BODY_TOP + index, 0, line, base_attr, width - 1)
                 continue
             current = line_index == current_match_line
             match_attr = (
