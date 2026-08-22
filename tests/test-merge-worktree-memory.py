@@ -22,6 +22,7 @@ _LOCALE_VARS = ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
 def merger_env(**extra: str) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key not in _LOCALE_VARS}
     env["ONEVOKE_LANG"] = "en"
+    env.setdefault("ONEVOKE_CONFIG", str(Path(tempfile.gettempdir()) / "onevoke-merge-test-missing-config.json"))
     env.update(extra)
     return env
 

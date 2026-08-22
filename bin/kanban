@@ -25,6 +25,7 @@ from onevoke_config import (
     ConfigError,
     LocalizedArgumentParser,
     apply_language_argument,
+    bind_effective_language,
     effective_config,
     language_text,
     load_config,
@@ -32,6 +33,7 @@ from onevoke_config import (
 import kanban_web
 
 apply_language_argument(sys.argv[1:])
+bind_effective_language()
 t = language_text
 argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 

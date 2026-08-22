@@ -2,9 +2,11 @@
 
 set -eu
 
+_install_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+
 onevoke_lang=
 onevoke_lang_set=0
-onevoke_locale=${ONEVOKE_LANG:-${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}}
+onevoke_locale=
 case "${1-}" in
   --lang)
     onevoke_lang_set=1
@@ -21,6 +23,15 @@ case "$onevoke_lang" in
   cn) onevoke_locale=cn ;;
   en) onevoke_locale=en ;;
 esac
+if [ "$onevoke_lang_set" -eq 0 ] && command -v python3 >/dev/null 2>&1; then
+  _cfg_lang=$(python3 "$_install_root/bin/onevoke_config.py" configured-language 2>/dev/null || true)
+  case "$_cfg_lang" in
+    cn|en) onevoke_locale=$_cfg_lang ;;
+  esac
+fi
+if [ -z "$onevoke_locale" ]; then
+  onevoke_locale=${ONEVOKE_LANG:-${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}}
+fi
 case "$(printf '%s' "$onevoke_locale" | tr '[:upper:]' '[:lower:]')" in
   en*) onevoke_zh=0 ;;
   *) onevoke_zh=1 ;;

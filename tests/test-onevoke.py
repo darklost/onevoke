@@ -389,8 +389,60 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertIn("引导: 未完成", human.stdout)
         self.assertIn("看板 Agent: codex", human.stdout)
+        self.assertIn("默认语言: 中文", human.stdout)
         self.assertFalse(human.stdout.lstrip().startswith("{"))
         self.assertFalse(json.loads(machine.stdout)["welcome_complete"])
+        self.assertEqual("cn", json.loads(machine.stdout)["language"])
+
+    def test_config_language_overrides_env_without_cli(self) -> None:
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "language": "en",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        self.env["ONEVOKE_LANG"] = "zh"
+
+        status = self.run_command("config")
+
+        self.assertEqual(0, status.returncode, status.stderr)
+        self.assertIn("welcome: complete", status.stdout)
+        self.assertIn("language: English", status.stdout)
+
+    def test_cli_lang_overrides_config_language(self) -> None:
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "language": "en",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        self.env["ONEVOKE_LANG"] = "en"
+
+        status = self.run_command("--lang", "cn", "config")
+
+        self.assertEqual(0, status.returncode, status.stderr)
+        self.assertIn("引导: 已完成", status.stdout)
+        self.assertIn("默认语言: 英文", status.stdout)
+
+    def test_welcome_configures_language(self) -> None:
+        self.install_fake_environment(tmux=False)
+
+        returncode, output = self.run_on_tty("10\n2\n\n", "welcome")
+
+        self.assertEqual(0, returncode, output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("en", config["language"])
+        self.assertIn("默认输出语言?", output)
 
     def test_welcome_decline_keeps_existing_config_unchanged(self) -> None:
         self.install_fake_environment(tmux=True)
@@ -707,6 +759,17 @@ class OnevokeCommandTest(unittest.TestCase):
                         "review_stages": invalid,
                         "memsearch": {"enabled": False},
                     })
+
+        with self.assertRaises(onevoke_config.ConfigError):
+            onevoke_config.validate_config({
+                "schema_version": 1,
+                "welcome_complete": True,
+                "kanban_agent": "codex",
+                "launcher": "tmux",
+                "language": "fr",
+                "reviewers": {role: "codex" for role in ROLES},
+                "memsearch": {"enabled": False},
+            })
 
     def test_config_cli_prints_review_stages(self) -> None:
         config_module = ONEVOKE.parent / "onevoke_config.py"
@@ -1228,22 +1291,44 @@ class LanguageTextTest(unittest.TestCase):
     def setUp(self) -> None:
         self.saved = {
             name: os.environ.get(name)
-            for name in ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
+            for name in ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG", "ONEVOKE_CONFIG")
         }
         for name in self.saved:
             os.environ.pop(name, None)
+        self.temp = tempfile.TemporaryDirectory()
+        self.config_path = Path(self.temp.name) / "config.json"
+        os.environ["ONEVOKE_CONFIG"] = str(self.config_path)
         sys.path.insert(0, str(PROJECT_ROOT / "bin"))
         import onevoke_config
 
         self.config = onevoke_config
+        self._reset_language_state()
 
     def tearDown(self) -> None:
+        self.temp.cleanup()
         sys.path.pop(0)
         for name, value in self.saved.items():
             if value is None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+    def _reset_language_state(self) -> None:
+        self.config._cli_language_override = None
+        self.config._config_language = None
+
+    def _minimal_config(self, **overrides: object) -> dict:
+        payload = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "language": "cn",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        payload.update(overrides)
+        return payload
 
     def test_defaults_to_chinese_without_locale(self) -> None:
         self.assertTrue(self.config.language_is_chinese())
@@ -1261,6 +1346,7 @@ class LanguageTextTest(unittest.TestCase):
     def test_config_cli_help_defaults_to_chinese_without_locale(self) -> None:
         locale_vars = ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
         env = {key: value for key, value in os.environ.items() if key not in locale_vars}
+        env["ONEVOKE_CONFIG"] = str(self.config_path)
         result = subprocess.run(
             [sys.executable, str(PROJECT_ROOT / "bin" / "onevoke_config.py"), "--help"],
             env=env,
@@ -1271,6 +1357,56 @@ class LanguageTextTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("用法:", result.stdout)
         self.assertNotIn("usage:", result.stdout.lower())
+
+    def test_config_language_overrides_env(self) -> None:
+        self._reset_language_state()
+        self.config_path.write_text(
+            json.dumps(self._minimal_config(language="en")),
+            encoding="utf-8",
+        )
+        os.environ["ONEVOKE_LANG"] = "zh"
+        self.config.bind_effective_language()
+        self.assertFalse(self.config.language_is_chinese())
+
+    def test_cli_lang_overrides_config_language(self) -> None:
+        self._reset_language_state()
+        self.config_path.write_text(
+            json.dumps(self._minimal_config(language="en")),
+            encoding="utf-8",
+        )
+        os.environ["ONEVOKE_LANG"] = "en"
+        self.config.apply_language_argument(["--lang", "cn"])
+        self.config.bind_effective_language()
+        self.assertTrue(self.config.language_is_chinese())
+
+    def test_configured_language_subcommand(self) -> None:
+        missing = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "bin" / "onevoke_config.py"), "configured-language"],
+            env={**os.environ, "ONEVOKE_CONFIG": str(self.config_path)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, missing.returncode, missing.stderr)
+        self.assertEqual("", missing.stdout)
+
+        self.config_path.write_text(
+            json.dumps(self._minimal_config(language="en")),
+            encoding="utf-8",
+        )
+        present = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "bin" / "onevoke_config.py"), "configured-language"],
+            env={**os.environ, "ONEVOKE_CONFIG": str(self.config_path)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, present.returncode, present.stderr)
+        self.assertEqual("en\n", present.stdout)
+
+    def test_invalid_language_rejected(self) -> None:
+        with self.assertRaises(self.config.ConfigError):
+            self.config.validate_config(self._minimal_config(language="fr"))
 
 
 if __name__ == "__main__":

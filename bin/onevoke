@@ -22,15 +22,19 @@ from onevoke_config import (
     ConfigError,
     LocalizedArgumentParser,
     apply_language_argument,
+    bind_config_language,
+    bind_effective_language,
     config_path,
     default_config,
     effective_config,
     language_text,
     load_config,
+    resolve_language,
     save_config,
 )
 
 apply_language_argument(sys.argv[1:])
+bind_effective_language()
 t = language_text
 argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 
@@ -48,6 +52,7 @@ REVIEW_STAGE_LABELS = {
     "skip": ("默认跳过", "skip by default"),
     "required": ("默认必跑", "required when review runs"),
 }
+LANGUAGE_LABELS = {"cn": ("中文", "Chinese"), "en": ("英文", "English")}
 
 
 class OnevokeError(Exception):
@@ -497,6 +502,27 @@ def format_review_stages_summary(stages: dict[str, str]) -> str:
     return " ".join(f"{role}={stages[role]}" for role in REVIEW_ROLES)
 
 
+def language_choices() -> list[tuple[str, str]]:
+    return [
+        (code, t(LANGUAGE_LABELS[code][0], LANGUAGE_LABELS[code][1]))
+        for code in LANGUAGES
+    ]
+
+
+def format_language_summary(language: str) -> str:
+    labels = LANGUAGE_LABELS.get(language, (language, language))
+    return t(labels[0], labels[1])
+
+
+def edit_language(config: dict[str, Any]) -> None:
+    config["language"] = ask_choice(
+        t("默认输出语言?", "Default output language?"),
+        language_choices(),
+        config["language"],
+    )
+    bind_config_language(config)
+
+
 def edit_review_stages(config: dict[str, Any]) -> None:
     role = ask_choice(
         t("要配置哪个审核角色的环节策略?", "Which review role should be configured?"),
@@ -723,6 +749,10 @@ def print_welcome_menu(config: dict[str, Any]) -> None:
         f"  9. {t('审核环节', 'Review stages')}: {format_review_stages_summary(config['review_stages'])}",
         file=sys.stderr,
     )
+    print(
+        f"  10. {t('默认语言', 'Default language')}: {format_language_summary(config['language'])}",
+        file=sys.stderr,
+    )
     print(t("  直接回车保存当前配置; 输入 q 退出且不保存.", "  Press Enter to save; enter q to quit without saving."), file=sys.stderr)
 
 
@@ -731,8 +761,8 @@ def ask_welcome_action(config: dict[str, Any]) -> str:
         print_welcome_menu(config)
         print(
             t(
-                "请选择要修改的项目 [1-9], 直接回车保存, q 取消: ",
-                "Choose an item to change [1-9], press Enter to save, or q to cancel: ",
+                "请选择要修改的项目 [1-10], 直接回车保存, q 取消: ",
+                "Choose an item to change [1-10], press Enter to save, or q to cancel: ",
             ),
             end="",
             file=sys.stderr,
@@ -746,7 +776,7 @@ def ask_welcome_action(config: dict[str, Any]) -> str:
             return "save"
         if answer == "q":
             return "cancel"
-        if answer.isdigit() and 1 <= int(answer) <= 9:
+        if answer.isdigit() and 1 <= int(answer) <= 10:
             return answer
         print(t("输入无效, 请重新选择.", "Invalid input; choose again."), file=sys.stderr)
 
@@ -805,6 +835,11 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         )
     config["memsearch"]["enabled"] = existing["memsearch"]["enabled"]
     config["review_stages"] = dict(existing["review_stages"])
+    if config_path().is_file():
+        config["language"] = existing["language"]
+    else:
+        config["language"] = resolve_language()
+    bind_config_language(config)
 
     while True:
         action = ask_welcome_action(config)
@@ -840,6 +875,8 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
             config["memsearch"]["enabled"] = enabled
         elif action == "9":
             edit_review_stages(config)
+        elif action == "10":
+            edit_language(config)
 
     selected_agent = config["kanban_agent"]
     integrated, detail = rules_integration(selected_agent)
@@ -933,6 +970,7 @@ def print_config(config: dict[str, Any]) -> None:
         print(f"{role}: {reviewer} {model} ({review_entry['effort']})")
     stages = " ".join(f"{role}={effective['review_stages'][role]}" for role in REVIEW_ROLES)
     print(f"{t('审核环节', 'review stages')}: {stages}")
+    print(f"{t('默认语言', 'language')}: {format_language_summary(effective['language'])}")
     print(f"MemSearch: {t('启用', 'enabled') if effective['memsearch']['enabled'] else t('未启用', 'disabled')}")
 
 

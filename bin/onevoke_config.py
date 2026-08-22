@@ -50,14 +50,54 @@ ARGPARSE_ZH = {
 }
 
 
+_cli_language_override: str | None = None
+_config_language: str | None = None
+
+
 def apply_language_argument(arguments: list[str]) -> None:
+    global _cli_language_override
     if not arguments:
         return
     value = arguments[1] if arguments[0] == "--lang" and len(arguments) > 1 else None
     if arguments[0].startswith("--lang="):
         value = arguments[0].partition("=")[2]
     if value in LANGUAGES:
+        _cli_language_override = value
         os.environ["ONEVOKE_LANG"] = value
+
+
+def bind_config_language(config: dict[str, Any] | None) -> None:
+    global _config_language
+    if not config:
+        _config_language = None
+        return
+    language = config.get("language")
+    _config_language = language if language in LANGUAGES else None
+
+
+def configured_language() -> str | None:
+    """Return language from config.json, or None when the file is absent."""
+    try:
+        path = config_path()
+        if not path.is_file():
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return validate_config(raw)["language"]
+    except (OSError, UnicodeError, json.JSONDecodeError, ConfigError):
+        return None
+
+
+def resolve_language() -> str:
+    if _cli_language_override in LANGUAGES:
+        return _cli_language_override
+    if _config_language in LANGUAGES:
+        return _config_language
+    locale = _effective_locale().lower()
+    if locale.startswith("en"):
+        return "en"
+    if locale:
+        return "cn"
+    return "cn"
 
 
 def _effective_locale() -> str:
@@ -71,13 +111,18 @@ def _effective_locale() -> str:
     )
 
 
+def bind_effective_language() -> None:
+    try:
+        if config_path().is_file():
+            bind_config_language(load_config())
+        else:
+            bind_config_language(None)
+    except ConfigError:
+        bind_config_language(None)
+
+
 def language_is_chinese() -> bool:
-    locale = _effective_locale().lower()
-    if not locale:
-        return True
-    if locale.startswith("en"):
-        return False
-    return True
+    return resolve_language() == "cn"
 
 
 def language_text(chinese: str, english: str) -> str:
@@ -139,6 +184,7 @@ def default_config() -> dict[str, Any]:
         "review_stages": default_review_stages(),
         "models": default_models(),
         "memsearch": {"enabled": False},
+        "language": "cn",
     }
 
 
@@ -265,6 +311,8 @@ def validate_config(raw: object) -> dict[str, Any]:
     if not isinstance(memsearch, dict) or not isinstance(memsearch.get("enabled"), bool):
         raise ConfigError(language_text("memsearch.enabled 必须是 boolean", "memsearch.enabled must be a boolean"))
 
+    language = _validate_choice(raw.get("language", "cn"), LANGUAGES, "language")
+
     return {
         "schema_version": SCHEMA_VERSION,
         "welcome_complete": welcome_complete,
@@ -274,6 +322,7 @@ def validate_config(raw: object) -> dict[str, Any]:
         "review_stages": review_stages,
         "models": models,
         "memsearch": {"enabled": memsearch["enabled"]},
+        "language": language,
     }
 
 
@@ -342,11 +391,23 @@ def main(argv: list[str]) -> int:
             "print four lines: auto|skip|required for PM/CSA/Hacker/QA",
         ),
     )
+    commands.add_parser(
+        "configured-language",
+        help=language_text(
+            "输出配置中的 language (cn|en)",
+            "print configured language (cn|en)",
+        ),
+    )
     args = parser.parse_args(argv)
     if args.command == "review-model":
         entry = effective_config()["models"]["review"][args.agent]
         print(entry["model"])
         print(entry["effort"])
+        return 0
+    if args.command == "configured-language":
+        language = configured_language()
+        if language:
+            print(language)
         return 0
     stages = effective_config()["review_stages"]
     for role in REVIEW_ROLES:

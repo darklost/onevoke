@@ -4,14 +4,24 @@ set -euo pipefail
 umask 077
 export GIT_OPTIONAL_LOCKS=0
 
+_review_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+
 onevoke_locale=""
-for _onevoke_var in ONEVOKE_LANG LC_ALL LC_MESSAGES LANG; do
-  eval "_onevoke_val=\${$_onevoke_var-}"
-  if [ -n "$_onevoke_val" ]; then
-    onevoke_locale="$_onevoke_val"
-    break
-  fi
-done
+if command -v python3 >/dev/null 2>&1; then
+  _cfg_lang=$(python3 "$_review_root/onevoke_config.py" configured-language 2>/dev/null || true)
+  case "$_cfg_lang" in
+    cn|en) onevoke_locale=$_cfg_lang ;;
+  esac
+fi
+if [ -z "$onevoke_locale" ]; then
+  for _onevoke_var in ONEVOKE_LANG LC_ALL LC_MESSAGES LANG; do
+    eval "_onevoke_val=\${$_onevoke_var-}"
+    if [ -n "$_onevoke_val" ]; then
+      onevoke_locale="$_onevoke_val"
+      break
+    fi
+  done
+fi
 case "$(printf '%s' "$onevoke_locale" | tr '[:upper:]' '[:lower:]')" in
   en*) onevoke_zh=0 ;;
   *) onevoke_zh=1 ;;

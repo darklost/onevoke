@@ -32,7 +32,7 @@ _BIN = Path(__file__).resolve().parent
 if str(_BIN) not in sys.path:
     sys.path.insert(0, str(_BIN))
 
-from onevoke_config import ARGPARSE_ZH, LocalizedArgumentParser, language_text
+from onevoke_config import ARGPARSE_ZH, LocalizedArgumentParser, bind_effective_language, language_text
 
 t = language_text
 
@@ -589,6 +589,7 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
 
 
 def main() -> int:
+    bind_effective_language()
     import argparse
 
     argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
