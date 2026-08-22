@@ -77,14 +77,23 @@ def bind_config_language(config: dict[str, Any] | None) -> None:
     _config_language = language if language in LANGUAGES else None
 
 
+def _explicit_config_language(raw: object) -> str | None:
+    if not isinstance(raw, dict) or not raw.get("welcome_complete"):
+        return None
+    if "language" not in raw:
+        return None
+    language = raw.get("language")
+    return language if language in LANGUAGES else None
+
+
 def configured_language() -> str | None:
-    """Return language from config.json, or None when the file is absent."""
+    """Return explicitly saved language from config.json, or None."""
     try:
         path = config_path()
         if not path.is_file():
             return None
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return validate_config(raw)["language"]
+        return _explicit_config_language(raw)
     except (OSError, UnicodeError, json.JSONDecodeError, ConfigError):
         return None
 
@@ -115,11 +124,17 @@ def _effective_locale() -> str:
 
 def bind_effective_language() -> None:
     try:
-        if config_path().is_file():
-            bind_config_language(load_config())
-        else:
+        path = config_path()
+        if not path.is_file():
             bind_config_language(None)
-    except ConfigError:
+            return
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        language = _explicit_config_language(raw)
+        if language is None:
+            bind_config_language(None)
+        else:
+            bind_config_language({"language": language})
+    except (OSError, UnicodeError, json.JSONDecodeError, ConfigError):
         bind_config_language(None)
 
 
@@ -376,6 +391,7 @@ def save_config(config: dict[str, Any]) -> Path:
 def main(argv: list[str]) -> int:
     """查询入口, 目前只供 onevoke-review.sh 读取 review 模型配置."""
     apply_language_argument(argv)
+    bind_effective_language()
     import argparse
 
     argparse._ = lambda message: language_text(ARGPARSE_ZH.get(message, message), message)

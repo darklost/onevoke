@@ -414,6 +414,25 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("welcome: complete", status.stdout)
         self.assertIn("language: English", status.stdout)
 
+    def test_legacy_config_without_language_respects_env(self) -> None:
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        self.env["ONEVOKE_LANG"] = "en"
+
+        status = self.run_command("config")
+
+        self.assertEqual(0, status.returncode, status.stderr)
+        self.assertIn("welcome: complete", status.stdout)
+        self.assertIn("language: English", status.stdout)
+
     def test_cli_lang_overrides_config_language(self) -> None:
         config = {
             "schema_version": 1,
@@ -1415,6 +1434,19 @@ class LanguageTextTest(unittest.TestCase):
         )
         self.assertEqual(0, present.returncode, present.stderr)
         self.assertEqual("en\n", present.stdout)
+
+        legacy = self._minimal_config()
+        legacy.pop("language", None)
+        self.config_path.write_text(json.dumps(legacy), encoding="utf-8")
+        legacy_result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "bin" / "onevoke_config.py"), "configured-language"],
+            env={**os.environ, "ONEVOKE_CONFIG": str(self.config_path)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, legacy_result.returncode, legacy_result.stderr)
+        self.assertEqual("", legacy_result.stdout)
 
     def test_invalid_language_rejected(self) -> None:
         with self.assertRaises(self.config.ConfigError):

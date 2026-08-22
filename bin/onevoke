@@ -25,6 +25,7 @@ from onevoke_config import (
     bind_config_language,
     bind_effective_language,
     config_path,
+    configured_language,
     default_config,
     effective_config,
     language_text,
@@ -836,7 +837,8 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
     config["memsearch"]["enabled"] = existing["memsearch"]["enabled"]
     config["review_stages"] = dict(existing["review_stages"])
     if config_valid:
-        config["language"] = existing["language"]
+        stored_language = configured_language()
+        config["language"] = stored_language if stored_language else resolve_language()
     else:
         config["language"] = resolve_language()
     bind_config_language(config)
@@ -972,7 +974,9 @@ def print_config(config: dict[str, Any]) -> None:
         print(f"{role}: {reviewer} {model} ({review_entry['effort']})")
     stages = " ".join(f"{role}={effective['review_stages'][role]}" for role in REVIEW_ROLES)
     print(f"{t('审核环节', 'review stages')}: {stages}")
-    print(f"{t('默认语言', 'language')}: {format_language_summary(effective['language'])}")
+    stored_language = configured_language()
+    language = stored_language if stored_language else resolve_language()
+    print(f"{t('默认语言', 'language')}: {format_language_summary(language)}")
     print(f"MemSearch: {t('启用', 'enabled') if effective['memsearch']['enabled'] else t('未启用', 'disabled')}")
 
 
