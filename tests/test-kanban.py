@@ -2540,6 +2540,12 @@ N/A
         tui._handle_search_mouse(5, 3, curses.BUTTON1_RELEASED)
         self.assertFalse(tui.searching)
 
+        tui.detail = {"task_id": "x", "document": "only"}
+        tui.detail_cursor = (5, 0)
+        tui.detail_scroll = 0
+        tui._scroll_detail_by(3)
+        self.assertEqual((0, 0), tui.detail_cursor)
+
     def test_tui_theme_key_cycles_and_run_rejects_unknown_theme(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:

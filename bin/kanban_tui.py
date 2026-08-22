@@ -859,6 +859,7 @@ class KanbanTui:
             except curses.error:
                 key = None
             if key == curses.KEY_RESIZE:
+                self._clamp_detail_cursor()
                 self._render(force=True)
             elif key == curses.KEY_MOUSE:
                 self._handle_mouse()
@@ -1039,6 +1040,7 @@ class KanbanTui:
         if next_detail == self.detail:
             return bool(previous_error)
         self.detail = next_detail
+        self._clamp_detail_cursor()
         matches = self._detail_matches()
         if matches:
             self.detail_match_index = min(self.detail_match_index, len(matches) - 1)
@@ -1364,19 +1366,34 @@ class KanbanTui:
             self.detail_query,
         )
 
+    def _clamp_detail_cursor(self) -> None:
+        lines = self._detail_lines()
+        if not lines:
+            self.detail_cursor = (0, 0)
+            return
+        line, col = self.detail_cursor
+        line = max(0, min(line, len(lines) - 1))
+        col = max(0, min(col, len(lines[line])))
+        self.detail_cursor = (line, col)
+
     def _scroll_detail_by(self, delta: int) -> None:
         lines = self._detail_lines()
         body_height = self._detail_body_height()
+        if not lines:
+            self.detail_scroll = 0
+            self.detail_cursor = (0, 0)
+            return
         maximum_scroll = max(0, len(lines) - body_height)
         self.detail_scroll = max(0, min(self.detail_scroll + delta, maximum_scroll))
         line, col = self.detail_cursor
-        visible_end = self.detail_scroll + body_height - 1
+        line = max(0, min(line, len(lines) - 1))
+        visible_end = min(self.detail_scroll + body_height - 1, len(lines) - 1)
         if line < self.detail_scroll:
             line = self.detail_scroll
             col = 0
         elif line > visible_end:
             line = visible_end
-            col = min(col, len(lines[line]) if lines else 0)
+        col = min(col, len(lines[line]))
         self.detail_cursor = (line, col)
 
     def _reveal_detail_line(self, line_index: int, lines: list[str]) -> None:
@@ -1516,6 +1533,7 @@ class KanbanTui:
                 self.mouse_select_cursor = hit
             return
         if mouse_left_pressed(bstate):
+            self._reset_detail_selection()
             hit = self._detail_hit(x, y)
             if hit is not None:
                 self.mouse_selecting = True
