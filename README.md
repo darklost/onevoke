@@ -12,7 +12,7 @@
 ./install.sh
 ```
 
-安装过程会显示当前配置菜单, 可按需修改默认 Agent、各角色 Reviewer、启动方式、模型与推理档位或 MemSearch; 直接回车保存当前值, 输入 `q` 退出且不保存.
+安装过程会显示当前配置菜单, 可按需修改默认 Agent、各角色 Reviewer、启动方式、模型与推理档位、MemSearch 或审核环节; 直接回车保存当前值, 输入 `q` 退出且不保存.
 审核统一由 `onevoke-review.sh` 执行; 新增 Reviewer 时扩展该入口, 不新增按 Agent 命名的脚本.
 
 如果 `~/.agents/AGENTS.md` 不存在, 安装器会将其链接到 `ONEVOKE-AGENTS.md`; 已有文件不会修改.

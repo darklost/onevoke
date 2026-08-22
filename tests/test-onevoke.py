@@ -435,6 +435,19 @@ class OnevokeCommandTest(unittest.TestCase):
         )
         self.assertNotIn("审核 Grok", output)
 
+    def test_welcome_configures_review_stages(self) -> None:
+        self.install_fake_environment(tmux=True)
+
+        returncode, output = self.run_on_tty("9\n2\n2\n\n", "welcome")
+
+        self.assertEqual(0, returncode, output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("skip", config["review_stages"]["CSA"])
+        for role in ROLES:
+            if role == "CSA":
+                continue
+            self.assertEqual("auto", config["review_stages"][role], role)
+
     def test_welcome_reset_changes_one_item_and_keeps_other_values(self) -> None:
         self.install_fake_environment(tmux=True)
         existing = {

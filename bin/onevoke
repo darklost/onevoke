@@ -18,6 +18,7 @@ from onevoke_config import (
     LANGUAGES,
     REVIEW_AGENTS,
     REVIEW_ROLES,
+    REVIEW_STAGE_MODES,
     ConfigError,
     LocalizedArgumentParser,
     apply_language_argument,
@@ -42,6 +43,11 @@ COMMANDS = (
 )
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
+REVIEW_STAGE_LABELS = {
+    "auto": ("按档案自动", "follow audit profile"),
+    "skip": ("默认跳过", "skip by default"),
+    "required": ("默认必跑", "required when review runs"),
+}
 
 
 class OnevokeError(Exception):
@@ -480,6 +486,33 @@ def choices_with_current(choices: list[tuple[str, str]], current: str) -> list[t
     return [(current, f"{AGENT_LABELS[current]} ({unavailable})"), *choices]
 
 
+def review_stage_choices() -> list[tuple[str, str]]:
+    return [
+        (mode, t(REVIEW_STAGE_LABELS[mode][0], REVIEW_STAGE_LABELS[mode][1]))
+        for mode in REVIEW_STAGE_MODES
+    ]
+
+
+def format_review_stages_summary(stages: dict[str, str]) -> str:
+    return " ".join(f"{role}={stages[role]}" for role in REVIEW_ROLES)
+
+
+def edit_review_stages(config: dict[str, Any]) -> None:
+    role = ask_choice(
+        t("要配置哪个审核角色的环节策略?", "Which review role should be configured?"),
+        [
+            (name, f"{name} ({config['review_stages'][name]})")
+            for name in REVIEW_ROLES
+        ],
+        REVIEW_ROLES[0],
+    )
+    config["review_stages"][role] = ask_choice(
+        t(f"{role} 的默认环节策略?", f"Default stage policy for {role}?"),
+        review_stage_choices(),
+        config["review_stages"][role],
+    )
+
+
 def ask_text(prompt: str, default: str) -> str:
     shown = default if default else t("(空, 用 CLI 默认)", "(empty; CLI default)")
     print(f"\n{color('1;36', prompt)} [{shown}]: ", end="", file=sys.stderr, flush=True)
@@ -686,6 +719,10 @@ def print_welcome_menu(config: dict[str, Any]) -> None:
         print(f"     review {reviewer}: {model} ({entry['effort']})", file=sys.stderr)
     memory = t("启用", "enabled") if config["memsearch"]["enabled"] else t("未启用", "disabled")
     print(f"  8. MemSearch: {memory}", file=sys.stderr)
+    print(
+        f"  9. {t('审核环节', 'Review stages')}: {format_review_stages_summary(config['review_stages'])}",
+        file=sys.stderr,
+    )
     print(t("  直接回车保存当前配置; 输入 q 退出且不保存.", "  Press Enter to save; enter q to quit without saving."), file=sys.stderr)
 
 
@@ -694,8 +731,8 @@ def ask_welcome_action(config: dict[str, Any]) -> str:
         print_welcome_menu(config)
         print(
             t(
-                "请选择要修改的项目 [1-8], 直接回车保存, q 取消: ",
-                "Choose an item to change [1-8], press Enter to save, or q to cancel: ",
+                "请选择要修改的项目 [1-9], 直接回车保存, q 取消: ",
+                "Choose an item to change [1-9], press Enter to save, or q to cancel: ",
             ),
             end="",
             file=sys.stderr,
@@ -709,7 +746,7 @@ def ask_welcome_action(config: dict[str, Any]) -> str:
             return "save"
         if answer == "q":
             return "cancel"
-        if answer.isdigit() and 1 <= int(answer) <= 8:
+        if answer.isdigit() and 1 <= int(answer) <= 9:
             return answer
         print(t("输入无效, 请重新选择.", "Invalid input; choose again."), file=sys.stderr)
 
@@ -801,6 +838,8 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
                     continue
                 install_memsearch_for(memory_agent)
             config["memsearch"]["enabled"] = enabled
+        elif action == "9":
+            edit_review_stages(config)
 
     selected_agent = config["kanban_agent"]
     integrated, detail = rules_integration(selected_agent)
