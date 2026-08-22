@@ -35,6 +35,11 @@
 - `PM`, `CSA`, `Hacker`, `QA` 各取 Onevoke 配置中的 reviewer, 未完成 welcome 时四者都回落到 Codex.
 - 未被用户指令, 项目规则或用户自己的全局规则覆盖时, 审核一律通过 `onevoke review` 分发. 同一角色一轮审核内不换 Agent; 不同角色可用不同 Agent.
 
+### 审核环节
+
+- 全局默认环节策略保存在 `~/.config/onevoke/config.json` 的 `review_stages`, 用 `onevoke config` 查看. 每个角色取 `auto`, `skip` 或 `required` 之一, 缺省为 `auto`.
+- 环节是否实际运行, 按 `~/.agents/REVIEW-RULES.md`「审核环节」的优先级链解析; 项目级 `AGENTS.md` 或 `CLAUDE.md`, 以及当前任务的用户指令可覆盖本机配置.
+
 ### 看板任务完成
 
 - 实现, 验证和必要审核通过后, 直接按 `~/.agents/GIT-RULES.md`「集成与清理」fast-forward 合回 `develop`, 不请求验收也不等确认; 合回并清理完才填 `结果: completed`, 迁 `done/`, 再发「完成报告」.

@@ -17,6 +17,7 @@ SCHEMA_VERSION = 1
 EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
+REVIEW_STAGE_MODES = ("auto", "skip", "required")
 LAUNCHERS = ("tmux", "tmux-session", "foreground")
 LANGUAGES = ("cn", "en")
 # model 允许空字符串, 表示用对应 CLI 自己的默认模型.
@@ -111,6 +112,10 @@ def default_models() -> dict[str, Any]:
     }
 
 
+def default_review_stages() -> dict[str, str]:
+    return {role: "auto" for role in REVIEW_ROLES}
+
+
 def default_config() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -118,6 +123,7 @@ def default_config() -> dict[str, Any]:
         "kanban_agent": "codex",
         "launcher": "tmux",
         "reviewers": {role: "codex" for role in REVIEW_ROLES},
+        "review_stages": default_review_stages(),
         "models": default_models(),
         "memsearch": {"enabled": False},
     }
@@ -133,6 +139,28 @@ def _validate_choice(value: object, choices: tuple[str, ...], name: str) -> str:
             )
         )
     return value
+
+
+def _validate_review_stages(raw: object) -> dict[str, str]:
+    stages = default_review_stages()
+    if raw is None:
+        return stages
+    if not isinstance(raw, dict):
+        raise ConfigError(language_text(
+            "review_stages 必须是 JSON object",
+            "review_stages must be a JSON object",
+        ))
+    unknown = set(raw) - set(REVIEW_ROLES)
+    if unknown:
+        raise ConfigError(language_text(
+            f"review_stages 含未知角色: {', '.join(sorted(unknown))}",
+            f"review_stages has unknown roles: {', '.join(sorted(unknown))}",
+        ))
+    for role in REVIEW_ROLES:
+        if role not in raw:
+            continue
+        stages[role] = _validate_choice(raw[role], REVIEW_STAGE_MODES, f"review_stages.{role}")
+    return stages
 
 
 def _validate_models(raw: object) -> dict[str, Any]:
@@ -214,6 +242,8 @@ def validate_config(raw: object) -> dict[str, Any]:
         for role in REVIEW_ROLES
     }
 
+    review_stages = _validate_review_stages(raw.get("review_stages"))
+
     models = _validate_models(raw["models"]) if "models" in raw else default_models()
 
     memsearch = raw.get("memsearch")
@@ -226,6 +256,7 @@ def validate_config(raw: object) -> dict[str, Any]:
         "kanban_agent": kanban_agent,
         "launcher": launcher,
         "reviewers": validated_reviewers,
+        "review_stages": review_stages,
         "models": models,
         "memsearch": {"enabled": memsearch["enabled"]},
     }
@@ -286,10 +317,21 @@ def main(argv: list[str]) -> int:
         help=language_text("输出两行: <model> 与 <effort>", "print two lines: <model> and <effort>"),
     )
     review.add_argument("agent", choices=REVIEW_AGENTS)
+    stages = commands.add_parser(
+        "review-stages",
+        help=language_text(
+            "输出四行: PM/CSA/Hacker/QA 的 auto|skip|required",
+            "print four lines: auto|skip|required for PM/CSA/Hacker/QA",
+        ),
+    )
     args = parser.parse_args(argv)
-    entry = effective_config()["models"]["review"][args.agent]
-    print(entry["model"])
-    print(entry["effort"])
+    if args.command == "review-model":
+        entry = effective_config()["models"]["review"][args.agent]
+        print(entry["model"])
+        print(entry["effort"])
+        return 0
+    for role in REVIEW_ROLES:
+        print(effective_config()["review_stages"][role])
     return 0
 
 

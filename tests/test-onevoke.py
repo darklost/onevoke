@@ -614,6 +614,94 @@ class OnevokeCommandTest(unittest.TestCase):
         rejected = query("other")
         self.assertEqual(2, rejected.returncode)
 
+    def test_review_stages_defaults_and_validation(self) -> None:
+        sys.path.insert(0, str(ONEVOKE.parent))
+        try:
+            import onevoke_config
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual(
+            {role: "auto" for role in ROLES},
+            onevoke_config.default_review_stages(),
+        )
+        validated = onevoke_config.validate_config({
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        })
+        self.assertEqual({role: "auto" for role in ROLES}, validated["review_stages"])
+
+        validated = onevoke_config.validate_config({
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "review_stages": {
+                "PM": "required",
+                "CSA": "skip",
+                "Hacker": "skip",
+                "QA": "auto",
+            },
+            "memsearch": {"enabled": False},
+        })
+        self.assertEqual("skip", validated["review_stages"]["CSA"])
+
+        with self.assertRaises(onevoke_config.ConfigError):
+            onevoke_config.validate_config({
+                "schema_version": 1,
+                "welcome_complete": True,
+                "kanban_agent": "codex",
+                "launcher": "tmux",
+                "reviewers": {role: "codex" for role in ROLES},
+                "review_stages": {"PM": "always"},
+                "memsearch": {"enabled": False},
+            })
+
+    def test_config_cli_prints_review_stages(self) -> None:
+        config_module = ONEVOKE.parent / "onevoke_config.py"
+
+        def query() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, config_module, "review-stages"],
+                env=self.env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "review_stages": {
+                "PM": "required",
+                "CSA": "skip",
+                "Hacker": "skip",
+                "QA": "auto",
+            },
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = query()
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            ["required", "skip", "skip", "auto"],
+            result.stdout.strip().splitlines(),
+        )
+
+        status = self.run_command("config")
+        self.assertEqual(0, status.returncode, status.stderr)
+        self.assertIn("review stages: PM=required CSA=skip Hacker=skip QA=auto", status.stdout)
+
     def test_config_rejects_invalid_models_section(self) -> None:
         base = {
             "schema_version": 1,

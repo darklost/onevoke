@@ -767,6 +767,7 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
             )
         )
     config["memsearch"]["enabled"] = existing["memsearch"]["enabled"]
+    config["review_stages"] = dict(existing["review_stages"])
 
     while True:
         action = ask_welcome_action(config)
@@ -891,6 +892,8 @@ def print_config(config: dict[str, Any]) -> None:
         review_entry = effective["models"]["review"][reviewer]
         model = review_entry["model"] or t("(CLI 默认)", "(CLI default)")
         print(f"{role}: {reviewer} {model} ({review_entry['effort']})")
+    stages = " ".join(f"{role}={effective['review_stages'][role]}" for role in REVIEW_ROLES)
+    print(f"review stages: {stages}")
     print(f"MemSearch: {t('启用', 'enabled') if effective['memsearch']['enabled'] else t('未启用', 'disabled')}")
 
 
