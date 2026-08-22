@@ -30,6 +30,20 @@ COMMAND = Path(
     os.environ.get("KANBAN_COMMAND", PROJECT_ROOT / "bin" / "kanban")
 ).resolve()
 INSTALLER = PROJECT_ROOT / "install.sh"
+INSTALLED_ZH = "Onevoke 已安装\n"
+INSTALLED_EN = "Onevoke installed\n"
+_LOCALE_VARS = ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
+
+
+def install_env(home: Path, **extra: str) -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _LOCALE_VARS
+    }
+    env["HOME"] = str(home)
+    env.update(extra)
+    return env
 RULES_DIR = PROJECT_ROOT / "rules"
 RULES = RULES_DIR / "KANBAN-RULES.md"
 AGENT_RULES = RULES_DIR / "ONEVOKE-AGENTS.md"
@@ -1190,8 +1204,7 @@ N/A
         legacy_bin.mkdir(parents=True)
         for name in ("codex-review.sh", "claude-review.sh", "grok-review.sh"):
             (legacy_bin / name).write_text("legacy\n", encoding="utf-8")
-        env = os.environ.copy()
-        env["HOME"] = str(install_home)
+        env = install_env(install_home)
         result = subprocess.run(
             ["sh", str(INSTALLER)],
             stdin=subprocess.DEVNULL,
@@ -1201,7 +1214,7 @@ N/A
             check=False,
         )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertEqual(INSTALLED_ZH, result.stdout)
         for name in ("codex-review.sh", "claude-review.sh", "grok-review.sh"):
             self.assertEqual(
                 "legacy\n",
@@ -1260,14 +1273,14 @@ N/A
         result = subprocess.run(
             ["sh", str(INSTALLER)],
             input="y\n",
-            env={**os.environ, "HOME": str(install_home)},
+            env=install_env(install_home),
             text=True,
             capture_output=True,
             check=False,
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertEqual(INSTALLED_ZH, result.stdout)
         self.assertIn("是否删除这些旧脚本", result.stderr)
         self.assertIn("已删除旧 Reviewer 脚本", result.stderr)
         for name in names:
@@ -1411,14 +1424,14 @@ N/A
         result = subprocess.run(
             ["sh", str(INSTALLER)],
             stdin=subprocess.DEVNULL,
-            env={**os.environ, "HOME": str(install_home)},
+            env=install_env(install_home),
             text=True,
             capture_output=True,
             check=False,
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertEqual(INSTALLED_ZH, result.stdout)
         self.assertIn("welcome 未完成", result.stderr)
         self.assertTrue((install_home / ".local" / "bin" / "onevoke").exists())
 
@@ -1624,6 +1637,19 @@ N/A
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("--lang\ncn\nwelcome\n", welcome_args.read_text(encoding="utf-8"))
+
+    def test_installer_success_message_follows_locale(self) -> None:
+        english = subprocess.run(
+            ["sh", str(INSTALLER)],
+            stdin=subprocess.DEVNULL,
+            env=install_env(self.root / "install-en-home", ONEVOKE_LANG="en"),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, english.returncode, english.stderr)
+        self.assertEqual(INSTALLED_EN, english.stdout)
+        self.assertNotIn("已安装", english.stdout)
 
     def test_web_help_and_invalid_refresh(self) -> None:
         help_text = self.run_command("web", "--help").stdout

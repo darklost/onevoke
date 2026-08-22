@@ -220,7 +220,11 @@ if [ "$remove_legacy_reviews" -eq 1 ]; then
   fi
 fi
 
-printf '%s\n' 'Onevoke installed'
+if [ "$onevoke_zh" -eq 1 ]; then
+  printf '%s\n' 'Onevoke 已安装'
+else
+  printf '%s\n' 'Onevoke installed'
+fi
 
 # 工具包文件安装已完成. welcome (含可选 MemSearch 安装) 失败不得回滚或
 # 把本脚本变成失败退出; MemSearch 出错时 welcome 内会提示用户自行安装.
