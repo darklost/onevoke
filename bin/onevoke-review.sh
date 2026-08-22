@@ -7,7 +7,14 @@ export GIT_OPTIONAL_LOCKS=0
 _review_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 
 onevoke_locale=""
-if command -v python3 >/dev/null 2>&1; then
+case "${ONEVOKE_LANG_CLI:-}" in
+  1|yes|true)
+    case "${ONEVOKE_LANG:-}" in
+      cn|en) onevoke_locale=$ONEVOKE_LANG ;;
+    esac
+    ;;
+esac
+if [ -z "$onevoke_locale" ] && command -v python3 >/dev/null 2>&1; then
   _cfg_lang=$(python3 "$_review_root/onevoke_config.py" configured-language 2>/dev/null || true)
   case "$_cfg_lang" in
     cn|en) onevoke_locale=$_cfg_lang ;;

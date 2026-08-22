@@ -781,7 +781,7 @@ def ask_welcome_action(config: dict[str, Any]) -> str:
         print(t("输入无效, 请重新选择.", "Invalid input; choose again."), file=sys.stderr)
 
 
-def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
+def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[str, Any]:
     agents = find_agents()
     for name, state in agents.items():
         if state["path"] and not agent_usable(state):
@@ -835,7 +835,7 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         )
     config["memsearch"]["enabled"] = existing["memsearch"]["enabled"]
     config["review_stages"] = dict(existing["review_stages"])
-    if config_path().is_file():
+    if config_valid:
         config["language"] = existing["language"]
     else:
         config["language"] = resolve_language()
@@ -901,8 +901,10 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
 
 def command_welcome(reset: bool) -> int:
     print_doctor()
+    config_valid = False
     try:
         existing = load_config()
+        config_valid = config_path().is_file()
     except ConfigError as error:
         warning(str(error))
         if not reset:
@@ -919,7 +921,7 @@ def command_welcome(reset: bool) -> int:
         print(t("请在终端运行 onevoke welcome.", "Run onevoke welcome in a terminal."), file=sys.stderr)
         return 0
     try:
-        configured = configure_welcome(existing)
+        configured = configure_welcome(existing, config_valid=config_valid)
         path = save_config(configured)
     except (OnevokeError, ConfigError, OSError, UnicodeError) as error:
         warning(str(error))

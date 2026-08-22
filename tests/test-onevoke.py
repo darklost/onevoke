@@ -444,6 +444,17 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual("en", config["language"])
         self.assertIn("默认输出语言?", output)
 
+    def test_welcome_reset_uses_env_language_when_config_invalid(self) -> None:
+        self.install_fake_environment(tmux=False)
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text("not json\n", encoding="utf-8")
+        self.env["ONEVOKE_LANG"] = "en"
+
+        returncode, output = self.run_on_tty("\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("Current configuration", output)
+
     def test_welcome_decline_keeps_existing_config_unchanged(self) -> None:
         self.install_fake_environment(tmux=True)
         existing = {
@@ -1378,6 +1389,7 @@ class LanguageTextTest(unittest.TestCase):
         self.config.apply_language_argument(["--lang", "cn"])
         self.config.bind_effective_language()
         self.assertTrue(self.config.language_is_chinese())
+        self.assertEqual("1", os.environ.get("ONEVOKE_LANG_CLI"))
 
     def test_configured_language_subcommand(self) -> None:
         missing = subprocess.run(
