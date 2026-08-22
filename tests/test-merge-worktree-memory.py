@@ -389,6 +389,22 @@ class MergeTest(unittest.TestCase):
         self.assertIn("用法:", result.stdout)
         self.assertNotIn("usage:", result.stdout.lower())
 
+    def test_merge_lang_override_beats_config_language(self) -> None:
+        config_path = self.root / "onevoke-config.json"
+        config_path.write_text(
+            '{"schema_version":1,"welcome_complete":true,"kanban_agent":"codex","launcher":"tmux","language":"cn","reviewers":{"PM":"codex","CSA":"codex","Hacker":"codex","QA":"codex"},"memsearch":{"enabled":false}}\n',
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [str(MERGER), "--lang", "en", "--source", str(self.source), "--target", str(self.target)],
+            env=merger_env(ONEVOKE_CONFIG=str(config_path)),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Nothing to merge", result.stdout)
+
     def test_merge_invalid_argument_defaults_to_chinese_without_locale(self) -> None:
         result = subprocess.run(
             [str(MERGER), "--nope"],

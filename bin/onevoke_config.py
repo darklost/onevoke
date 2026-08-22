@@ -57,11 +57,17 @@ _config_language: str | None = None
 def apply_language_argument(arguments: list[str]) -> None:
     global _cli_language_override
     os.environ.pop("ONEVOKE_LANG_CLI", None)
-    if not arguments:
-        return
-    value = arguments[1] if arguments[0] == "--lang" and len(arguments) > 1 else None
-    if arguments[0].startswith("--lang="):
-        value = arguments[0].partition("=")[2]
+    value = None
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--lang" and index + 1 < len(arguments):
+            value = arguments[index + 1]
+            break
+        if argument.startswith("--lang="):
+            value = argument.partition("=")[2]
+            break
+        index += 1
     if value in LANGUAGES:
         _cli_language_override = value
         os.environ["ONEVOKE_LANG"] = value

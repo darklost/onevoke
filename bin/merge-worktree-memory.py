@@ -32,7 +32,14 @@ _BIN = Path(__file__).resolve().parent
 if str(_BIN) not in sys.path:
     sys.path.insert(0, str(_BIN))
 
-from onevoke_config import ARGPARSE_ZH, LocalizedArgumentParser, bind_effective_language, language_text
+from onevoke_config import (
+    ARGPARSE_ZH,
+    LANGUAGES,
+    LocalizedArgumentParser,
+    apply_language_argument,
+    bind_effective_language,
+    language_text,
+)
 
 t = language_text
 
@@ -589,6 +596,7 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
 
 
 def main() -> int:
+    apply_language_argument(sys.argv[1:])
     bind_effective_language()
     import argparse
 
@@ -602,6 +610,7 @@ def main() -> int:
             "files are scanned but not rewritten while they may still receive appends.",
         )
     )
+    parser.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
     parser.add_argument(
         "--source", metavar="PATH",
         help=t("来源 worktree. 默认为当前目录.", "Worktree to merge from. Defaults to the current directory."),
