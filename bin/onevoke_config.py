@@ -59,8 +59,8 @@ def apply_language_argument(arguments: list[str]) -> None:
         os.environ["ONEVOKE_LANG"] = value
 
 
-def language_text(chinese: str, english: str) -> str:
-    locale = next(
+def _effective_locale() -> str:
+    return next(
         (
             os.environ[name]
             for name in ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
@@ -68,12 +68,24 @@ def language_text(chinese: str, english: str) -> str:
         ),
         "",
     )
-    return chinese if locale.lower().startswith(("cn", "zh")) else english
+
+
+def language_is_chinese() -> bool:
+    locale = _effective_locale().lower()
+    if not locale:
+        return True
+    if locale.startswith("en"):
+        return False
+    return True
+
+
+def language_text(chinese: str, english: str) -> str:
+    return chinese if language_is_chinese() else english
 
 
 class LocalizedArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
-        if language_text("zh", "en") == "zh":
+        if language_is_chinese():
             names = {
                 "arguments": "参数",
                 "command": "命令",

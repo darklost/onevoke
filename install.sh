@@ -22,8 +22,8 @@ case "$onevoke_lang" in
   en) onevoke_locale=en ;;
 esac
 case "$onevoke_locale" in
-  cn*|CN*|zh*|ZH*) onevoke_zh=1 ;;
-  *) onevoke_zh=0 ;;
+  en*|EN*) onevoke_zh=0 ;;
+  *) onevoke_zh=1 ;;
 esac
 
 usage() {

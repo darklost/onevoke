@@ -1537,6 +1537,7 @@ N/A
             {"ONEVOKE_LANG": "", "LC_ALL": "zh", "LC_MESSAGES": "en"},
             {"ONEVOKE_LANG": "", "LC_ALL": "", "LC_MESSAGES": "zh", "LANG": "en"},
             {"ONEVOKE_LANG": "", "LC_ALL": "", "LC_MESSAGES": "", "LANG": "zh"},
+            {"ONEVOKE_LANG": "", "LC_ALL": "", "LC_MESSAGES": "", "LANG": ""},
         )
         for index, locale_env in enumerate(fallbacks):
             localized = subprocess.run(

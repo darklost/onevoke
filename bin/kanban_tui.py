@@ -1125,12 +1125,12 @@ class KanbanTui:
     def _notify_copy(self, text: str, *, success: bool, error: str = "") -> None:
         if success:
             preview = clip_text(text.replace("\n", " "), 40)
-            copied = self.context.get("copied", "Copied")
+            copied = self.context.get("copied", "已复制")
             self.copy_notice = f"{copied}: {preview}"
         else:
-            label = self.context.get("copy_failed", "Copy failed")
+            label = self.context.get("copy_failed", "复制失败")
             detail = error or self.context.get(
-                "clipboard_unavailable", "clipboard unavailable"
+                "clipboard_unavailable", "无可用剪贴板工具"
             )
             self.copy_notice = f"{label}: {detail}"
         self.copy_notice_until = time.monotonic() + COPY_NOTICE_SECONDS
@@ -1368,9 +1368,9 @@ class KanbanTui:
         if status_error:
             return f"{self.context.get('error', 'Error')}: {status_error}"
         if detail and self.detail_searching:
-            return self.context.get("search_help", "Enter apply | Esc clear")
+            return self.context.get("search_help", "Enter 应用 | Esc 清空")
         if not detail and self.searching:
-            return self.context.get("search_help", "Enter apply | Esc clear")
+            return self.context.get("search_help", "Enter 应用 | Esc 清空")
         if detail:
             return self.context.get(
                 "detail_help",
@@ -1894,7 +1894,7 @@ class KanbanTui:
 
     def _render_board(self) -> None:
         height, width = self.screen.getmaxyx()
-        title = self.context.get("title", "Task Board")
+        title = self.context.get("title", "任务看板")
         accent = self.colors.get("accent", 0)
         # MD 风格 app bar: 整行强调色反白, 与底部提示栏呼应.
         self._add(
@@ -1907,22 +1907,22 @@ class KanbanTui:
         # 高度 7 时首张卡片末行会被提示栏覆盖, 因此最小高度为 8.
         # 宽度低于最小栏宽时仍按实际宽度画单栏, 不因过窄拒绝渲染.
         if height < MIN_BOARD_HEIGHT or width < 1:
-            message = self.context.get("too_small", "Terminal is too small.")
+            message = self.context.get("too_small", "终端空间不足; 请放大窗口.")
             self._add(2, 0, message, curses.A_BOLD, width)
-            quit_help = self.context.get("quit_help", "q quit")
+            quit_help = self.context.get("quit_help", "q 退出")
             self._add(height - 1, 0, quit_help, self._footer_attr(), width)
             return
 
-        query_prefix = self.context.get("search", "Search") + ": "
+        query_prefix = self.context.get("search", "搜索") + ": "
         query_text = self.model.query
         mode = (
-            self.context.get("all", "all")
+            self.context.get("all", "全部栏目")
             if self.model.show_archived
-            else self.context.get("active", "active")
+            else self.context.get("active", "活跃栏目")
         )
         stamp = self.model.generated_at or "-"
         theme_label = self.context.get("theme_labels", {}).get(self.theme, self.theme)
-        width_label = self.context.get("width", "Width")
+        width_label = self.context.get("width", "栏宽")
         width_token = f"{width_label} {self.column_width}"
         width_token_span = display_width(width_token)
         toolbar_extra = (
@@ -2041,7 +2041,7 @@ class KanbanTui:
             width,
         )
         if not tasks:
-            empty = self.context.get("empty", "No tasks")
+            empty = self.context.get("empty", "暂无任务")
             self._add(body_top, x + 1, empty, curses.A_DIM, max(0, width - 2))
             return
 
@@ -2165,7 +2165,7 @@ class KanbanTui:
     def _render_detail(self) -> None:
         height, width = self.screen.getmaxyx()
         if height < 6 or width < 20:
-            message = self.context.get("too_small", "Terminal is too small.")
+            message = self.context.get("too_small", "终端空间不足; 请放大窗口.")
             self._add(0, 0, message, curses.A_BOLD, width)
             return
         task = self.detail or {}
@@ -2185,13 +2185,13 @@ class KanbanTui:
                     task.get("kind"), task.get("kind")
                 ),
                 task.get("type"),
-                task.get("assignee") or self.context.get("unassigned", "Unassigned"),
+                task.get("assignee") or self.context.get("unassigned", "未指派"),
             )
             if value
         )
         self._add(1, 0, self.glyphs["bar"], state_color | curses.A_BOLD, 1)
         self._add(1, 2, meta, curses.A_DIM, max(0, width - 2))
-        query_prefix = self.context.get("search", "Search") + ": "
+        query_prefix = self.context.get("search", "搜索") + ": "
         if self.detail_searching:
             query_text = self.detail_query
             search_attr = accent | curses.A_BOLD
@@ -2326,7 +2326,7 @@ class KanbanTui:
                 if matches:
                     match_info = f"{self.detail_match_index + 1}/{len(matches)}"
                 else:
-                    match_info = self.context.get("no_match", "no match")
+                    match_info = self.context.get("no_match", "无匹配")
                 footer = f"{footer} | {match_info} | {position}"
             else:
                 footer = f"{footer} | {position}"

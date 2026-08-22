@@ -917,14 +917,14 @@ def command_review(arguments: list[str]) -> NoReturn:
 def print_config(config: dict[str, Any]) -> None:
     effective = effective_config(config)
     status = t("已完成", "complete") if config["welcome_complete"] else t("未完成", "incomplete")
-    print(f"welcome: {status}")
-    print(f"kanban agent: {effective['kanban_agent']}")
-    print(f"launcher: {effective['launcher']}")
+    print(f"{t('引导', 'welcome')}: {status}")
+    print(f"{t('看板 Agent', 'kanban agent')}: {effective['kanban_agent']}")
+    print(f"{t('启动方式', 'launcher')}: {effective['launcher']}")
     kanban_entry = effective["models"]["kanban"][effective["kanban_agent"]]
     kanban_model = kanban_entry["model"] or t("(CLI 默认)", "(CLI default)")
     print(
-        f"kanban model: {kanban_model}"
-        f" (large {kanban_entry['large_effort']} / small {kanban_entry['small_effort']})"
+        f"{t('看板模型', 'kanban model')}: {kanban_model}"
+        f" ({t('大', 'large')} {kanban_entry['large_effort']} / {t('小', 'small')} {kanban_entry['small_effort']})"
     )
     for role in REVIEW_ROLES:
         reviewer = effective["reviewers"][role]
@@ -932,7 +932,7 @@ def print_config(config: dict[str, Any]) -> None:
         model = review_entry["model"] or t("(CLI 默认)", "(CLI default)")
         print(f"{role}: {reviewer} {model} ({review_entry['effort']})")
     stages = " ".join(f"{role}={effective['review_stages'][role]}" for role in REVIEW_ROLES)
-    print(f"review stages: {stages}")
+    print(f"{t('审核环节', 'review stages')}: {stages}")
     print(f"MemSearch: {t('启用', 'enabled') if effective['memsearch']['enabled'] else t('未启用', 'disabled')}")
 
 

@@ -151,7 +151,8 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_locale_selects_chinese_or_english_and_honors_override(self) -> None:
         chinese = self.run_command("--help")
         self.assertIn("Onevoke 配置与诊断", chinese.stdout)
-        self.assertIn("--lang {cn,en}", chinese.stdout)
+        self.assertIn("--lang", chinese.stdout)
+        self.assertIn("{cn,en}", chinese.stdout)
         self.assertNotIn("usage:", chinese.stdout)
 
         chinese_error = self.run_command("nope")
@@ -178,6 +179,10 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.env.pop("LC_MESSAGES")
         self.env["LANG"] = "zh_CN.UTF-8"
+        self.assertIn("Onevoke 配置与诊断", self.run_command("--help").stdout)
+
+        for name in ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG"):
+            self.env.pop(name, None)
         self.assertIn("Onevoke 配置与诊断", self.run_command("--help").stdout)
 
         self.env["ONEVOKE_LANG"] = "en"
@@ -382,8 +387,8 @@ class OnevokeCommandTest(unittest.TestCase):
         human = self.run_command("config")
         machine = self.run_command("config", "--json")
 
-        self.assertIn("welcome: 未完成", human.stdout)
-        self.assertIn("kanban agent: codex", human.stdout)
+        self.assertIn("引导: 未完成", human.stdout)
+        self.assertIn("看板 Agent: codex", human.stdout)
         self.assertFalse(human.stdout.lstrip().startswith("{"))
         self.assertFalse(json.loads(machine.stdout)["welcome_complete"])
 
@@ -741,7 +746,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
         status = self.run_command("config")
         self.assertEqual(0, status.returncode, status.stderr)
-        self.assertIn("review stages: PM=required CSA=skip Hacker=skip QA=auto", status.stdout)
+        self.assertIn("审核环节: PM=required CSA=skip Hacker=skip QA=auto", status.stdout)
 
     def test_config_rejects_invalid_models_section(self) -> None:
         base = {
@@ -1217,6 +1222,41 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("用户取消, 配置未更改", decoded)
         self.assertNotIn("Traceback", decoded)
         self.assertFalse(self.config.exists())
+
+
+class LanguageTextTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.saved = {
+            name: os.environ.get(name)
+            for name in ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
+        }
+        for name in self.saved:
+            os.environ.pop(name, None)
+        sys.path.insert(0, str(PROJECT_ROOT / "bin"))
+        import onevoke_config
+
+        self.config = onevoke_config
+
+    def tearDown(self) -> None:
+        sys.path.pop(0)
+        for name, value in self.saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_defaults_to_chinese_without_locale(self) -> None:
+        self.assertTrue(self.config.language_is_chinese())
+        self.assertEqual("中文", self.config.language_text("中文", "English"))
+
+    def test_english_only_when_locale_is_explicit(self) -> None:
+        os.environ["LANG"] = "en_US.UTF-8"
+        self.assertFalse(self.config.language_is_chinese())
+        self.assertEqual("English", self.config.language_text("中文", "English"))
+
+    def test_non_english_locale_stays_chinese(self) -> None:
+        os.environ["LANG"] = "de_DE.UTF-8"
+        self.assertTrue(self.config.language_is_chinese())
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ sh -n install.sh && bash -n bin/onevoke-review.sh
 
 Shell 脚本使用 2 空格缩进, `set -eu`, 引用所有变量展开, 错误信息写 stderr 并返回非零状态.
 
-任务 ID 必须匹配 `YYYYMMDD-short-slug-task`; slug 仅使用小写 ASCII 字母、数字和连字符. 用户可见错误信息及规则文档沿用中文和 ASCII 标点.
+任务 ID 必须匹配 `YYYYMMDD-short-slug-task`; slug 仅使用小写 ASCII 字母、数字和连字符. 用户可见错误信息及规则文档沿用中文和 ASCII 标点. CLI、TUI、Web 与 `install.sh` 的用户可见输出默认中文; 仅当 `ONEVOKE_LANG`、`LC_ALL`、`LC_MESSAGES` 或 `LANG` 明确为 `en` 前缀时使用英文 (`onevoke --lang` 可覆盖).
 
 ## Testing Guidelines
 
