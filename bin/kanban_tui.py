@@ -354,14 +354,19 @@ def mouse_wheel_delta(bstate: int) -> int:
 
 
 def mouse_left_clicked(bstate: int) -> bool:
-    # CLICKED 优先; 无 CLICKED 位时回退 PRESSED (部分终端不合成 CLICKED).
     if bstate & curses.BUTTON1_DOUBLE_CLICKED:
         return True
     if bstate & curses.BUTTON1_CLICKED:
         return True
+    return False
+
+
+def mouse_left_pressed(bstate: int) -> bool:
     return bool(
         bstate & curses.BUTTON1_PRESSED
         and not (bstate & curses.BUTTON1_RELEASED)
+        and not (bstate & curses.BUTTON1_CLICKED)
+        and not (bstate & curses.BUTTON1_DOUBLE_CLICKED)
     )
 
 
@@ -403,11 +408,13 @@ def copy_to_clipboard(text: str) -> tuple[bool, str]:
                 input=payload,
                 check=True,
                 timeout=2,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             return True, ""
         except (OSError, subprocess.SubprocessError):
             continue
-    return False, "clipboard unavailable"
+    return False, ""
 
 
 def display_column_to_char_index(text: str, display_col: int) -> int:
@@ -428,6 +435,27 @@ def display_column_to_char_index(text: str, display_col: int) -> int:
         used += char_width
         index += 1
     return index
+
+
+def display_column_to_caret_index(text: str, display_col: int) -> int:
+    if display_col <= 0:
+        return 0
+    used = 0
+    for index, char in enumerate(text):
+        char_width = (
+            0
+            if unicodedata.combining(char)
+            else 2
+            if unicodedata.east_asian_width(char) in "WF"
+            else 1
+        )
+        if char_width == 0:
+            continue
+        next_used = used + char_width
+        if display_col < next_used:
+            return index + 1
+        used = next_used
+    return len(text)
 
 
 def char_index_to_display_column(text: str, char_index: int) -> int:
@@ -1036,6 +1064,14 @@ class KanbanTui:
         self.mouse_selecting = False
         self.mouse_select_anchor = None
         self.mouse_select_cursor = None
+        self.suppress_click = False
+
+    def _mouse_selection_moved(self) -> bool:
+        return (
+            self.mouse_select_anchor is not None
+            and self.mouse_select_cursor is not None
+            and self.mouse_select_anchor != self.mouse_select_cursor
+        )
 
     def _notify_copy(self, text: str, *, success: bool, error: str = "") -> None:
         if success:
@@ -1093,7 +1129,7 @@ class KanbanTui:
         ]
 
     def _board_card_hit(
-        self, x: int, y: int
+        self, x: int, y: int, *, caret: bool = False
     ) -> Optional[tuple[str, str, int, int, int]]:
         hit = self._hit_board(x, y)
         if hit is None or hit[0] != "task":
@@ -1122,11 +1158,15 @@ class KanbanTui:
         content_width = max(1, col_width - 2)
         display_col = max(0, x - col_x - 1)
         lines = self._board_card_lines(task, content_width)
-        char_col = display_column_to_char_index(lines[line_in_card], display_col)
+        line_text = lines[line_in_card]
+        if caret:
+            char_col = display_column_to_caret_index(line_text, display_col)
+        else:
+            char_col = display_column_to_char_index(line_text, display_col)
         task_id = str(task.get("task_id") or "")
         return ("board", task_id, line_in_card, char_col, content_width)
 
-    def _detail_hit(self, x: int, y: int) -> Optional[tuple[str, int, int]]:
+    def _detail_hit(self, x: int, y: int, *, caret: bool = False) -> Optional[tuple[str, int, int]]:
         if y < DETAIL_BODY_TOP:
             return None
         height, width = self.screen.getmaxyx()
@@ -1138,7 +1178,11 @@ class KanbanTui:
         if line_index < 0 or line_index >= len(lines):
             return None
         display_col = max(0, min(x, width - 1))
-        char_col = display_column_to_char_index(lines[line_index], display_col)
+        line_text = lines[line_index]
+        if caret:
+            char_col = display_column_to_caret_index(line_text, display_col)
+        else:
+            char_col = display_column_to_char_index(line_text, display_col)
         return ("detail", line_index, char_col)
 
     def _extract_board_mouse_selection(self) -> str:
@@ -1228,13 +1272,7 @@ class KanbanTui:
         elif delta_line:
             col = min(col, len(line_text))
         self.detail_cursor = (line, col)
-        self._reveal_detail_line(line, lines)
-        if self.detail_select_mode == "line" and self.detail_anchor is not None:
-            anchor_line = self.detail_anchor[0]
-            start, end = ordered_points((anchor_line, 0), (line, 0))
-            self.detail_anchor = (start[0], 0)
-            end_line_text = lines[end[0]]
-            self.detail_cursor = (end[0], len(end_line_text))
+        self._ensure_detail_cursor_visible(lines)
 
     def _detail_selection_active(self) -> bool:
         return (
@@ -1309,7 +1347,19 @@ class KanbanTui:
         )
 
     def _scroll_detail_by(self, delta: int) -> None:
-        self.detail_scroll = max(0, self.detail_scroll + delta)
+        lines = self._detail_lines()
+        body_height = self._detail_body_height()
+        maximum_scroll = max(0, len(lines) - body_height)
+        self.detail_scroll = max(0, min(self.detail_scroll + delta, maximum_scroll))
+        line, col = self.detail_cursor
+        visible_end = self.detail_scroll + body_height - 1
+        if line < self.detail_scroll:
+            line = self.detail_scroll
+            col = 0
+        elif line > visible_end:
+            line = visible_end
+            col = min(col, len(lines[line]) if lines else 0)
+        self.detail_cursor = (line, col)
 
     def _reveal_detail_line(self, line_index: int, lines: list[str]) -> None:
         body_height = self._detail_body_height()
@@ -1318,6 +1368,29 @@ class KanbanTui:
         preferred = max(0, line_index - max(0, body_height // 3))
         self.detail_scroll = max(0, min(preferred, maximum_scroll))
 
+    def _ensure_detail_cursor_visible(self, lines: list[str]) -> None:
+        body_height = self._detail_body_height()
+        line, col = self.detail_cursor
+        if line < self.detail_scroll:
+            self.detail_scroll = line
+        elif line >= self.detail_scroll + body_height:
+            self.detail_scroll = line - body_height + 1
+        maximum_scroll = max(0, len(lines) - body_height)
+        self.detail_scroll = max(0, min(self.detail_scroll, maximum_scroll))
+        visible_end = self.detail_scroll + body_height - 1
+        if line > visible_end:
+            line = visible_end
+            col = min(col, len(lines[line]) if lines else 0)
+            self.detail_cursor = (line, col)
+
+    def _focus_detail_line(self, line_index: int, lines: list[str]) -> None:
+        self._reveal_detail_line(line_index, lines)
+        if not lines:
+            self.detail_cursor = (0, 0)
+            return
+        line_index = max(0, min(line_index, len(lines) - 1))
+        self.detail_cursor = (line_index, 0)
+
     def _jump_detail_match(self, direction: int) -> None:
         matches = self._detail_matches()
         if not matches:
@@ -1325,7 +1398,8 @@ class KanbanTui:
         if self.detail_match_index >= len(matches):
             self.detail_match_index = 0
         self.detail_match_index = (self.detail_match_index + direction) % len(matches)
-        self._reveal_detail_line(matches[self.detail_match_index], self._detail_lines())
+        lines = self._detail_lines()
+        self._focus_detail_line(matches[self.detail_match_index], lines)
 
     def _apply_detail_search(self) -> None:
         self.detail_searching = False
@@ -1335,7 +1409,7 @@ class KanbanTui:
             self.detail_match_index = 0
             return
         self.detail_match_index = 0
-        self._reveal_detail_line(matches[0], self._detail_lines())
+        self._focus_detail_line(matches[0], self._detail_lines())
 
     def _page_size(self) -> int:
         # 与 _render_column 的卡片容量保持一致: body_top=BODY_TOP, 页脚占 1 行.
@@ -1400,24 +1474,21 @@ class KanbanTui:
             return
         if mouse_button1_released(bstate):
             if self.mouse_selecting:
-                moved = (
-                    self.mouse_select_anchor is not None
-                    and self.mouse_select_cursor is not None
-                    and self.mouse_select_anchor != self.mouse_select_cursor
-                )
-                self._finish_mouse_selection()
-                if moved:
+                if self._mouse_selection_moved():
+                    self._finish_mouse_selection()
                     self.suppress_click = True
+                else:
+                    self._reset_mouse_selection()
             return
         if self.mouse_selecting and (
-            mouse_button1_dragging(bstate) or (bstate & curses.BUTTON1_PRESSED)
+            mouse_button1_dragging(bstate) or mouse_left_pressed(bstate)
         ):
-            hit = self._detail_hit(x, y)
+            hit = self._detail_hit(x, y, caret=True)
             if hit is not None:
                 self.mouse_select_cursor = hit
             return
-        if (bstate & curses.BUTTON1_PRESSED) and not mouse_left_clicked(bstate):
-            hit = self._detail_hit(x, y)
+        if mouse_left_pressed(bstate):
+            hit = self._detail_hit(x, y, caret=False)
             if hit is not None:
                 self.mouse_selecting = True
                 self.mouse_select_anchor = hit
@@ -1427,48 +1498,7 @@ class KanbanTui:
         if delta:
             self._scroll_detail_by(delta * MOUSE_SCROLL_STEP)
 
-    def _handle_board_mouse(self, x: int, y: int, bstate: int) -> None:
-        if mouse_button1_released(bstate):
-            if self.mouse_selecting:
-                moved = (
-                    self.mouse_select_anchor is not None
-                    and self.mouse_select_cursor is not None
-                    and self.mouse_select_anchor != self.mouse_select_cursor
-                )
-                self._finish_mouse_selection()
-                if moved:
-                    self.suppress_click = True
-            return
-        if self.mouse_selecting and (
-            mouse_button1_dragging(bstate) or (bstate & curses.BUTTON1_PRESSED)
-        ):
-            hit = self._board_card_hit(x, y)
-            if (
-                hit is not None
-                and self.mouse_select_anchor is not None
-                and hit[1] == self.mouse_select_anchor[1]
-            ):
-                self.mouse_select_cursor = hit
-            return
-        if (bstate & curses.BUTTON1_PRESSED) and not mouse_left_clicked(bstate):
-            hit = self._board_card_hit(x, y)
-            if hit is not None:
-                self.mouse_selecting = True
-                self.mouse_select_anchor = hit
-                self.mouse_select_cursor = hit
-            return
-        delta = mouse_wheel_delta(bstate)
-        if delta:
-            target = self._hit_column_at(x, y)
-            if target is not None:
-                self.model.focus_state(target)
-            self.model.move_task(delta)
-            return
-        if not mouse_left_clicked(bstate):
-            return
-        if self.suppress_click:
-            self.suppress_click = False
-            return
+    def _handle_board_click(self, x: int, y: int, bstate: int) -> None:
         height, width = self.screen.getmaxyx()
         if height < MIN_BOARD_HEIGHT or width < 1:
             return
@@ -1493,6 +1523,49 @@ class KanbanTui:
             self.model.select_task_index(state, index)
             if mouse_left_double_clicked(bstate):
                 self._open_detail()
+
+    def _handle_board_mouse(self, x: int, y: int, bstate: int) -> None:
+        if mouse_button1_released(bstate):
+            if self.mouse_selecting:
+                if self._mouse_selection_moved():
+                    self._finish_mouse_selection()
+                    self.suppress_click = True
+                else:
+                    self._reset_mouse_selection()
+                    if not (bstate & curses.BUTTON1_CLICKED):
+                        self._handle_board_click(x, y, bstate)
+            return
+        if self.mouse_selecting and (
+            mouse_button1_dragging(bstate) or mouse_left_pressed(bstate)
+        ):
+            hit = self._board_card_hit(x, y, caret=True)
+            if (
+                hit is not None
+                and self.mouse_select_anchor is not None
+                and hit[1] == self.mouse_select_anchor[1]
+            ):
+                self.mouse_select_cursor = hit
+            return
+        if mouse_left_pressed(bstate):
+            hit = self._board_card_hit(x, y, caret=False)
+            if hit is not None:
+                self.mouse_selecting = True
+                self.mouse_select_anchor = hit
+                self.mouse_select_cursor = hit
+            return
+        delta = mouse_wheel_delta(bstate)
+        if delta:
+            target = self._hit_column_at(x, y)
+            if target is not None:
+                self.model.focus_state(target)
+            self.model.move_task(delta)
+            return
+        if not mouse_left_clicked(bstate):
+            return
+        if self.suppress_click:
+            self.suppress_click = False
+            return
+        self._handle_board_click(x, y, bstate)
 
     def _hit_column_at(self, x: int, y: int) -> Optional[str]:
         if y < 2:
@@ -1695,6 +1768,7 @@ class KanbanTui:
             self._detail_toggle_select("line")
         elif key == "y":
             self._detail_yank()
+
     def _render(self, *, force: bool = False) -> None:
         height, width = self.screen.getmaxyx()
         self.cursor_pos = None

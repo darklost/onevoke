@@ -1747,13 +1747,13 @@ N/A
                 "task_id": "20260821-one-task",
                 "title": "一号",
                 "state": "backlog",
-                "document": "line1\nline2\nline3\nline4\nline5\nline6\n",
+                "document": "\n".join(f"line{i}" for i in range(1, 40)),
             },
             "20260821-two-task": {
                 "task_id": "20260821-two-task",
                 "title": "二号",
                 "state": "backlog",
-                "document": "line1\nline2\nline3\nline4\nline5\nline6\n",
+                "document": "\n".join(f"line{i}" for i in range(1, 40)),
             },
         }
         tui = kanban_tui.KanbanTui(
@@ -2351,6 +2351,7 @@ N/A
             import kanban_tui
         finally:
             sys.path.pop(0)
+        import curses
 
         self.assertEqual("lpha\nbe", kanban_tui.extract_char_selection(
             ["alpha", "beta"],
@@ -2364,6 +2365,10 @@ N/A
         ))
         self.assertEqual(1, kanban_tui.display_column_to_char_index("a中b", 2))
         self.assertEqual(3, kanban_tui.char_index_to_display_column("a中b", 2))
+        self.assertEqual(4, kanban_tui.display_column_to_caret_index("复制测试", 7))
+        self.assertTrue(kanban_tui.mouse_left_pressed(curses.BUTTON1_PRESSED))
+        self.assertFalse(kanban_tui.mouse_left_clicked(curses.BUTTON1_PRESSED))
+        self.assertTrue(kanban_tui.mouse_left_clicked(curses.BUTTON1_CLICKED))
 
         class FakeScreen:
             def getmaxyx(self):
@@ -2435,7 +2440,59 @@ N/A
         tui.mouse_select_anchor = ("board", "20260822-copy-task", 0, 0, 20)
         tui.mouse_select_cursor = ("board", "20260822-copy-task", 0, 4, 20)
         text = tui._extract_board_mouse_selection()
-        self.assertEqual("复制测", text[:3])
+        self.assertEqual("复制测试", text)
+
+        layout = tui._visible_column_layout()
+        todo_x = next(x for state, x, _w in layout if state == "todo")
+        card_y = kanban_tui.BODY_TOP
+        tui._handle_board_mouse(todo_x + 1, card_y, curses.BUTTON1_PRESSED)
+        tui._handle_board_mouse(todo_x + 8, card_y, curses.BUTTON1_PRESSED)
+        tui._handle_board_mouse(todo_x + 8, card_y, curses.BUTTON1_RELEASED)
+        self.assertIn("复制测试", copied)
+
+        tui.detail = {
+            "task_id": "20260822-copy-task",
+            "title": "复制测试",
+            "state": "todo",
+            "document": "\n".join(f"line-{index}" for index in range(6)),
+        }
+        tui.detail_scroll = 0
+        tui.detail_cursor = (4, 0)
+        tui._detail_toggle_select("line")
+        for _ in range(3):
+            tui._handle_detail_key("k")
+        tui._detail_yank()
+        self.assertEqual("line-1\nline-2\nline-3\nline-4", copied[-1])
+
+        tui.detail = tui.get_task("20260822-copy-task")
+        tui._handle_detail_key("/")
+        for char in "two":
+            tui._handle_detail_key(char)
+        tui._handle_detail_key("\n")
+        self.assertEqual((1, 0), tui.detail_cursor)
+        before_scroll = tui.detail_scroll
+        tui._handle_detail_key("j")
+        self.assertEqual((2, 0), tui.detail_cursor)
+        self.assertEqual(before_scroll, tui.detail_scroll)
+
+        fail_tui = kanban_tui.KanbanTui(
+            FakeScreen(),
+            single=True,
+            refresh_interval=60,
+            context={
+                "copy_failed": "复制失败",
+                "clipboard_unavailable": "无可用剪贴板工具",
+            },
+            get_board=lambda: board,
+            get_task=lambda task_id: {"task_id": task_id, "document": ""},
+            copy_to_clipboard_fn=lambda _text: (False, ""),
+        )
+        fail_tui._copy_text("x")
+        self.assertIn("无可用剪贴板工具", fail_tui.copy_notice)
+
+        tui.suppress_click = True
+        tui._reset_mouse_selection()
+        self.assertFalse(tui.suppress_click)
 
     def test_tui_theme_key_cycles_and_run_rejects_unknown_theme(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
