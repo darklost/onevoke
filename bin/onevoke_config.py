@@ -142,14 +142,12 @@ def _validate_choice(value: object, choices: tuple[str, ...], name: str) -> str:
 
 
 def _validate_review_stages(raw: object) -> dict[str, str]:
-    stages = default_review_stages()
-    if raw is None:
-        return stages
     if not isinstance(raw, dict):
         raise ConfigError(language_text(
             "review_stages 必须是 JSON object",
             "review_stages must be a JSON object",
         ))
+    stages = default_review_stages()
     unknown = set(raw) - set(REVIEW_ROLES)
     if unknown:
         raise ConfigError(language_text(
@@ -242,7 +240,11 @@ def validate_config(raw: object) -> dict[str, Any]:
         for role in REVIEW_ROLES
     }
 
-    review_stages = _validate_review_stages(raw.get("review_stages"))
+    review_stages = (
+        _validate_review_stages(raw["review_stages"])
+        if "review_stages" in raw
+        else default_review_stages()
+    )
 
     models = _validate_models(raw["models"]) if "models" in raw else default_models()
 
@@ -330,8 +332,9 @@ def main(argv: list[str]) -> int:
         print(entry["model"])
         print(entry["effort"])
         return 0
+    stages = effective_config()["review_stages"]
     for role in REVIEW_ROLES:
-        print(effective_config()["review_stages"][role])
+        print(stages[role])
     return 0
 
 

@@ -443,6 +443,12 @@ class OnevokeCommandTest(unittest.TestCase):
             "kanban_agent": "claude",
             "launcher": "foreground",
             "reviewers": {role: "grok" for role in ROLES},
+            "review_stages": {
+                "PM": "required",
+                "CSA": "skip",
+                "Hacker": "skip",
+                "QA": "auto",
+            },
             "models": {
                 "kanban": {"claude": {"model": "custom-task", "large_effort": "max"}},
                 "review": {"grok": {"model": "custom-review", "effort": "xhigh"}},
@@ -466,6 +472,15 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual("custom-task", config["models"]["kanban"]["claude"]["model"])
         self.assertEqual("custom-review", config["models"]["review"]["grok"]["model"])
         self.assertTrue(config["memsearch"]["enabled"])
+        self.assertEqual(
+            {
+                "PM": "required",
+                "CSA": "skip",
+                "Hacker": "skip",
+                "QA": "auto",
+            },
+            config["review_stages"],
+        )
 
     def test_welcome_reset_enter_preserves_unavailable_current_values(self) -> None:
         self.install_fake_environment(tmux=False)
@@ -661,6 +676,19 @@ class OnevokeCommandTest(unittest.TestCase):
                 "review_stages": {"PM": "always"},
                 "memsearch": {"enabled": False},
             })
+
+        for invalid in (None, "auto", []):
+            with self.subTest(review_stages=invalid):
+                with self.assertRaises(onevoke_config.ConfigError):
+                    onevoke_config.validate_config({
+                        "schema_version": 1,
+                        "welcome_complete": True,
+                        "kanban_agent": "codex",
+                        "launcher": "tmux",
+                        "reviewers": {role: "codex" for role in ROLES},
+                        "review_stages": invalid,
+                        "memsearch": {"enabled": False},
+                    })
 
     def test_config_cli_prints_review_stages(self) -> None:
         config_module = ONEVOKE.parent / "onevoke_config.py"
