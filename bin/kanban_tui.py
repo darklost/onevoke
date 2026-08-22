@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import base64
 import curses
 import json
 import locale
@@ -390,31 +391,59 @@ def mouse_button1_dragging(bstate: int) -> bool:
     )
 
 
+CLIPBOARD_COMMANDS = (
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "--clipboard", "--input"],
+    ["pbcopy"],
+    ["clip.exe"],
+)
+
+
+def copy_via_osc52(text: str) -> tuple[bool, str]:
+    if not text:
+        return False, ""
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    sequence = f"\033]52;c;{encoded}\033\\"
+    try:
+        with open("/dev/tty", "w", encoding="utf-8") as tty:
+            tty.write(sequence)
+            tty.flush()
+    except OSError as exc:
+        return False, str(exc)
+    return True, ""
+
+
 def copy_to_clipboard(text: str) -> tuple[bool, str]:
     if not text:
         return False, ""
     payload = text.encode("utf-8")
-    for command in (
-        ["wl-copy"],
-        ["xclip", "-selection", "clipboard"],
-        ["xsel", "--clipboard", "--input"],
-        ["pbcopy"],
-    ):
+    last_error = ""
+    for command in CLIPBOARD_COMMANDS:
         if shutil.which(command[0]) is None:
             continue
         try:
-            subprocess.run(
+            result = subprocess.run(
                 command,
                 input=payload,
-                check=True,
+                check=False,
                 timeout=2,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
-            return True, ""
-        except (OSError, subprocess.SubprocessError):
+            if result.returncode == 0:
+                return True, ""
+            detail = result.stderr.decode("utf-8", "replace").strip()
+            last_error = detail or f"{command[0]} exited {result.returncode}"
+        except (OSError, subprocess.SubprocessError) as exc:
+            last_error = str(exc)
             continue
-    return False, ""
+    success, error = copy_via_osc52(text)
+    if success:
+        return True, ""
+    if error:
+        last_error = error
+    return False, last_error
 
 
 def display_column_to_char_index(text: str, display_col: int) -> int:

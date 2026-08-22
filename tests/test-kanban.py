@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import io
@@ -2358,6 +2359,60 @@ N/A
 
         self.assertEqual([0, 2], kanban_tui.line_match_indexes(["Alpha", "beta", "ALPHA"], "alpha"))
         self.assertEqual([(2, 5)], kanban_tui.match_spans("xxABCyy", "abc"))
+
+    def test_copy_to_clipboard_helpers(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual((False, ""), kanban_tui.copy_to_clipboard(""))
+
+        with mock.patch("kanban_tui.shutil.which", return_value=None), mock.patch(
+            "kanban_tui.copy_via_osc52",
+            return_value=(False, "no tty"),
+        ):
+            self.assertEqual(
+                (False, "no tty"),
+                kanban_tui.copy_to_clipboard("hello"),
+            )
+
+        with mock.patch("kanban_tui.shutil.which", return_value="/usr/bin/xclip"), mock.patch(
+            "kanban_tui.subprocess.run",
+            return_value=mock.Mock(returncode=1, stderr=b"cannot open display"),
+        ), mock.patch(
+            "kanban_tui.copy_via_osc52",
+            return_value=(True, ""),
+        ) as osc52:
+            self.assertEqual((True, ""), kanban_tui.copy_to_clipboard("hello"))
+            osc52.assert_called_once_with("hello")
+
+        captured: list[str] = []
+
+        class FakeTty:
+            def write(self, data: str) -> None:
+                captured.append(data)
+
+            def flush(self) -> None:
+                return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with mock.patch("builtins.open", return_value=FakeTty()):
+            success, error = kanban_tui.copy_via_osc52("复制")
+        self.assertTrue(success)
+        self.assertEqual("", error)
+        self.assertEqual(1, len(captured))
+        self.assertIn("52;c;", captured[0])
+        self.assertIn(
+            base64.b64encode("复制".encode("utf-8")).decode("ascii"),
+            captured[0],
+        )
 
     def test_tui_copy_and_selection_helpers(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
