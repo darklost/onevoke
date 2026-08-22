@@ -45,6 +45,7 @@ ARGPARSE_ZH = {
     "invalid choice: %(value)r (choose from %(choices)s)": (
         "无效选择: %(value)r (可选: %(choices)s)"
     ),
+    "invalid %(type)s value: %(value)r": "无效 %(type)s 值: %(value)r",
     "%(prog)s: error: %(message)s\n": "%(prog)s: 错误: %(message)s\n",
 }
 

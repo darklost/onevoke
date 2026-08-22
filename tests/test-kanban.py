@@ -3745,6 +3745,16 @@ N/A
         self.assertIn("无效端口", result.stderr)
         self.assertNotIn("invalid port", result.stderr)
 
+    def test_web_rejects_non_integer_port_with_chinese_message(self) -> None:
+        result = self.run_command("web", "--port", "nope", succeeds=False)
+        self.assertIn("无效 int 值", result.stderr)
+        self.assertNotIn("invalid int value", result.stderr)
+
+    def test_tui_rejects_non_integer_refresh_with_chinese_message(self) -> None:
+        result = self.run_command("tui", "--refresh", "nope", succeeds=False)
+        self.assertIn("无效 int 值", result.stderr)
+        self.assertNotIn("invalid int value", result.stderr)
+
     def test_web_missing_assets_reports_localized_error(self) -> None:
         result = self.run_command(
             "web",
