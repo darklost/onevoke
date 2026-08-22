@@ -474,6 +474,30 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, returncode, output)
         self.assertIn("Current configuration", output)
 
+    def test_welcome_reset_uses_env_language_when_config_schema_invalid(self) -> None:
+        self.install_fake_environment(tmux=False)
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "invalid",
+                    "launcher": "tmux",
+                    "language": "cn",
+                    "reviewers": {role: "codex" for role in ROLES},
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.env["ONEVOKE_LANG"] = "en"
+
+        returncode, output = self.run_on_tty("\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("Current configuration", output)
+
     def test_welcome_decline_keeps_existing_config_unchanged(self) -> None:
         self.install_fake_environment(tmux=True)
         existing = {
