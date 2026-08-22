@@ -2521,6 +2521,25 @@ N/A
         tui._reset_mouse_selection()
         self.assertFalse(tui.suppress_click)
 
+        tui.detail = {
+            "task_id": "20260822-copy-task",
+            "title": "复制测试",
+            "state": "todo",
+            "document": "hello world",
+        }
+        tui.mouse_select_anchor = ("detail", 0, 0)
+        tui.mouse_select_cursor = ("detail", 0, 4)
+        self.assertEqual("hello", tui._extract_detail_mouse_selection())
+        tui.mouse_select_anchor = ("detail", 0, 4)
+        tui.mouse_select_cursor = ("detail", 0, 0)
+        self.assertEqual("hello", tui._extract_detail_mouse_selection())
+
+        tui.searching = True
+        tui._handle_search_mouse(5, 3, curses.BUTTON1_PRESSED)
+        self.assertTrue(tui.searching)
+        tui._handle_search_mouse(5, 3, curses.BUTTON1_RELEASED)
+        self.assertFalse(tui.searching)
+
     def test_tui_theme_key_cycles_and_run_rejects_unknown_theme(self) -> None:
         sys.path.insert(0, str(COMMAND.parent))
         try:

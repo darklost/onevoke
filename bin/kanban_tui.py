@@ -538,22 +538,28 @@ def selection_spans_for_line(
     cursor: tuple[int, int],
     *,
     line_mode: bool,
+    inclusive_end: bool = False,
 ) -> list[tuple[int, int]]:
     start, end = ordered_points(anchor, cursor)
     start_line, start_col = start
     end_line, end_col = end
+    if not inclusive_end and start_line == end_line and start_col >= end_col:
+        return []
+    if inclusive_end and not line_mode and start == end:
+        return []
     if line_mode:
         if start_line <= line_index <= end_line:
             return [(0, len(line))]
         return []
     if line_index < start_line or line_index > end_line:
         return []
+    end_col_exclusive = end_col + (1 if inclusive_end else 0)
     if start_line == end_line:
-        return [(start_col, min(end_col, len(line)))]
+        return [(start_col, min(end_col_exclusive, len(line)))]
     if line_index == start_line:
         return [(start_col, len(line))]
     if line_index == end_line:
-        return [(0, min(end_col, len(line)))]
+        return [(0, min(end_col_exclusive, len(line)))]
     return [(0, len(line))]
 
 
@@ -1229,7 +1235,7 @@ class KanbanTui:
         lines = self._detail_lines()
         anchor = (self.mouse_select_anchor[1], self.mouse_select_anchor[2])
         cursor = (self.mouse_select_cursor[1], self.mouse_select_cursor[2])
-        return extract_char_selection(lines, anchor, cursor)
+        return extract_mouse_char_selection(lines, anchor, cursor)
 
     def _finish_mouse_selection(self) -> None:
         if not self.mouse_selecting:
@@ -1472,6 +1478,11 @@ class KanbanTui:
             self._handle_board_mouse(x, y, bstate)
 
     def _handle_search_mouse(self, x: int, y: int, bstate: int) -> None:
+        if mouse_button1_released(bstate) and not (bstate & curses.BUTTON1_CLICKED):
+            if y != 1:
+                self.searching = False
+                self._set_cursor(False)
+            return
         if not mouse_left_clicked(bstate):
             return
         # 点到搜索行外则结束编辑并保留当前查询.
@@ -1481,6 +1492,10 @@ class KanbanTui:
 
     def _handle_detail_mouse(self, x: int, y: int, bstate: int) -> None:
         if self.detail_searching:
+            if mouse_button1_released(bstate) and not (bstate & curses.BUTTON1_CLICKED):
+                if y != 2:
+                    self._apply_detail_search()
+                return
             if mouse_left_clicked(bstate) and y != 2:
                 self._apply_detail_search()
             return
@@ -2028,6 +2043,7 @@ class KanbanTui:
                         mouse_anchor,
                         mouse_cursor,
                         line_mode=False,
+                        inclusive_end=True,
                     )
                 if spans:
                     self._render_line_segments(
@@ -2157,6 +2173,7 @@ class KanbanTui:
         selection_anchor: Optional[tuple[int, int]] = None
         selection_cursor: Optional[tuple[int, int]] = None
         selection_line_mode = False
+        selection_inclusive_end = False
         if self._detail_selection_active() and self.detail_anchor is not None:
             selection_anchor = self.detail_anchor
             selection_cursor = self.detail_cursor
@@ -2175,6 +2192,7 @@ class KanbanTui:
                 self.mouse_select_cursor[1],
                 self.mouse_select_cursor[2],
             )
+            selection_inclusive_end = True
         select_highlight = accent | curses.A_REVERSE | curses.A_BOLD
         for index, line in enumerate(visible_lines):
             line_index = self.detail_scroll + index
@@ -2193,6 +2211,7 @@ class KanbanTui:
                     selection_anchor,
                     selection_cursor,
                     line_mode=selection_line_mode,
+                    inclusive_end=selection_inclusive_end,
                 )
             cursor_col = None
             if (
@@ -2238,38 +2257,16 @@ class KanbanTui:
                 if current
                 else (curses.A_REVERSE | curses.A_BOLD)
             )
-            cursor = 0
-            column = 0
-            for start, end in spans:
-                if start > cursor:
-                    chunk = line[cursor:start]
-                    self._add(
-                        DETAIL_BODY_TOP + index,
-                        column,
-                        chunk,
-                        base_attr,
-                        width - 1 - column,
-                    )
-                    column += display_width(chunk)
-                chunk = line[start:end]
-                self._add(
-                    DETAIL_BODY_TOP + index,
-                    column,
-                    chunk,
-                    match_attr,
-                    width - 1 - column,
-                )
-                column += display_width(chunk)
-                cursor = end
-            if cursor < len(line):
-                chunk = line[cursor:]
-                self._add(
-                    DETAIL_BODY_TOP + index,
-                    column,
-                    chunk,
-                    base_attr,
-                    width - 1 - column,
-                )
+            self._render_line_segments(
+                DETAIL_BODY_TOP + index,
+                0,
+                line,
+                base_attr,
+                spans,
+                width=width - 1,
+                highlight_attr=match_attr,
+                cursor_col=cursor_col,
+            )
         visible_end = min(len(lines), self.detail_scroll + body_height)
         position = f"{self.detail_scroll + 1}-{visible_end}/{len(lines)}"
         footer = self._footer_message(detail=True)
