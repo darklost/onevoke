@@ -1555,6 +1555,26 @@ N/A
             self.assertEqual(2, localized.returncode)
             self.assertIn("用法: install.sh", localized.stderr)
 
+        for mixed_case in ("En_US.UTF-8", "eN_US.UTF-8"):
+            english_mixed = subprocess.run(
+                ["sh", str(INSTALLER), "--force"],
+                stdin=subprocess.DEVNULL,
+                env={
+                    **os.environ,
+                    "HOME": str(self.root / f"arg-home-mixed-{mixed_case}"),
+                    "ONEVOKE_LANG": "",
+                    "LC_ALL": "",
+                    "LC_MESSAGES": "",
+                    "LANG": mixed_case,
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(2, english_mixed.returncode)
+            self.assertIn("usage: install.sh", english_mixed.stderr)
+            self.assertNotIn("用法", english_mixed.stderr)
+
         missing = subprocess.run(
             ["sh", str(INSTALLER), "--lang"],
             env={**os.environ, "HOME": str(self.root / "arg-home-missing")},
@@ -3693,7 +3713,53 @@ N/A
 
     def test_web_rejects_invalid_port(self) -> None:
         result = self.run_command("web", "--port", "70000", succeeds=False)
-        self.assertRegex(result.stderr.lower(), r"invalid port|无效|port")
+        self.assertIn("无效端口", result.stderr)
+        self.assertNotIn("invalid port", result.stderr)
+
+    def test_web_missing_assets_reports_localized_error(self) -> None:
+        result = self.run_command(
+            "web",
+            "--assets",
+            "/definitely/missing-kanban-web-assets",
+            succeeds=False,
+        )
+        self.assertIn("Web 资源目录不存在", result.stderr)
+        self.assertNotIn("web assets directory not found", result.stderr)
+
+    def test_web_invalid_port_is_english_when_locale_is_en(self) -> None:
+        self.env["ONEVOKE_LANG"] = "en"
+        result = self.run_command("web", "--port", "70000", succeeds=False)
+        self.assertIn("invalid port", result.stderr)
+        self.assertNotIn("无效端口", result.stderr)
+
+    def test_tui_terminal_init_failure_is_localized(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import curses
+            import kanban_tui
+        finally:
+            sys.path.pop(0)
+
+        board = {
+            "generated_at": "2026-08-22 22:30:00",
+            "tasks": [],
+        }
+        context = {"terminal_init_failed": "终端初始化失败"}
+        with mock.patch(
+            "kanban_tui.curses.wrapper",
+            side_effect=curses.error("setup failed"),
+        ):
+            with self.assertRaises(kanban_tui.KanbanTuiError) as caught:
+                kanban_tui.run(
+                    single=True,
+                    refresh_interval=30,
+                    context=context,
+                    get_board=lambda: board,
+                    get_task=lambda task_id: {"task_id": task_id, "document": ""},
+                    theme="auto",
+                )
+        self.assertIn("终端初始化失败", str(caught.exception))
+        self.assertNotIn("failed to initialize terminal", str(caught.exception))
 
 
 if __name__ == "__main__":

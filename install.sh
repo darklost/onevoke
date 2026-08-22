@@ -21,8 +21,8 @@ case "$onevoke_lang" in
   cn) onevoke_locale=cn ;;
   en) onevoke_locale=en ;;
 esac
-case "$onevoke_locale" in
-  en*|EN*) onevoke_zh=0 ;;
+case "$(printf '%s' "$onevoke_locale" | tr '[:upper:]' '[:lower:]')" in
+  en*) onevoke_zh=0 ;;
   *) onevoke_zh=1 ;;
 esac
 

@@ -17,8 +17,12 @@ from string import Template
 from typing import Callable, Optional
 from urllib.parse import unquote, urlsplit
 
+from onevoke_config import language_text
+
 BoardPayload = Callable[[], dict]
 TaskPayload = Callable[[str], dict]
+
+t = language_text
 
 
 class KanbanWebError(Exception):
@@ -29,7 +33,7 @@ def resolve_share_dir(explicit: Optional[Path] = None) -> Path:
     if explicit is not None:
         path = explicit.resolve()
         if not path.is_dir():
-            raise KanbanWebError(f"web assets directory not found: {path}")
+            raise KanbanWebError(t(f"Web 资源目录不存在: {path}", f"web assets directory not found: {path}"))
         return path
     candidates = []
     env_share = __import__("os").environ.get("ONEVOKE_SHARE")
@@ -47,7 +51,10 @@ def resolve_share_dir(explicit: Optional[Path] = None) -> Path:
         if candidate.is_dir() and (candidate / "board.html").is_file():
             return candidate
     raise KanbanWebError(
-        "kanban web assets not found; reinstall with ./install.sh or set ONEVOKE_SHARE"
+        t(
+            "未找到 kanban web 资源; 请运行 ./install.sh 重装或设置 ONEVOKE_SHARE",
+            "kanban web assets not found; reinstall with ./install.sh or set ONEVOKE_SHARE",
+        )
     )
 
 
@@ -56,13 +63,19 @@ def render_board_page(share_dir: Path, context: dict) -> bytes:
     try:
         source = template_path.read_text(encoding="utf-8")
     except OSError as error:
-        raise KanbanWebError(f"failed to read board template: {error}") from error
+        raise KanbanWebError(
+            t(f"读取 board 模板失败: {error}", f"failed to read board template: {error}")
+        ) from error
     try:
         return Template(source).substitute(context).encode("utf-8")
     except KeyError as error:
-        raise KanbanWebError(f"board template missing placeholder: {error}") from error
+        raise KanbanWebError(
+            t(f"board 模板缺少占位符: {error}", f"board template missing placeholder: {error}")
+        ) from error
     except ValueError as error:
-        raise KanbanWebError(f"invalid board template: {error}") from error
+        raise KanbanWebError(
+            t(f"board 模板无效: {error}", f"invalid board template: {error}")
+        ) from error
 
 
 def json_bytes(payload: dict) -> bytes:
@@ -134,7 +147,10 @@ class KanbanWebHandler(BaseHTTPRequestHandler):
         except Exception as error:  # noqa: BLE001 - keep the server alive for later requests
             self._send_error_message(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
             return
-        self._send_error_message(HTTPStatus.NOT_FOUND, "not found")
+        self._send_error_message(HTTPStatus.NOT_FOUND, self._not_found_message())
+
+    def _not_found_message(self) -> str:
+        return self.server.page_context.get("not_found", t("未找到", "not found"))
 
     def _serve_events(self) -> None:
         self.send_response(HTTPStatus.OK.value)
@@ -168,10 +184,10 @@ class KanbanWebHandler(BaseHTTPRequestHandler):
 
     def _serve_static(self, relative: str) -> None:
         if not relative or Path(relative).name != relative or ".." in relative:
-            raise FileNotFoundError("not found")
+            raise FileNotFoundError(self._not_found_message())
         path = self.server.share_dir / relative
         if not path.is_file():
-            raise FileNotFoundError("not found")
+            raise FileNotFoundError(self._not_found_message())
         data = path.read_bytes()
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         if content_type.startswith("text/") or content_type.endswith("+json") or content_type in {
@@ -197,7 +213,7 @@ class KanbanWebServer(ThreadingHTTPServer):
         scan_interval: int = 60,
     ) -> None:
         if scan_interval < 1:
-            raise KanbanWebError("scan interval must be >= 1 second")
+            raise KanbanWebError(t("扫描间隔必须 >= 1 秒", "scan interval must be >= 1 second"))
         super().__init__(server_address, KanbanWebHandler)
         self.share_dir = share_dir
         self.page_context = page_context
@@ -301,7 +317,7 @@ class KanbanWebServer(ThreadingHTTPServer):
         if error is not None:
             raise KanbanWebError(error)
         if payload is None:
-            raise KanbanWebError("board data is not available")
+            raise KanbanWebError(t("看板数据不可用", "board data is not available"))
         return payload
 
     def monitor_stopped(self) -> bool:
@@ -310,9 +326,9 @@ class KanbanWebServer(ThreadingHTTPServer):
 
 def validate_bind(host: str, port: int) -> None:
     if not host.strip():
-        raise KanbanWebError("host must not be empty")
+        raise KanbanWebError(t("host 不能为空", "host must not be empty"))
     if not (0 < port < 65536):
-        raise KanbanWebError(f"invalid port: {port}")
+        raise KanbanWebError(t(f"无效端口: {port}", f"invalid port: {port}"))
 
 
 def serve(
@@ -338,7 +354,9 @@ def serve(
             scan_interval=scan_interval,
         )
     except OSError as error:
-        raise KanbanWebError(f"failed to bind {host}:{port}: {error}") from error
+        raise KanbanWebError(
+            t(f"绑定 {host}:{port} 失败: {error}", f"failed to bind {host}:{port}: {error}")
+        ) from error
     display_host = "localhost" if host in {"0.0.0.0", "::", "[::]"} else host
     if ":" in display_host and not display_host.startswith("["):
         url = f"http://[{display_host}]:{server.server_address[1]}/"

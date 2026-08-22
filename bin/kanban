@@ -1165,6 +1165,7 @@ def web_page_context() -> dict:
         "size_labels_json": json.dumps(WEB_SIZE_LABELS[lang], ensure_ascii=False),
         "updated_json": json.dumps(t("更新于", "Updated"), ensure_ascii=False),
         "error_json": json.dumps(t("加载失败", "Load failed"), ensure_ascii=False),
+        "not_found": t("未找到", "not found"),
     }
 
 
@@ -1245,6 +1246,8 @@ def tui_page_context() -> dict:
         "copy_failed": t("复制失败", "Copy failed"),
         "clipboard_unavailable": t("无可用剪贴板工具", "clipboard unavailable"),
         "no_match": t("无匹配", "no match"),
+        "terminal_init_failed": t("终端初始化失败", "failed to initialize terminal"),
+        "unknown_theme": t("未知主题", "unknown theme"),
         "state_labels": WEB_STATUS_LABELS[lang],
         "size_labels": WEB_SIZE_LABELS[lang],
     }

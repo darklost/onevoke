@@ -1164,7 +1164,7 @@ class KanbanTui:
                 if value
             )
         assignee = task.get("assignee") or self.context.get(
-            "unassigned", "Unassigned"
+            "unassigned", "未指派"
         )
         dot = self.glyphs["dot"]
         meta_time = compact_time(str(task.get("time") or "-"))
@@ -1366,7 +1366,7 @@ class KanbanTui:
             return self.copy_notice
         status_error = self._status_error()
         if status_error:
-            return f"{self.context.get('error', 'Error')}: {status_error}"
+            return f"{self.context.get('error', '加载失败')}: {status_error}"
         if detail and self.detail_searching:
             return self.context.get("search_help", "Enter 应用 | Esc 清空")
         if not detail and self.searching:
@@ -1374,11 +1374,11 @@ class KanbanTui:
         if detail:
             return self.context.get(
                 "detail_help",
-                "jk scroll | Ctrl-d/u half | Ctrl-f/b page | gg/G | v/V select y copy | / n N | q/Esc back",
+                "hjkl/方向键 移动光标 | 滚轮滚动 | Ctrl-d/u 半页 | Ctrl-f/b 整页 | gg/G | v/V 选择 y 复制 | 拖选复制 | / 搜索 n/N | q/Esc 返回",
             )
         return self.context.get(
             "help",
-            "arrows/hjkl move | y copy id | drag copy | -/= width | / search | Enter detail | a archive | r refresh | q quit",
+            "方向键/hjkl/鼠标 移动 | 双击详情 | 拖选复制 | y 复制 ID | 滚轮翻卡 | -/= 栏宽 | PgUp/PgDn 翻页 | / 搜索 | Enter 详情 | a 存档栏目 | t 主题 | r 刷新 | q 退出",
         )
 
     def _detail_body_height(self) -> int:
@@ -1926,8 +1926,8 @@ class KanbanTui:
         width_token = f"{width_label} {self.column_width}"
         width_token_span = display_width(width_token)
         toolbar_extra = (
-            f" | {self.context.get('theme', 'Theme')} {theme_label} | "
-            f"{mode} | {self.context.get('updated', 'Updated')} {stamp}"
+            f" | {self.context.get('theme', '主题')} {theme_label} | "
+            f"{mode} | {self.context.get('updated', '更新于')} {stamp}"
         )
         preferred_left = max(
             display_width(query_prefix) + 4,
@@ -2107,7 +2107,7 @@ class KanbanTui:
                     meta_head = clip_text(
                         f"{compact_time(str(task.get('time') or '-'))} "
                         f"{self.glyphs['dot']} "
-                        f"{task.get('assignee') or self.context.get('unassigned', 'Unassigned')} "
+                        f"{task.get('assignee') or self.context.get('unassigned', '未指派')} "
                         f"{self.glyphs['dot']} ",
                         content_width,
                     )
@@ -2351,7 +2351,7 @@ def run(
     persist_column_width: Optional[Callable[[int], None]] = None,
 ) -> None:
     if theme not in THEMES:
-        raise KanbanTuiError(f"unknown theme: {theme}")
+        raise KanbanTuiError(f"{context.get('unknown_theme', '未知主题')}: {theme}")
     preferred_width = (
         DEFAULT_COLUMN_WIDTH if column_width is None else clamp_column_width(column_width)
     )
@@ -2384,4 +2384,5 @@ def run(
     except KeyboardInterrupt:
         return
     except (curses.error, ValueError) as error:
-        raise KanbanTuiError(f"failed to initialize terminal: {error}") from error
+        prefix = context.get("terminal_init_failed", "终端初始化失败")
+        raise KanbanTuiError(f"{prefix}: {error}") from error
