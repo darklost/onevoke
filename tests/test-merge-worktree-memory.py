@@ -5,6 +5,7 @@ import fcntl
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -374,6 +375,30 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("无需合并", result.stdout)
         self.assertNotIn("Nothing to merge", result.stdout)
+
+    def test_merge_help_defaults_to_chinese_without_locale(self) -> None:
+        result = subprocess.run(
+            [str(MERGER), "--help"],
+            env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("用法:", result.stdout)
+        self.assertNotIn("usage:", result.stdout.lower())
+
+    def test_merge_invalid_argument_defaults_to_chinese_without_locale(self) -> None:
+        result = subprocess.run(
+            [str(MERGER), "--nope"],
+            env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("无法识别的参数", result.stderr)
+        self.assertNotIn("unrecognized arguments", result.stderr)
 
     def test_source_memory_symlink_file_fails_closed(self) -> None:
         """来源 `*.md` 若是软链, 必须失败, 禁止当空目录成功后清 worktree."""

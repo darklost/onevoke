@@ -3526,6 +3526,9 @@ N/A
         self.assertLess(task_id_at, group_at)
         self.assertIn("taskGroup.hidden = !task.task_group", script)
         self.assertIn("task.task_group,", script)
+        self.assertIn("console.error(detail)", script)
+        self.assertIn("config.errorLabel", script)
+        self.assertNotIn("error.message", script)
 
         group_style = re.search(r"\.badge\.task-group\s*\{([^}]+)\}", css)
         self.assertIsNotNone(group_style)

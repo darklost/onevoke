@@ -1258,6 +1258,20 @@ class LanguageTextTest(unittest.TestCase):
         os.environ["LANG"] = "de_DE.UTF-8"
         self.assertTrue(self.config.language_is_chinese())
 
+    def test_config_cli_help_defaults_to_chinese_without_locale(self) -> None:
+        locale_vars = ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
+        env = {key: value for key, value in os.environ.items() if key not in locale_vars}
+        result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "bin" / "onevoke_config.py"), "--help"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("用法:", result.stdout)
+        self.assertNotIn("usage:", result.stdout.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

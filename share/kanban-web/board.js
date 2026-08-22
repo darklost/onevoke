@@ -219,10 +219,13 @@
     boardEl.dataset.columns = String(visibleStates().length);
   }
 
-  function setError(message) {
+  function setError(detail) {
     boardEl.hidden = true;
     errorEl.hidden = false;
-    errorDetailEl.textContent = message || config.errorLabel || "";
+    if (detail !== undefined && detail !== null && detail !== "") {
+      console.error(detail);
+    }
+    errorDetailEl.textContent = config.errorLabel || "";
     boardEl.setAttribute("aria-busy", "false");
   }
 
@@ -241,7 +244,7 @@
       const payload = await response.json();
       applyBoardPayload(payload);
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+      setError(error);
     } finally {
       boardEl.setAttribute("aria-busy", "false");
     }
@@ -300,7 +303,7 @@
       try {
         applyBoardPayload(JSON.parse(event.data));
       } catch (error) {
-        setError(error instanceof Error ? error.message : String(error));
+        setError(error);
       }
     });
     eventSource.addEventListener("board-error", (event) => {
@@ -308,7 +311,7 @@
         const payload = JSON.parse(event.data);
         setError(payload.error || config.errorLabel || "");
       } catch (error) {
-        setError(error instanceof Error ? error.message : String(error));
+        setError(error);
       }
     });
     eventSource.onerror = () => {
@@ -324,7 +327,7 @@
       return;
     }
     void openTask(target.getAttribute("data-task-id")).catch((error) => {
-      setError(error instanceof Error ? error.message : String(error));
+      setError(error);
     });
   });
 

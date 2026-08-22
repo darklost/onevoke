@@ -324,6 +324,9 @@ def save_config(config: dict[str, Any]) -> Path:
 def main(argv: list[str]) -> int:
     """查询入口, 目前只供 onevoke-review.sh 读取 review 模型配置."""
     apply_language_argument(argv)
+    import argparse
+
+    argparse._ = lambda message: language_text(ARGPARSE_ZH.get(message, message), message)
     parser = LocalizedArgumentParser(prog="onevoke_config.py")
     commands = parser.add_subparsers(dest="command", required=True)
     review = commands.add_parser(
