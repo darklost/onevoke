@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import contextlib
 import importlib.util
 import os
 import shutil
@@ -123,6 +124,7 @@ class CleanBytesTest(unittest.TestCase):
 class MergeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
+        self.junctions: list[Path] = []
         self.root = Path(self.temp.name)
         self.source = self.root / "src"
         self.target = self.root / "tgt"
@@ -133,6 +135,9 @@ class MergeTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.source), "init", "-q"], check=True)
 
     def tearDown(self) -> None:
+        for junction in reversed(self.junctions):
+            if os.path.lexists(junction):
+                os.rmdir(junction)
         self.temp.cleanup()
 
     def write_source(self, name: str, data: bytes) -> Path:
@@ -155,6 +160,45 @@ class MergeTest(unittest.TestCase):
             check=False,
         )
 
+    def run_merger_paths(
+        self, source: Path, target: Path
+    ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [*MERGER_COMMAND, "--source", str(source), "--target", str(target)],
+            env=merger_env(),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+
+    def make_junction(self, link: Path, target: Path) -> None:
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest(f"cannot create a Windows junction: {result.stderr}")
+        self.junctions.append(link)
+
+    def assert_private_acl(self, path: Path) -> None:
+        acl = subprocess.run(
+            ["icacls.exe", str(path)],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, acl.returncode, acl.stderr)
+        self.assertNotIn("(I)", acl.stdout, acl.stdout)
+        self.assertEqual(1, acl.stdout.count("(F)"), acl.stdout)
+
     def test_merges_then_skips_on_second_run(self) -> None:
         self.write_source("a.md", GOLDEN_SOURCE)
 
@@ -164,10 +208,124 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(0, first.returncode, first.stderr)
         self.assertIn("merged=2 skipped=0", first.stdout)
         self.assertIn("merged=0 skipped=2", second.stdout)
-
         merged = (self.target_memory / "a.md").read_bytes()
         for entry_hash in GOLDEN_HASHES:
             self.assertEqual(1, merged.count(entry_hash.encode()))
+
+    def test_completion_marker_is_last_and_dedupes(self) -> None:
+        block = b"### 09:30\n- complete body\n"
+        entry_hash = merger.normalized_hash(block)
+        payload = merger.format_entry(
+            entry_hash, "entry", "/source", "a.md", "T", block
+        )
+        marker = f"<!-- merged-worktree-memory entry:{entry_hash} -->".encode()
+
+        self.assertGreater(payload.index(marker), payload.index(block) + len(block) - 1)
+        self.assertIn(entry_hash, merger.hashes_from_target_data(payload))
+
+    def test_complete_legacy_prefix_marker_still_dedupes(self) -> None:
+        block = b"### 09:30\n- complete legacy body\n"
+        entry_hash = merger.normalized_hash(block)
+        marker = f"<!-- merged-worktree-memory entry:{entry_hash} -->".encode()
+        legacy = (
+            b"\n"
+            + marker
+            + b"\n<!-- merged-worktree-memory source:/old file:a.md merged-at:T -->\n"
+            + block
+            + b"\n"
+        )
+        self.assertIn(entry_hash, merger.hashes_from_target_data(legacy))
+
+        self.write_source("a.md", block)
+        (self.target_memory / "a.md").write_bytes(legacy)
+        result = self.run_merger()
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("merged=0 skipped=1", result.stdout)
+
+    def test_partial_legacy_prefix_marker_is_not_trusted_and_retries(self) -> None:
+        block = b"### 09:30\n- full legacy source body\n"
+        entry_hash = merger.normalized_hash(block)
+        marker = f"<!-- merged-worktree-memory entry:{entry_hash} -->".encode()
+        legacy_partial = (
+            b"\n"
+            + marker
+            + b"\n<!-- merged-worktree-memory source:/old file:a.md merged-at:T -->\n"
+            + block[: len(block) // 2]
+        )
+        self.assertNotIn(entry_hash, merger.hashes_from_target_data(legacy_partial))
+
+        self.write_source("a.md", block)
+        target_file = self.target_memory / "a.md"
+        target_file.write_bytes(legacy_partial)
+        retry = self.run_merger()
+        second = self.run_merger()
+        self.assertEqual(0, retry.returncode, retry.stderr)
+        self.assertIn("merged=1 skipped=0", retry.stdout)
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertIn("merged=0 skipped=1", second.stdout)
+        final = target_file.read_bytes()
+        self.assertGreater(final.rfind(marker), final.rfind(block) + len(block) - 1)
+
+    def test_legacy_file_entry_marker_requires_matching_complete_body(self) -> None:
+        body = b"- complete fallback memory\n- second line\n"
+        entry_hash = merger.normalized_hash(body)
+        marker = (
+            f"<!-- merged-worktree-memory file-entry:{entry_hash} -->".encode()
+        )
+        prefix = (
+            b"\n"
+            + marker
+            + b"\n<!-- merged-worktree-memory source:/old file:a.md merged-at:T -->\n"
+        )
+
+        self.assertIn(
+            entry_hash,
+            merger.hashes_from_target_data(prefix + body + b"\n"),
+        )
+        self.assertNotIn(
+            entry_hash,
+            merger.hashes_from_target_data(prefix + body[: len(body) // 2]),
+        )
+
+    def test_partial_append_without_completion_marker_fails_then_retries(self) -> None:
+        block = b"### 09:30\n- source body must be complete\n"
+        self.write_source("a.md", block)
+        target_file = self.target_memory / "a.md"
+        expected_hash = merger.normalized_hash(block)
+        completion_marker = (
+            f"<!-- merged-worktree-memory entry:{expected_hash} -->".encode()
+        )
+        final_assert = mock.Mock()
+
+        def fail_after_partial_body(handle, payload: bytes, target: Path) -> None:
+            self.assertEqual(target_file, target)
+            body_start = payload.index(block)
+            partial_end = body_start + len(block) // 2
+            written = handle.write(payload[:partial_end])
+            self.assertEqual(partial_end, written)
+            raise OSError(28, "simulated disk full")
+
+        with mock.patch.object(
+            merger, "append_payload_fully", side_effect=fail_after_partial_body
+        ), mock.patch.object(merger, "assert_source_unchanged", final_assert):
+            with self.assertRaises(OSError):
+                merger.merge(str(self.source), str(self.target), dry_run=False)
+
+        final_assert.assert_not_called()
+        partial = target_file.read_bytes()
+        self.assertNotIn(completion_marker, partial)
+        self.assertNotIn(expected_hash, merger.hashes_from_target_data(partial))
+        self.assertTrue((self.source_memory / "a.md").exists())
+
+        retry = self.run_merger()
+        second = self.run_merger()
+        self.assertEqual(0, retry.returncode, retry.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+        completed = target_file.read_bytes()
+        body_position = completed.rfind(block)
+        marker_position = completed.rfind(completion_marker)
+        self.assertGreater(marker_position, body_position + len(block) - 1)
+        self.assertIn("merged=0 skipped=1", second.stdout)
 
     def test_merge_waits_for_the_target_lock(self) -> None:
         self.write_source("a.md", b"### 09:30\n- serialized\n")
@@ -451,7 +609,10 @@ class MergeTest(unittest.TestCase):
         )
 
         self.assertNotEqual(0, result.returncode, result.stdout)
-        self.assertIn("must not be a symlink", result.stderr)
+        if os.name == "nt":
+            self.assertIn("reparse point", result.stderr)
+        else:
+            self.assertIn("must not be a symlink", result.stderr)
         self.assertFalse((self.target_memory / "a.md").exists())
         self.assertEqual(before, real.read_bytes())
         self.assertTrue(link.is_symlink())
@@ -492,18 +653,22 @@ class MergeTest(unittest.TestCase):
         merger.SOURCE_STABLE_ATTEMPTS = 2
         merger.SOURCE_STABLE_DELAY_SECONDS = 0.01
         reads = {"count": 0}
-        real_read_bytes = Path.read_bytes
+        real_safe_read = merger.read_regular_file_with_identity_nofollow
 
-        def flaky_read(self: Path) -> bytes:
-            data = real_read_bytes(self)
-            if self == source_file:
+        def flaky_safe_read(root: Path, path: Path):
+            identity, data = real_safe_read(root, path)
+            if path == source_file:
                 reads["count"] += 1
                 if reads["count"] % 2 == 0:
-                    return data + b"### 09:45\n- late\n"
-            return data
+                    data += b"### 09:45\n- late\n"
+            return identity, data
 
         try:
-            with mock.patch.object(Path, "read_bytes", flaky_read):
+            with mock.patch.object(
+                merger,
+                "read_regular_file_with_identity_nofollow",
+                side_effect=flaky_safe_read,
+            ):
                 with self.assertRaises(SystemExit) as raised:
                     merger.read_stable_source_files(self.source_memory)
         finally:
@@ -511,6 +676,41 @@ class MergeTest(unittest.TestCase):
             merger.SOURCE_STABLE_DELAY_SECONDS = original_delay
 
         self.assertEqual(1, raised.exception.code)
+
+    @unittest.skipUnless(os.name == "nt", "Windows file-identity regression")
+    def test_windows_source_replaced_with_same_bytes_between_reads_is_unstable(self) -> None:
+        source_file = self.write_source("a.md", b"### 09:30\n- same bytes\n")
+        backup = self.source_memory / "old-copy.bin"
+        original_attempts = merger.SOURCE_STABLE_ATTEMPTS
+        original_delay = merger.SOURCE_STABLE_DELAY_SECONDS
+        original_read = merger.read_regular_file_with_identity_nofollow
+        replaced = {"value": False}
+
+        def replace_after_first_read(root: Path, path: Path):
+            identity, data = original_read(root, path)
+            if path == source_file and not replaced["value"]:
+                replaced["value"] = True
+                os.replace(source_file, backup)
+                source_file.write_bytes(data)
+            return identity, data
+
+        merger.SOURCE_STABLE_ATTEMPTS = 1
+        merger.SOURCE_STABLE_DELAY_SECONDS = 0.01
+        try:
+            with mock.patch.object(
+                merger,
+                "read_regular_file_with_identity_nofollow",
+                side_effect=replace_after_first_read,
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    merger.read_stable_source_files(self.source_memory)
+        finally:
+            merger.SOURCE_STABLE_ATTEMPTS = original_attempts
+            merger.SOURCE_STABLE_DELAY_SECONDS = original_delay
+
+        self.assertEqual(1, raised.exception.code)
+        self.assertTrue(replaced["value"])
+        self.assertEqual(backup.read_bytes(), source_file.read_bytes())
 
     def test_new_source_file_after_merge_fails(self) -> None:
         self.write_source("a.md", b"### 09:30\n- first\n")
@@ -582,6 +782,33 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(1, raised.exception.code)
         self.assertIn(b"late", source_file.read_bytes())
 
+    def test_source_replaced_with_same_bytes_after_snapshot_fails_final_check(self) -> None:
+        source_file = self.write_source("a.md", b"### 09:30\n- unchanged bytes\n")
+        backup = self.source_memory / "original.bin"
+        original_assert = merger.assert_source_unchanged
+        replaced = {"value": False}
+
+        def replace_then_assert(
+            source_memory: Path,
+            snapshots: dict[Path, bytes],
+            expected_identity: tuple[int, ...] | None = None,
+        ) -> None:
+            data = source_file.read_bytes()
+            os.replace(source_file, backup)
+            source_file.write_bytes(data)
+            replaced["value"] = True
+            original_assert(source_memory, snapshots, expected_identity)
+
+        with mock.patch.object(
+            merger, "assert_source_unchanged", side_effect=replace_then_assert
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                merger.merge(str(self.source), str(self.target), dry_run=False)
+
+        self.assertEqual(1, raised.exception.code)
+        self.assertTrue(replaced["value"])
+        self.assertEqual(backup.read_bytes(), source_file.read_bytes())
+
     def test_merge_does_not_rewrite_target_so_concurrent_appends_survive(self) -> None:
         target_file = self.target_memory / "a.md"
         dirty = b"### 08:00\n- dirty \xff byte\n"
@@ -619,6 +846,174 @@ class MergeTest(unittest.TestCase):
         self.assertIn(b"concurrent target append", final)
         self.assertIn(b"\xff", final)
         self.assertIn(b"clean entry", final)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse regression")
+    def test_windows_rejects_source_and_target_root_junctions(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- protected\n")
+        source_link = self.root / "source-junction"
+        target_link = self.root / "target-junction"
+        self.make_junction(source_link, self.source)
+        self.make_junction(target_link, self.target)
+
+        for source, target in (
+            (source_link, self.target),
+            (self.source, target_link),
+        ):
+            with self.subTest(source=source, target=target):
+                result = self.run_merger_paths(source, target)
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn("reparse point", result.stderr)
+
+        self.assertFalse((self.target_memory / "a.md").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse regression")
+    def test_windows_rejects_source_state_and_memory_junctions(self) -> None:
+        for component in (".memsearch", "memory", "entry"):
+            with self.subTest(component=component):
+                case_source = self.root / f"source-{component.lstrip('.')}"
+                case_source.mkdir()
+                subprocess.run(["git", "-C", str(case_source), "init", "-q"], check=True)
+                outside = self.root / f"outside-source-{component.lstrip('.')}"
+                if component == ".memsearch":
+                    (outside / "memory").mkdir(parents=True)
+                    (outside / "memory" / "a.md").write_bytes(
+                        b"### 09:30\n- outside\n"
+                    )
+                    link = case_source / ".memsearch"
+                elif component == "memory":
+                    (case_source / ".memsearch").mkdir()
+                    outside.mkdir()
+                    (outside / "a.md").write_bytes(b"### 09:30\n- outside\n")
+                    link = case_source / ".memsearch" / "memory"
+                else:
+                    memory = case_source / ".memsearch" / "memory"
+                    memory.mkdir(parents=True)
+                    outside.mkdir()
+                    link = memory / "ignored-junction"
+                self.make_junction(link, outside)
+
+                result = self.run_merger_paths(case_source, self.target)
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn("reparse point", result.stderr)
+
+        self.assertFalse((self.target_memory / "a.md").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse regression")
+    def test_windows_rejects_target_state_memory_lock_and_file_reparse(self) -> None:
+        cases = ("state", "memory", "lock", "file", "nested")
+        for case in cases:
+            with self.subTest(case=case):
+                case_source = self.root / f"case-source-{case}"
+                case_target = self.root / f"case-target-{case}"
+                source_memory = case_source / ".memsearch" / "memory"
+                target_memory = case_target / ".memsearch" / "memory"
+                source_memory.mkdir(parents=True)
+                target_memory.mkdir(parents=True)
+                (source_memory / "a.md").write_bytes(b"### 09:30\n- protected\n")
+                subprocess.run(["git", "-C", str(case_source), "init", "-q"], check=True)
+                outside = self.root / f"outside-target-{case}"
+                outside.mkdir()
+                sentinel = outside / "sentinel.txt"
+                sentinel.write_text("untouched", encoding="utf-8")
+
+                if case == "state":
+                    shutil.rmtree(case_target / ".memsearch")
+                    link = case_target / ".memsearch"
+                elif case == "memory":
+                    shutil.rmtree(target_memory)
+                    link = target_memory
+                elif case == "lock":
+                    link = case_target / ".memsearch" / ".merge-worktree-memory.lock"
+                elif case == "file":
+                    link = target_memory / "a.md"
+                else:
+                    link = target_memory / "nested"
+                self.make_junction(link, outside)
+
+                result = self.run_merger_paths(case_source, case_target)
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn("reparse point", result.stderr)
+                self.assertEqual("untouched", sentinel.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL regression")
+    def test_windows_merge_migrates_entire_target_memory_boundary_to_private_acl(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- new\n")
+        target_file = self.target_memory / "a.md"
+        target_file.write_bytes(b"### 08:00\n- old\n")
+        nested = self.target_memory / "nested"
+        nested.mkdir()
+        nested_file = nested / "old.md"
+        nested_file.write_bytes(b"### 07:00\n- nested\n")
+        auxiliary = self.target_memory / "index.bin"
+        auxiliary.write_bytes(b"index")
+        for path in (
+            self.target / ".memsearch",
+            self.target_memory,
+            target_file,
+            nested,
+            nested_file,
+            auxiliary,
+        ):
+            reset = subprocess.run(
+                ["icacls.exe", str(path), "/reset"],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, reset.returncode, reset.stderr)
+
+        result = self.run_merger()
+        self.assertEqual(0, result.returncode, result.stderr)
+        lock_path = self.target / ".memsearch" / ".merge-worktree-memory.lock"
+        for path in (
+            self.target / ".memsearch",
+            self.target_memory,
+            lock_path,
+            target_file,
+            nested,
+            nested_file,
+            auxiliary,
+        ):
+            with self.subTest(path=path):
+                self.assert_private_acl(path)
+
+    @unittest.skipUnless(os.name == "nt", "Windows replacement-race regression")
+    def test_windows_target_handle_blocks_replacement_between_read_and_append(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- new entry\n")
+        target_file = self.target_memory / "a.md"
+        target_file.write_bytes(b"### 08:00\n- existing entry\n")
+        intruder = self.target_memory / "intruder.md"
+        original_open = merger.open_private_append_file_nofollow
+        target_opens = {"count": 0}
+        attempted = {"value": False}
+
+        @contextlib.contextmanager
+        def attempt_replace(root: Path, path: Path):
+            with original_open(root, path) as handle:
+                if path == target_file:
+                    target_opens["count"] += 1
+                # 第一次是全边界 preflight，第二次才是去重读取+append 句柄.
+                if path == target_file and target_opens["count"] == 2:
+                    attempted["value"] = True
+                    intruder.write_bytes(b"attacker replacement\n")
+                    with self.assertRaises(OSError):
+                        os.replace(intruder, target_file)
+                yield handle
+
+        with mock.patch.object(
+            merger,
+            "open_private_append_file_nofollow",
+            side_effect=attempt_replace,
+        ):
+            merger.merge(str(self.source), str(self.target), dry_run=False)
+
+        self.assertTrue(attempted["value"])
+        final = target_file.read_bytes()
+        self.assertIn(b"existing entry", final)
+        self.assertIn(b"new entry", final)
+        self.assertEqual(b"attacker replacement\n", intruder.read_bytes())
 
 
 if __name__ == "__main__":

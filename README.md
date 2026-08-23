@@ -78,7 +78,7 @@ kanban web
 
 `kanban web` 默认在 `http://127.0.0.1:8080` 启动只读看板. 服务端每 60 秒扫描任务, 仅在数据变化时通过 SSE 推送; 客户端原位更新对应卡片.
 
-Windows 后端拒绝看板路径中的符号链接, junction 和其他 reparse point, 并通过已校验的 Win32 句柄完成任务读写与迁移. 配置文件和审核运行目录使用只允许当前用户访问的受保护 ACL, 记忆合并使用 `LockFileEx` 独占锁; 对应的 POSIX 后端继续使用 no-follow 文件操作, `0600`/`0700` 权限和 `flock`.
+Windows 后端拒绝看板及记忆合并边界中的符号链接, junction 和其他 reparse point, 并通过已校验的 Win32 句柄完成任务读写、迁移、记忆读取和追加. 在 Windows 上, 配置文件、审核运行目录及目标记忆目录/文件使用只允许当前用户访问的受保护 DACL, 记忆合并使用 `LockFileEx` 独占锁. 这些改动不改变 POSIX 现有的 no-follow 文件操作、`0600`/`0700` 权限和 `flock` 边界.
 
 看板总览:
 

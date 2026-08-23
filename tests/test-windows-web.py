@@ -15,6 +15,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -127,6 +128,36 @@ class WindowsWebTest(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate(timeout=5)
+
+    def test_missing_default_assets_reports_windows_recovery_command(self) -> None:
+        sys.path.insert(0, str(KANBAN.parent))
+        try:
+            import kanban_web
+        finally:
+            sys.path.pop(0)
+
+        missing_home = self.root / "missing-home"
+        missing_script = self.root / "missing-source" / "bin" / "kanban_web.py"
+        with (
+            mock.patch.object(kanban_web.Path, "home", return_value=missing_home),
+            mock.patch.object(kanban_web, "__file__", str(missing_script)),
+            mock.patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("ONEVOKE_SHARE", None)
+            for language, expected in (
+                ("cn", "请在 Onevoke 仓库根目录运行"),
+                ("en", "from the Onevoke repository root"),
+            ):
+                with self.subTest(language=language), mock.patch.dict(
+                    os.environ, {"ONEVOKE_LANG": language}, clear=False
+                ):
+                    with self.assertRaises(kanban_web.KanbanWebError) as caught:
+                        kanban_web.resolve_share_dir()
+                    message = str(caught.exception)
+                    self.assertIn(expected, message)
+                    self.assertIn("powershell.exe -NoProfile", message)
+                    self.assertIn(r".\install.ps1", message)
+                    self.assertNotIn("./install.sh", message)
 
 
 if __name__ == "__main__":

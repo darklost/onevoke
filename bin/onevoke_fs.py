@@ -2,11 +2,12 @@
 
 """Onevoke 的跨平台底层文件系统原语.
 
-看板中的任务路径属于安全边界. POSIX 使用 ``openat`` 和
-``O_NOFOLLOW`` 逐级打开; Windows 使用 ``CreateFileW`` 的
-``FILE_FLAG_OPEN_REPARSE_POINT`` 逐级打开, 并让每个已验证目录句柄都不
-共享 ``DELETE``. 后者会在继续解析子路径期间阻止目录被改名、删除或换成
-symlink/junction, 因而不把安全性退化为一次性的 ``Path.is_symlink`` 检查.
+看板任务与记忆合并路径属于安全边界. POSIX 使用 ``openat`` 和
+``O_NOFOLLOW`` 逐级打开; Windows 只用 ``CreateFileW`` 打开不可替换的卷根,
+之后通过 ``NtCreateFile`` 的 ``RootDirectory`` 对已固定父目录句柄逐分量
+打开或创建. 子路径不再经绝对路径重新解析, 因而即使攻击者在验证后
+把空目录原地改成 junction, 后续读写、创建、rename 和 ACL 也只会
+作用于已固定的对象或明确失败, 不会跟随到 reparse target.
 """
 
 from __future__ import annotations
@@ -64,15 +65,20 @@ if os.name == "nt":
 
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    _ntdll = ctypes.WinDLL("ntdll")
 
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
     _GENERIC_READ = 0x80000000
     _GENERIC_WRITE = 0x40000000
+    _FILE_APPEND_DATA = 0x00000004
+    _FILE_LIST_DIRECTORY = 0x00000001
     _DELETE = 0x00010000
     _READ_CONTROL = 0x00020000
     _WRITE_DAC = 0x00040000
+    _FILE_TRAVERSE = 0x00000020
     _FILE_READ_ATTRIBUTES = 0x00000080
+    _SYNCHRONIZE = 0x00100000
     _FILE_SHARE_READ = 0x00000001
     _FILE_SHARE_WRITE = 0x00000002
     _FILE_SHARE_DELETE = 0x00000004
@@ -87,9 +93,23 @@ if os.name == "nt":
     _ERROR_PATH_NOT_FOUND = 3
     _ERROR_FILE_EXISTS = 80
     _ERROR_ALREADY_EXISTS = 183
+    _ERROR_CANT_RESOLVE_FILENAME = 1921
     _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
-    _FILE_RENAME_INFO_CLASS = 3
     _FILE_DISPOSITION_INFO_CLASS = 4
+    _NT_FILE_RENAME_INFORMATION_CLASS = 10
+    _NT_FILE_NAMES_INFORMATION_CLASS = 12
+    _NT_FILE_OPEN = 1
+    _NT_FILE_CREATE = 2
+    _NT_FILE_DIRECTORY_FILE = 0x00000001
+    _NT_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
+    _NT_FILE_NON_DIRECTORY_FILE = 0x00000040
+    _NT_FILE_OPEN_FOR_BACKUP_INTENT = 0x00004000
+    _NT_FILE_OPEN_REPARSE_POINT = 0x00200000
+    _OBJ_CASE_INSENSITIVE = 0x00000040
+    _STATUS_NO_MORE_FILES = 0x80000006
+    _STATUS_REPARSE_POINT_ENCOUNTERED = 0xC000050B
+    _STATUS_IO_REPARSE_TAG_NOT_HANDLED = 0xC0000279
+    _STATUS_STOPPED_ON_SYMLINK = 0x8000002D
     _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
     _TOKEN_QUERY = 0x00000008
     _TOKEN_USER_CLASS = 1
@@ -130,6 +150,29 @@ if os.name == "nt":
             ("hEvent", wintypes.HANDLE),
         ]
 
+    class _UNICODE_STRING(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class _OBJECT_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(_UNICODE_STRING)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", ctypes.c_void_p),
+            ("SecurityQualityOfService", ctypes.c_void_p),
+        ]
+
+    class _IO_STATUS_BLOCK(ctypes.Structure):
+        _fields_ = [
+            ("Status", ctypes.c_void_p),
+            ("Information", ctypes.c_size_t),
+        ]
+
     class _SID_AND_ATTRIBUTES(ctypes.Structure):
         _fields_ = [
             ("Sid", ctypes.c_void_p),
@@ -151,8 +194,6 @@ if os.name == "nt":
     _kernel32.CreateFileW.restype = wintypes.HANDLE
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
-    _kernel32.CreateDirectoryW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p]
-    _kernel32.CreateDirectoryW.restype = wintypes.BOOL
     _kernel32.GetFileInformationByHandleEx.argtypes = [
         wintypes.HANDLE,
         ctypes.c_int,
@@ -255,6 +296,44 @@ if os.name == "nt":
         ctypes.c_void_p,
     ]
     _advapi32.SetSecurityInfo.restype = wintypes.DWORD
+    _ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_OBJECT_ATTRIBUTES),
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    _ntdll.NtCreateFile.restype = wintypes.LONG
+    _ntdll.NtSetInformationFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    _ntdll.NtSetInformationFile.restype = wintypes.LONG
+    _ntdll.NtQueryDirectoryFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        ctypes.c_int,
+        wintypes.BOOLEAN,
+        ctypes.POINTER(_UNICODE_STRING),
+        wintypes.BOOLEAN,
+    ]
+    _ntdll.NtQueryDirectoryFile.restype = wintypes.LONG
+    _ntdll.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
+    _ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
 
 
 def _raise_windows_error(action: str, path: Path | None = None) -> None:
@@ -265,6 +344,29 @@ def _raise_windows_error(action: str, path: Path | None = None) -> None:
 
 
 if os.name == "nt":
+    def _unsigned_ntstatus(status: int) -> int:
+        return int(status) & 0xFFFFFFFF
+
+
+    def _raise_nt_error(action: str, status: int, path: Path) -> None:
+        unsigned = _unsigned_ntstatus(status)
+        if unsigned in (
+            _STATUS_REPARSE_POINT_ENCOUNTERED,
+            _STATUS_IO_REPARSE_TAG_NOT_HANDLED,
+            _STATUS_STOPPED_ON_SYMLINK,
+        ):
+            raise UnsafePathError(f"reparse point is not allowed: {path}")
+        code = int(_ntdll.RtlNtStatusToDosError(status))
+        if code == _ERROR_CANT_RESOLVE_FILENAME:
+            raise UnsafePathError(f"reparse point is not allowed: {path}")
+        detail = ctypes.FormatError(code).strip()
+        raise OSError(
+            code,
+            f"{action}: {path}: {detail}",
+            os.fspath(path),
+        )
+
+
     def _close_handle(handle: int) -> None:
         if handle not in (None, _INVALID_HANDLE_VALUE):
             _kernel32.CloseHandle(handle)
@@ -305,12 +407,13 @@ if os.name == "nt":
         expected: str = "any",
         share_delete: bool = False,
     ) -> int:
+        """只用于打开卷根; 所有子路径必须走 ``_open_relative_handle``."""
+        if expected == "directory":
+            access |= _FILE_TRAVERSE
         share = _FILE_SHARE_READ | _FILE_SHARE_WRITE
         if share_delete:
             share |= _FILE_SHARE_DELETE
-        flags = _FILE_FLAG_OPEN_REPARSE_POINT
-        if expected in ("directory", "any"):
-            flags |= _FILE_FLAG_BACKUP_SEMANTICS
+        flags = _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS
         if creation == _CREATE_NEW:
             flags |= _FILE_ATTRIBUTE_NORMAL
         handle = _kernel32.CreateFileW(
@@ -326,6 +429,89 @@ if os.name == "nt":
         return handle
 
 
+    def _validate_relative_name(name: str, path: Path) -> None:
+        if (
+            not name
+            or name in (".", "..")
+            or "\\" in name
+            or "/" in name
+            or ":" in name
+            or "\x00" in name
+        ):
+            raise UnsafePathError(f"invalid protected path component: {path}")
+
+
+    def _open_relative_handle(
+        parent_handle: int,
+        name: str,
+        path: Path,
+        *,
+        access: int,
+        creation: int = _OPEN_EXISTING,
+        expected: str = "any",
+        share_delete: bool = False,
+    ) -> int:
+        """相对已固定父目录打开单一分量, 永不重新解析绝对路径."""
+        _validate_relative_name(name, path)
+        name_buffer = ctypes.create_unicode_buffer(name)
+        name_length = len(name.encode("utf-16-le"))
+        object_name = _UNICODE_STRING(
+            name_length,
+            name_length + ctypes.sizeof(wintypes.WCHAR),
+            ctypes.cast(name_buffer, wintypes.LPWSTR),
+        )
+        attributes = _OBJECT_ATTRIBUTES(
+            ctypes.sizeof(_OBJECT_ATTRIBUTES),
+            parent_handle,
+            ctypes.pointer(object_name),
+            # RootDirectory 已是固定文件对象. OBJ_DONT_REPARSE 会在该
+            # 对象验证后被原地加上 reparse tag 时拒绝相对访问,
+            # 反而破坏句柄固定语义. FILE_OPEN_REPARSE_POINT 保证新
+            # 打开的单分量自身不被跟随, 随后再从句柄检查 tag.
+            _OBJ_CASE_INSENSITIVE,
+            None,
+            None,
+        )
+        options = (
+            _NT_FILE_SYNCHRONOUS_IO_NONALERT
+            | _NT_FILE_OPEN_FOR_BACKUP_INTENT
+            | _NT_FILE_OPEN_REPARSE_POINT
+        )
+        if expected == "directory":
+            access |= _FILE_TRAVERSE
+            options |= _NT_FILE_DIRECTORY_FILE
+        elif expected == "file":
+            options |= _NT_FILE_NON_DIRECTORY_FILE
+        disposition = _NT_FILE_CREATE if creation == _CREATE_NEW else _NT_FILE_OPEN
+        share = _FILE_SHARE_READ | _FILE_SHARE_WRITE
+        if share_delete:
+            share |= _FILE_SHARE_DELETE
+        handle = wintypes.HANDLE()
+        io_status = _IO_STATUS_BLOCK()
+        status = _ntdll.NtCreateFile(
+            ctypes.byref(handle),
+            access | _SYNCHRONIZE,
+            ctypes.byref(attributes),
+            ctypes.byref(io_status),
+            None,
+            _FILE_ATTRIBUTE_NORMAL if expected != "directory" else 0,
+            share,
+            disposition,
+            options,
+            None,
+            0,
+        )
+        if status < 0:
+            _raise_nt_error("cannot open protected path", status, path)
+        value = int(handle.value)
+        try:
+            _validate_handle_kind(value, path, expected)
+        except BaseException:
+            _close_handle(value)
+            raise
+        return value
+
+
     @contextlib.contextmanager
     def _open_chain(
         root: Path,
@@ -335,40 +521,98 @@ if os.name == "nt":
         final_expected: str,
     ) -> Iterator[tuple[Path, int]]:
         root_absolute, candidate, parts = _relative_parts(root, path)
+        anchor = Path(root_absolute.anchor)
+        if not root_absolute.anchor:
+            raise UnsafePathError(f"protected root has no absolute anchor: {root_absolute}")
+        _, _, root_parts = _relative_parts(anchor, root_absolute)
+        chain_parts = (*root_parts, *parts)
         handles: list[int] = []
-        current = root_absolute
+        current = anchor
         try:
+            first_expected = final_expected if not chain_parts else "directory"
             handles.append(_create_file_handle(
                 current,
-                access=_FILE_READ_ATTRIBUTES,
-                expected="directory",
+                access=final_access if not chain_parts else _FILE_READ_ATTRIBUTES,
+                expected=first_expected,
             ))
-            if not parts:
-                if final_expected != "directory":
-                    raise UnsafePathError(f"protected path cannot be the root: {candidate}")
+            if not chain_parts:
                 yield candidate, handles[-1]
                 return
-            for index, part in enumerate(parts):
+            for index, part in enumerate(chain_parts):
                 current /= part
-                final = index == len(parts) - 1
-                handles.append(_create_file_handle(
-                    current,
-                    access=final_access if final else _FILE_READ_ATTRIBUTES,
-                    expected=final_expected if final else "directory",
-                ))
+                final = index == len(chain_parts) - 1
+                expected = final_expected if final else "directory"
+                if final:
+                    final_handle = _try_open_leaf(
+                        handles[-1],
+                        part,
+                        current,
+                        access=final_access,
+                        expected=expected,
+                    )
+                    if final_handle is None:
+                        raise FileNotFoundError(
+                            _ERROR_FILE_NOT_FOUND,
+                            f"protected path does not exist: {current}",
+                            os.fspath(current),
+                        )
+                    handles.append(final_handle)
+                else:
+                    handles.append(_open_relative_handle(
+                        handles[-1],
+                        part,
+                        current,
+                        access=_FILE_READ_ATTRIBUTES,
+                        expected="directory",
+                    ))
             yield candidate, handles[-1]
         finally:
             for handle in reversed(handles):
                 _close_handle(handle)
 
 
-    def _try_open_leaf(path: Path, *, expected: str = "any") -> int | None:
+    def _try_open_leaf(
+        parent_handle: int,
+        name: str,
+        path: Path,
+        *,
+        access: int = _FILE_READ_ATTRIBUTES,
+        expected: str = "any",
+        share_delete: bool = False,
+    ) -> int | None:
+        probe: int | None = None
         try:
-            return _create_file_handle(
+            # 先以最小权限打开“本体”才能把 directory junction
+            # 稳定识别为 reparse point；直接用高权限和
+            # FILE_NON_DIRECTORY_FILE 打开可能只返回 access denied.
+            probe = _open_relative_handle(
+                parent_handle,
+                name,
                 path,
                 access=_FILE_READ_ATTRIBUTES,
-                expected=expected,
+                expected="any",
+                share_delete=share_delete or bool(access & _DELETE),
             )
+            _validate_handle_kind(probe, path, expected)
+            if access == _FILE_READ_ATTRIBUTES:
+                result = probe
+                probe = None
+                return result
+            identity = _handle_identity(probe, path)
+            result = _open_relative_handle(
+                parent_handle,
+                name,
+                path,
+                access=access,
+                expected=expected,
+                share_delete=share_delete,
+            )
+            if _handle_identity(result, path) != identity:
+                _close_handle(result)
+                raise UnsafePathError(
+                    f"protected path identity changed while opening: {path}"
+                )
+            return result
         except OSError as error:
             if getattr(error, "winerror", None) in (
                 _ERROR_FILE_NOT_FOUND,
@@ -379,6 +623,55 @@ if os.name == "nt":
             ):
                 return None
             raise
+        finally:
+            if probe is not None:
+                _close_handle(probe)
+
+
+    def _open_or_create_regular_file_handle(
+        parent_handle: int, name: str, path: Path, *, access: int
+    ) -> int:
+        """先用最小权限识别既有叶对象，再固定身份并取得高权限句柄."""
+        while True:
+            probe = _try_open_leaf(parent_handle, name, path, expected="file")
+            if probe is not None:
+                try:
+                    return _open_relative_handle(
+                        parent_handle,
+                        name,
+                        path,
+                        access=access,
+                        creation=_OPEN_EXISTING,
+                        expected="file",
+                        share_delete=False,
+                    )
+                finally:
+                    _close_handle(probe)
+            try:
+                return _open_relative_handle(
+                    parent_handle,
+                    name,
+                    path,
+                    access=access,
+                    creation=_CREATE_NEW,
+                    expected="file",
+                    share_delete=False,
+                )
+            except OSError as error:
+                code = getattr(error, "winerror", None) or getattr(error, "errno", None)
+                if code in (_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS):
+                    continue
+                raise
+
+
+    def _is_missing_windows_error(error: OSError) -> bool:
+        return getattr(error, "winerror", None) in (
+            _ERROR_FILE_NOT_FOUND,
+            _ERROR_PATH_NOT_FOUND,
+        ) or getattr(error, "errno", None) in (
+            _ERROR_FILE_NOT_FOUND,
+            _ERROR_PATH_NOT_FOUND,
+        )
 
 
     def _handle_identity(handle: int, path: Path) -> tuple[int, int, int]:
@@ -430,39 +723,37 @@ if os.name == "nt":
         *,
         replace: bool,
     ) -> None:
-        target_name = os.fspath(target_path)
-        if not target_name or target_name in (".", "..") or "\\" in target_name or "/" in target_name:
-            # 绝对路径本身当然含分隔符; 这里只拒绝不是绝对路径的多分量名称.
-            if not os.path.isabs(target_name):
-                raise UnsafePathError(f"invalid rename target name: {target_name}")
-        name_type = wintypes.WCHAR * (len(target_name) + 1)
-
-        class _FILE_RENAME_INFO(ctypes.Structure):
-            _fields_ = [
-                ("ReplaceIfExists", wintypes.BOOLEAN),
-                ("RootDirectory", wintypes.HANDLE),
-                ("FileNameLength", wintypes.DWORD),
-                ("FileName", name_type),
-            ]
-
-        info = _FILE_RENAME_INFO()
-        info.ReplaceIfExists = bool(replace)
-        # SetFileInformationByHandle 对绝对路径的支持覆盖到 Windows Vista.
-        # 目标父目录句柄仍保持打开且不共享 DELETE，绝对路径在本次调用中不会
-        # 因祖先目录掉包而改变含义.
-        info.RootDirectory = None
-        info.FileNameLength = len(target_name.encode("utf-16-le"))
-        info.FileName = target_name
-        if not _kernel32.SetFileInformationByHandle(
-            handle,
-            _FILE_RENAME_INFO_CLASS,
-            ctypes.byref(info),
-            ctypes.sizeof(info),
+        target_name = target_path.name
+        if (
+            not target_name
+            or target_name in (".", "..")
+            or "\\" in target_name
+            or "/" in target_name
         ):
-            code = ctypes.get_last_error()
+            raise UnsafePathError(f"invalid rename target name: {target_name}")
+        encoded = target_name.encode("utf-16-le")
+        is_32_bit = ctypes.sizeof(ctypes.c_void_p) == 4
+        handle_offset = 4 if is_32_bit else 8
+        length_offset = 8 if is_32_bit else 16
+        filename_offset = 12 if is_32_bit else 20
+        buffer = ctypes.create_string_buffer(filename_offset + len(encoded))
+        ctypes.c_ubyte.from_buffer(buffer, 0).value = int(bool(replace))
+        wintypes.HANDLE.from_buffer(buffer, handle_offset).value = target_parent_handle
+        wintypes.ULONG.from_buffer(buffer, length_offset).value = len(encoded)
+        buffer[filename_offset:filename_offset + len(encoded)] = encoded
+        io_status = _IO_STATUS_BLOCK()
+        status = _ntdll.NtSetInformationFile(
+            handle,
+            ctypes.byref(io_status),
+            buffer,
+            filename_offset + len(encoded),
+            _NT_FILE_RENAME_INFORMATION_CLASS,
+        )
+        if status < 0:
+            code = int(_ntdll.RtlNtStatusToDosError(status))
             if not replace and code in (_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS):
                 raise FileExistsError(f"rename target already exists: {target_path}")
-            _raise_windows_error("cannot atomically rename protected path")
+            _raise_nt_error("cannot atomically rename protected path", status, target_path)
 
 
     def _delete_handle(handle: int) -> None:
@@ -485,6 +776,279 @@ if os.name == "nt":
             return _read_handle(handle, candidate)
 
 
+    def read_regular_file_with_identity_nofollow(
+        root: Path, path: Path
+    ) -> tuple[tuple[int, ...], bytes]:
+        """从同一固定句柄读取普通文件及其稳定身份."""
+        with _open_chain(
+            root,
+            path,
+            final_access=_GENERIC_READ | _FILE_READ_ATTRIBUTES,
+            final_expected="file",
+        ) as (candidate, handle):
+            return _handle_identity(handle, candidate), _read_handle(handle, candidate)
+
+
+    def read_regular_file_if_exists_nofollow(
+        root: Path, path: Path
+    ) -> bytes | None:
+        """安全读取可选普通文件; 只把真实缺失视为 ``None``."""
+        root_absolute, candidate, parts = _relative_parts(root, path)
+        if not parts:
+            raise UnsafePathError(f"protected file cannot be the root: {candidate}")
+        try:
+            with _open_chain(
+                root_absolute,
+                candidate.parent,
+                final_access=_FILE_READ_ATTRIBUTES,
+                final_expected="directory",
+            ) as (_, parent_handle):
+                handle = _try_open_leaf(
+                    parent_handle,
+                    candidate.name,
+                    candidate,
+                    access=_GENERIC_READ | _FILE_READ_ATTRIBUTES,
+                    expected="file",
+                )
+                if handle is None:
+                    return None
+                try:
+                    return _read_handle(handle, candidate)
+                finally:
+                    _close_handle(handle)
+        except OSError as error:
+            if _is_missing_windows_error(error):
+                return None
+            raise
+
+
+    def directory_identity_nofollow(
+        root: Path, path: Path
+    ) -> tuple[int, ...]:
+        """逐级固定目录链并返回叶目录身份."""
+        with _open_chain(
+            root,
+            path,
+            final_access=_FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (candidate, handle):
+            return _handle_identity(handle, candidate)
+
+
+    def validate_directory_path_nofollow(path: Path) -> tuple[int, ...]:
+        """从卷根开始逐级拒绝绝对目录路径中的 reparse point."""
+        candidate = _absolute_path(path)
+        anchor = Path(candidate.anchor)
+        if not candidate.anchor:
+            raise UnsafePathError(f"protected directory has no absolute anchor: {candidate}")
+        return directory_identity_nofollow(anchor, candidate)
+
+
+    def directory_exists_nofollow(root: Path, path: Path) -> bool:
+        """安全区分目录缺失与 reparse/类型错误."""
+        try:
+            directory_identity_nofollow(root, path)
+            return True
+        except OSError as error:
+            if _is_missing_windows_error(error):
+                return False
+            raise
+
+
+    def list_directory_nofollow(root: Path, path: Path) -> list[tuple[str, str]]:
+        """通过固定目录句柄枚举直接成员并拒绝 reparse point.
+
+        返回 ``(name, kind)``，其中 kind 为 ``file``、``directory`` 或
+        ``other``。调用方随后仍须用 no-follow 原语打开叶对象，以封闭枚举与
+        使用之间的竞态窗口.
+        """
+        with _open_chain(
+            root,
+            path,
+            final_access=_FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (candidate, directory_handle):
+            entries: list[tuple[str, str]] = []
+            restart = True
+            while True:
+                buffer = ctypes.create_string_buffer(1 << 16)
+                io_status = _IO_STATUS_BLOCK()
+                status = _ntdll.NtQueryDirectoryFile(
+                    directory_handle,
+                    None,
+                    None,
+                    None,
+                    ctypes.byref(io_status),
+                    buffer,
+                    len(buffer),
+                    _NT_FILE_NAMES_INFORMATION_CLASS,
+                    False,
+                    None,
+                    restart,
+                )
+                unsigned = _unsigned_ntstatus(status)
+                if unsigned == _STATUS_NO_MORE_FILES:
+                    break
+                if status < 0:
+                    _raise_nt_error("cannot enumerate protected directory", status, candidate)
+                restart = False
+                offset = 0
+                used = int(io_status.Information)
+                while offset + 12 <= used:
+                    next_offset = wintypes.ULONG.from_buffer(buffer, offset).value
+                    name_length = wintypes.ULONG.from_buffer(buffer, offset + 8).value
+                    end = offset + 12 + name_length
+                    if end > used:
+                        raise UnsafePathError(
+                            f"invalid directory enumeration result: {candidate}"
+                        )
+                    name = buffer.raw[offset + 12:end].decode("utf-16-le")
+                    if name not in (".", ".."):
+                        child_path = candidate / name
+                        try:
+                            child = _try_open_leaf(
+                                directory_handle,
+                                name,
+                                child_path,
+                                expected="any",
+                            )
+                        except OSError as error:
+                            if _is_missing_windows_error(error):
+                                child = None
+                            else:
+                                raise
+                        if child is not None:
+                            try:
+                                info = _attribute_info(child, child_path)
+                                kind = (
+                                    "directory"
+                                    if info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY
+                                    else "file"
+                                )
+                                entries.append((name, kind))
+                            finally:
+                                _close_handle(child)
+                    if not next_offset:
+                        break
+                    offset += int(next_offset)
+            return entries
+
+
+    def ensure_private_directory_nofollow(root: Path, path: Path) -> Path:
+        """逐级创建或打开目录，并把新旧叶目录都收紧为私有 DACL."""
+        root_absolute, candidate, parts = _relative_parts(root, path)
+        handles: list[int] = []
+        current = root_absolute
+        with _open_chain(
+            root_absolute,
+            root_absolute,
+            final_access=_FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (_, root_handle):
+            parent_handle = root_handle
+            try:
+                for part in parts:
+                    current /= part
+                    handle = _try_open_leaf(
+                        parent_handle,
+                        part,
+                        current,
+                        access=(
+                            _READ_CONTROL | _WRITE_DAC | _FILE_READ_ATTRIBUTES
+                        ),
+                        expected="directory",
+                    )
+                    if handle is None:
+                        try:
+                            handle = _open_relative_handle(
+                                parent_handle,
+                                part,
+                                current,
+                                access=(
+                                    _READ_CONTROL
+                                    | _WRITE_DAC
+                                    | _FILE_READ_ATTRIBUTES
+                                ),
+                                creation=_CREATE_NEW,
+                                expected="directory",
+                            )
+                        except OSError as create_error:
+                            code = (
+                                getattr(create_error, "winerror", None)
+                                or getattr(create_error, "errno", None)
+                            )
+                            if code not in (_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS):
+                                raise
+                            handle = _try_open_leaf(
+                                parent_handle,
+                                part,
+                                current,
+                                access=(
+                                    _READ_CONTROL
+                                    | _WRITE_DAC
+                                    | _FILE_READ_ATTRIBUTES
+                                ),
+                                expected="directory",
+                            )
+                            if handle is None:
+                                raise FileNotFoundError(current)
+                    handles.append(handle)
+                    _tighten_private_handle(handle, current, expected="directory")
+                    parent_handle = handle
+                return candidate
+            finally:
+                for handle in reversed(handles):
+                    _close_handle(handle)
+
+
+    @contextlib.contextmanager
+    def open_private_append_file_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO]:
+        """安全创建/打开私有普通文件并在固定 append 句柄上读写.
+
+        句柄不共享 DELETE，所以从读取去重状态到追加完成期间，路径不能被
+        rename/replace。只授予 ``FILE_APPEND_DATA`` 而不授予普通写入权限，
+        让每次底层 WriteFile 都定位到当时 EOF，保留并发 append 语义.
+        """
+        root_absolute, candidate, parts = _relative_parts(root, path)
+        if not parts:
+            raise UnsafePathError(f"protected file cannot be the root: {candidate}")
+        with _open_chain(
+            root_absolute,
+            candidate.parent,
+            final_access=_FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (_, parent_handle):
+            handle = _open_or_create_regular_file_handle(
+                parent_handle,
+                candidate.name,
+                candidate,
+                access=(
+                    _GENERIC_READ
+                    | _FILE_APPEND_DATA
+                    | _READ_CONTROL
+                    | _WRITE_DAC
+                    | _FILE_READ_ATTRIBUTES
+                ),
+            )
+            file: BinaryIO | None = None
+            try:
+                _tighten_private_handle(handle, candidate, expected="file")
+                flags = os.O_RDWR | os.O_APPEND | os.O_BINARY
+                descriptor = msvcrt.open_osfhandle(handle, flags)
+                handle = _INVALID_HANDLE_VALUE
+                file = os.fdopen(descriptor, "a+b", buffering=0)
+                yield file
+                file.flush()
+                os.fsync(file.fileno())
+            finally:
+                if file is not None:
+                    file.close()
+                else:
+                    _close_handle(handle)
+
+
     def write_text_atomic_nofollow(
         root: Path, path: Path, text: str, *, replace: bool = True
     ) -> None:
@@ -498,18 +1062,27 @@ if os.name == "nt":
             final_access=_FILE_READ_ATTRIBUTES,
             final_expected="directory",
         ) as (_, parent_handle):
-            existing = _try_open_leaf(candidate, expected="file")
+            existing = _try_open_leaf(
+                parent_handle, candidate.name, candidate, expected="file"
+            )
             if existing is not None:
                 _close_handle(existing)
                 if not replace:
                     raise FileExistsError(f"protected file already exists: {candidate}")
 
-            temp_path = parent / (
-                f".{candidate.name}.{os.getpid()}.{time.time_ns()}.tmp"
-            )
-            temp_handle = _create_file_handle(
+            temp_name = f".{candidate.name}.{os.getpid()}.{time.time_ns()}.tmp"
+            temp_path = parent / temp_name
+            temp_handle = _open_relative_handle(
+                parent_handle,
+                temp_name,
                 temp_path,
-                access=_GENERIC_WRITE | _DELETE | _FILE_READ_ATTRIBUTES,
+                access=(
+                    _GENERIC_WRITE
+                    | _DELETE
+                    | _READ_CONTROL
+                    | _WRITE_DAC
+                    | _FILE_READ_ATTRIBUTES
+                ),
                 creation=_CREATE_NEW,
                 expected="file",
                 share_delete=False,
@@ -518,9 +1091,7 @@ if os.name == "nt":
             try:
                 identity = _handle_identity(temp_handle, temp_path)
                 _write_handle(temp_handle, temp_path, text.encode("utf-8"))
-                # 任务文档替换后不能退回父目录继承 ACL。临时文件仍由不可删除的
-                # 已验证句柄钉住，在变为可见目标前收紧为当前用户独占 DACL。
-                _tighten_private_permissions(temp_path, expected="file")
+                _tighten_private_handle(temp_handle, temp_path, expected="file")
                 _rename_handle(
                     temp_handle,
                     parent_handle,
@@ -528,7 +1099,13 @@ if os.name == "nt":
                     replace=replace,
                 )
                 moved = True
-                replacement = _try_open_leaf(candidate, expected="file")
+                replacement = _try_open_leaf(
+                    parent_handle,
+                    candidate.name,
+                    candidate,
+                    expected="file",
+                    share_delete=True,
+                )
                 if replacement is None:
                     raise UnsafePathError(
                         f"atomic replacement disappeared after rename: {candidate}"
@@ -565,32 +1142,56 @@ if os.name == "nt":
             final_access=_FILE_READ_ATTRIBUTES,
             final_expected="directory",
         ) as (_, parent_handle):
-            collision = _try_open_leaf(candidate, expected="any")
+            collision = _try_open_leaf(
+                parent_handle, candidate.name, candidate, expected="any"
+            )
             if collision is not None:
                 _close_handle(collision)
                 raise FileExistsError(f"protected directory already exists: {candidate}")
 
-            temporary = parent / (
+            temporary_name = (
                 f".{candidate.name}.{os.getpid()}.{time.time_ns()}.tmp"
             )
-            if not _kernel32.CreateDirectoryW(os.fspath(temporary), None):
-                _raise_windows_error("cannot create protected directory", temporary)
-            directory_handle: int | None = None
+            temporary = parent / temporary_name
+            directory_handle: int | None = _open_relative_handle(
+                parent_handle,
+                temporary_name,
+                temporary,
+                access=(
+                    _DELETE
+                    | _READ_CONTROL
+                    | _WRITE_DAC
+                    | _FILE_READ_ATTRIBUTES
+                ),
+                creation=_CREATE_NEW,
+                expected="directory",
+            )
             moved = False
             try:
-                directory_handle = _create_file_handle(
-                    temporary,
-                    access=_DELETE | _FILE_READ_ATTRIBUTES,
-                    expected="directory",
-                )
                 identity = _handle_identity(directory_handle, temporary)
-                _tighten_private_permissions(temporary, expected="directory")
-                write_text_atomic_nofollow(
-                    root_absolute,
-                    temporary / filename,
-                    text,
-                    replace=False,
+                _tighten_private_handle(
+                    directory_handle, temporary, expected="directory"
                 )
+                child_path = temporary / filename
+                child = _open_relative_handle(
+                    directory_handle,
+                    filename,
+                    child_path,
+                    access=(
+                        _GENERIC_WRITE
+                        | _DELETE
+                        | _READ_CONTROL
+                        | _WRITE_DAC
+                        | _FILE_READ_ATTRIBUTES
+                    ),
+                    creation=_CREATE_NEW,
+                    expected="file",
+                )
+                try:
+                    _write_handle(child, child_path, text.encode("utf-8"))
+                    _tighten_private_handle(child, child_path, expected="file")
+                finally:
+                    _close_handle(child)
                 _rename_handle(
                     directory_handle,
                     parent_handle,
@@ -598,7 +1199,13 @@ if os.name == "nt":
                     replace=False,
                 )
                 moved = True
-                published = _try_open_leaf(candidate, expected="directory")
+                published = _try_open_leaf(
+                    parent_handle,
+                    candidate.name,
+                    candidate,
+                    expected="directory",
+                    share_delete=True,
+                )
                 if published is None:
                     raise UnsafePathError(
                         f"published directory disappeared after rename: {candidate}"
@@ -614,10 +1221,13 @@ if os.name == "nt":
             finally:
                 if directory_handle is not None and not moved:
                     try:
-                        child = _create_file_handle(
+                        child = _try_open_leaf(
+                            directory_handle,
+                            filename,
                             temporary / filename,
                             access=_DELETE | _FILE_READ_ATTRIBUTES,
                             expected="file",
+                            share_delete=False,
                         )
                     except OSError:
                         child = None
@@ -636,51 +1246,83 @@ if os.name == "nt":
             raise UnsafePathError("cannot rename the protected root")
         with _open_chain(
             root_absolute,
-            source_absolute,
-            final_access=_DELETE | _FILE_READ_ATTRIBUTES,
-            final_expected="any",
-        ) as (_, source_handle):
-            source_identity = _handle_identity(source_handle, source_absolute)
-            source_info = _attribute_info(source_handle, source_absolute)
-            source_expected = (
-                "directory"
-                if source_info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY
-                else "file"
+            source_absolute.parent,
+            final_access=_FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (_, source_parent_handle):
+            source_handle = _try_open_leaf(
+                source_parent_handle,
+                source_absolute.name,
+                source_absolute,
+                access=_DELETE | _FILE_READ_ATTRIBUTES,
+                expected="any",
             )
-            with _open_chain(
-                root_absolute,
-                target_absolute.parent,
-                final_access=_FILE_READ_ATTRIBUTES,
-                final_expected="directory",
-            ) as (_, target_parent_handle):
-                collision = _try_open_leaf(target_absolute, expected="any")
-                if collision is not None:
-                    _close_handle(collision)
-                    raise FileExistsError(f"rename target already exists: {target_absolute}")
-                _rename_handle(
-                    source_handle,
-                    target_parent_handle,
-                    target_absolute,
-                    replace=False,
+            if source_handle is None:
+                raise FileNotFoundError(source_absolute)
+            try:
+                source_identity = _handle_identity(source_handle, source_absolute)
+                source_info = _attribute_info(source_handle, source_absolute)
+                source_expected = (
+                    "directory"
+                    if source_info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY
+                    else "file"
                 )
-                moved = _try_open_leaf(target_absolute, expected=source_expected)
-                if moved is None:
-                    raise UnsafePathError(
-                        f"renamed path is missing after move: {target_absolute}"
+                with _open_chain(
+                    root_absolute,
+                    target_absolute.parent,
+                    final_access=_FILE_TRAVERSE | _FILE_READ_ATTRIBUTES,
+                    final_expected="directory",
+                ) as (_, target_parent_handle):
+                    collision = _try_open_leaf(
+                        target_parent_handle,
+                        target_absolute.name,
+                        target_absolute,
+                        expected="any",
                     )
-                try:
-                    if _handle_identity(moved, target_absolute) != source_identity:
-                        raise UnsafePathError(
-                            f"renamed path identity changed after move: {target_absolute}"
+                    if collision is not None:
+                        _close_handle(collision)
+                        raise FileExistsError(
+                            f"rename target already exists: {target_absolute}"
                         )
-                finally:
-                    _close_handle(moved)
-                leftover = _try_open_leaf(source_absolute, expected="any")
-                if leftover is not None:
-                    _close_handle(leftover)
-                    raise UnsafePathError(
-                        f"source path still exists after move: {source_absolute}"
+                    _rename_handle(
+                        source_handle,
+                        target_parent_handle,
+                        target_absolute,
+                        replace=False,
                     )
+                    moved = _try_open_leaf(
+                        target_parent_handle,
+                        target_absolute.name,
+                        target_absolute,
+                        expected=source_expected,
+                        share_delete=True,
+                    )
+                    if moved is None:
+                        raise UnsafePathError(
+                            f"renamed path is missing after move: {target_absolute}"
+                        )
+                    try:
+                        if _handle_identity(moved, target_absolute) != source_identity:
+                            raise UnsafePathError(
+                                "renamed path identity changed after move: "
+                                f"{target_absolute}"
+                            )
+                    finally:
+                        _close_handle(moved)
+                    leftover = _try_open_leaf(
+                        source_parent_handle,
+                        source_absolute.name,
+                        source_absolute,
+                        expected="any",
+                        share_delete=True,
+                    )
+                    if leftover is not None:
+                        _close_handle(leftover)
+                        raise UnsafePathError(
+                            f"source path still exists after move: {source_absolute}"
+                        )
+            finally:
+                _close_handle(source_handle)
 
 
 else:
@@ -719,6 +1361,29 @@ else:
             os.close(dir_fd)
 
 
+    @contextlib.contextmanager
+    def _open_posix_directory(root: Path, path: Path) -> Iterator[tuple[Path, int]]:
+        root_absolute, candidate, parts = _relative_parts(root, path)
+        dir_fd = os.open(
+            root_absolute,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            for part in parts:
+                next_fd = _openat_nofollow(
+                    dir_fd,
+                    part,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                os.close(dir_fd)
+                dir_fd = next_fd
+            yield candidate, dir_fd
+        finally:
+            os.close(dir_fd)
+
+
     def read_regular_file_nofollow(root: Path, path: Path) -> bytes:
         with _open_posix_parent(root, path) as (candidate, parent_fd):
             fd = _openat_nofollow(parent_fd, candidate.name, os.O_RDONLY)
@@ -735,6 +1400,145 @@ else:
                     chunks.append(piece)
             finally:
                 os.close(fd)
+
+
+    def read_regular_file_with_identity_nofollow(
+        root: Path, path: Path
+    ) -> tuple[tuple[int, ...], bytes]:
+        with _open_posix_parent(root, path) as (candidate, parent_fd):
+            fd = _openat_nofollow(parent_fd, candidate.name, os.O_RDONLY)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise UnsafePathError(
+                        f"task document is not a regular file: {candidate}"
+                    )
+                chunks: list[bytes] = []
+                while True:
+                    piece = os.read(fd, 1 << 20)
+                    if not piece:
+                        return (info.st_dev, info.st_ino), b"".join(chunks)
+                    chunks.append(piece)
+            finally:
+                os.close(fd)
+
+
+    def read_regular_file_if_exists_nofollow(
+        root: Path, path: Path
+    ) -> bytes | None:
+        try:
+            return read_regular_file_nofollow(root, path)
+        except FileNotFoundError:
+            return None
+
+
+    def directory_identity_nofollow(
+        root: Path, path: Path
+    ) -> tuple[int, ...]:
+        with _open_posix_directory(root, path) as (_, dir_fd):
+            info = os.fstat(dir_fd)
+            return info.st_dev, info.st_ino
+
+
+    def validate_directory_path_nofollow(path: Path) -> tuple[int, ...]:
+        candidate = _absolute_path(path)
+        anchor = Path(candidate.anchor)
+        if not candidate.anchor:
+            raise UnsafePathError(f"protected directory has no absolute anchor: {candidate}")
+        return directory_identity_nofollow(anchor, candidate)
+
+
+    def directory_exists_nofollow(root: Path, path: Path) -> bool:
+        try:
+            directory_identity_nofollow(root, path)
+            return True
+        except FileNotFoundError:
+            return False
+
+
+    def list_directory_nofollow(root: Path, path: Path) -> list[tuple[str, str]]:
+        with _open_posix_directory(root, path) as (_, dir_fd):
+            entries: list[tuple[str, str]] = []
+            with os.scandir(dir_fd) as iterator:
+                for entry in iterator:
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISLNK(info.st_mode):
+                        raise UnsafePathError(f"symlink is not allowed: {path / entry.name}")
+                    if stat.S_ISREG(info.st_mode):
+                        kind = "file"
+                    elif stat.S_ISDIR(info.st_mode):
+                        kind = "directory"
+                    else:
+                        kind = "other"
+                    entries.append((entry.name, kind))
+            return entries
+
+
+    def ensure_private_directory_nofollow(root: Path, path: Path) -> Path:
+        root_absolute, candidate, parts = _relative_parts(root, path)
+        dir_fd = os.open(
+            root_absolute,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            for part in parts:
+                try:
+                    next_fd = _openat_nofollow(
+                        dir_fd,
+                        part,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=dir_fd)
+                    except FileExistsError:
+                        # 另一合并进程可能刚创建同一状态目录；重新按 no-follow
+                        # 打开并验证，而不是把正常首次并发误判为失败.
+                        pass
+                    next_fd = _openat_nofollow(
+                        dir_fd,
+                        part,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                os.fchmod(next_fd, 0o700)
+                os.close(dir_fd)
+                dir_fd = next_fd
+            return candidate
+        finally:
+            os.close(dir_fd)
+
+
+    @contextlib.contextmanager
+    def open_private_append_file_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO]:
+        with _open_posix_parent(root, path) as (candidate, parent_fd):
+            fd = _openat_nofollow(
+                parent_fd,
+                candidate.name,
+                os.O_RDWR | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            file: BinaryIO | None = None
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise UnsafePathError(
+                        f"task document is not a regular file: {candidate}"
+                    )
+                os.fchmod(fd, 0o600)
+                file = os.fdopen(fd, "a+b", buffering=0)
+                fd = -1
+                yield file
+                file.flush()
+                os.fsync(file.fileno())
+            finally:
+                if file is not None:
+                    file.close()
+                elif fd >= 0:
+                    os.close(fd)
 
 
     def write_text_atomic_nofollow(
@@ -890,17 +1694,10 @@ def exclusive_file_lock(file: BinaryIO) -> Iterator[None]:
         fcntl.flock(file, fcntl.LOCK_UN)
 
 
-def _tighten_private_permissions(path: Path, *, expected: str) -> None:
+def _tighten_private_handle(handle: int, path: Path, *, expected: str) -> None:
+    """Windows: 直接收紧已固定对象句柄的 DACL."""
     if os.name != "nt":
-        os.chmod(path, 0o700 if expected == "directory" else 0o600)
-        return
-
-    handle = _create_file_handle(  # type: ignore[name-defined]
-        _absolute_path(path),
-        access=_READ_CONTROL | _WRITE_DAC | _FILE_READ_ATTRIBUTES,  # type: ignore[name-defined]
-        expected=expected,
-        share_delete=True,
-    )
+        raise RuntimeError("private handle ACL is only available on Windows")
     token = wintypes.HANDLE()  # type: ignore[name-defined]
     sid_string = wintypes.LPWSTR()  # type: ignore[name-defined]
     security_descriptor = ctypes.c_void_p()  # type: ignore[name-defined]
@@ -974,7 +1771,26 @@ def _tighten_private_permissions(path: Path, *, expected: str) -> None:
             _kernel32.LocalFree(sid_string)  # type: ignore[name-defined]
         if token:
             _close_handle(token)  # type: ignore[name-defined]
-        _close_handle(handle)  # type: ignore[name-defined]
+
+
+def _tighten_private_permissions(path: Path, *, expected: str) -> None:
+    if os.name != "nt":
+        os.chmod(path, 0o700 if expected == "directory" else 0o600)
+        return
+
+    candidate = _absolute_path(path)
+    anchor = Path(candidate.anchor)
+    if not candidate.anchor:
+        raise UnsafePathError(f"protected path has no absolute anchor: {candidate}")
+    with _open_chain(  # type: ignore[name-defined]
+        anchor,
+        candidate,
+        final_access=(
+            _READ_CONTROL | _WRITE_DAC | _FILE_READ_ATTRIBUTES  # type: ignore[name-defined]
+        ),
+        final_expected=expected,
+    ) as (_, handle):
+        _tighten_private_handle(handle, candidate, expected=expected)
 
 
 def tighten_private_file_permissions(path: Path) -> None:

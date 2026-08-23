@@ -2,8 +2,10 @@
 
 import importlib.machinery
 import importlib.util
+import ctypes
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -12,6 +14,9 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 from unittest import mock
+
+if os.name == "nt":
+    from ctypes import wintypes
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -164,6 +169,131 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
         if os.path.lexists(link):
             os.rmdir(link)
 
+    @staticmethod
+    def set_junction_reparse(directory: Path, target: Path) -> None:
+        """将已存在的空目录原地转为 mount-point reparse point."""
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.DeviceIoControl.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.c_void_p,
+        ]
+        kernel32.DeviceIoControl.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateFileW(
+            str(directory),
+            0x40000000,  # GENERIC_WRITE
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,  # OPEN_EXISTING
+            0x02000000 | 0x00200000,
+            None,
+        )
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            print_name = str(target.resolve())
+            substitute_name = "\\??\\" + print_name
+            substitute = substitute_name.encode("utf-16-le")
+            printable = print_name.encode("utf-16-le")
+            path_buffer = substitute + b"\x00\x00" + printable + b"\x00\x00"
+            reparse = struct.pack(
+                "<IHHHHHH",
+                0xA0000003,  # IO_REPARSE_TAG_MOUNT_POINT
+                8 + len(path_buffer),
+                0,
+                0,
+                len(substitute),
+                len(substitute) + 2,
+                len(printable),
+            ) + path_buffer
+            returned = wintypes.DWORD()
+            input_buffer = ctypes.create_string_buffer(reparse)
+            if not kernel32.DeviceIoControl(
+                handle,
+                0x000900A4,  # FSCTL_SET_REPARSE_POINT
+                input_buffer,
+                len(reparse),
+                None,
+                0,
+                ctypes.byref(returned),
+                None,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel32.CloseHandle(handle)
+
+    @staticmethod
+    def clear_junction_reparse(directory: Path) -> None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.DeviceIoControl.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.c_void_p,
+        ]
+        kernel32.DeviceIoControl.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateFileW(
+            str(directory),
+            0x40000000,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x02000000 | 0x00200000,
+            None,
+        )
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            reparse = struct.pack("<IHH", 0xA0000003, 0, 0)
+            returned = wintypes.DWORD()
+            input_buffer = ctypes.create_string_buffer(reparse)
+            if not kernel32.DeviceIoControl(
+                handle,
+                0x000900AC,  # FSCTL_DELETE_REPARSE_POINT
+                input_buffer,
+                len(reparse),
+                None,
+                0,
+                ctypes.byref(returned),
+                None,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel32.CloseHandle(handle)
+
     def assert_private_acl(self, path: Path) -> None:
         acl = subprocess.run(
             ["icacls.exe", str(path)],
@@ -198,6 +328,15 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
         self.assertEqual(
             b"old\n",
             onevoke_fs.read_regular_file_nofollow(self.root, source),
+        )
+        self.assertEqual(
+            b"old\n",
+            onevoke_fs.read_regular_file_if_exists_nofollow(self.root, source),
+        )
+        self.assertIsNone(
+            onevoke_fs.read_regular_file_if_exists_nofollow(
+                self.root, self.root / "todo" / "missing.md"
+            )
         )
         onevoke_fs.write_text_atomic_nofollow(self.root, source, "new\n")
         target = self.root / "working" / source.name
@@ -289,6 +428,40 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
 
         self.assertEqual("do not touch\n", outside_document.read_text(encoding="utf-8"))
 
+    def test_atomic_write_stays_on_pinned_parent_after_in_place_junction_swap(self) -> None:
+        parent = self.root / "todo"
+        document = parent / "20260823-pinned-parent-task.md"
+        outside_document = self.outside / document.name
+        original_open = onevoke_fs._open_relative_handle
+        swapped = False
+
+        def open_and_swap(parent_handle, name, path, **kwargs):
+            nonlocal swapped
+            handle = original_open(parent_handle, name, path, **kwargs)
+            if not swapped and path == parent:
+                self.set_junction_reparse(parent, self.outside)
+                swapped = True
+            return handle
+
+        try:
+            with mock.patch.object(
+                onevoke_fs, "_open_relative_handle", side_effect=open_and_swap
+            ):
+                with self.assertRaises(onevoke_fs.UnsafePathError):
+                    onevoke_fs.write_text_atomic_nofollow(
+                        self.root, document, "pinned parent\n", replace=False
+                    )
+
+            self.assertTrue(swapped, "the FSCTL race hook did not run")
+            self.assertTrue(onevoke_fs.is_reparse_point(parent))
+            self.assertFalse(outside_document.exists())
+        finally:
+            if onevoke_fs.is_reparse_point(parent):
+                self.clear_junction_reparse(parent)
+
+        self.assertFalse(document.exists())
+        self.assertEqual([], list(parent.iterdir()))
+
     def test_large_report_validation_uses_verified_handle_reader(self) -> None:
         entry, text, report = self.make_completed_large_entry(
             "20260823-report-helper-task"
@@ -378,6 +551,74 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
         self.assertEqual("source\n", source.read_text(encoding="utf-8"))
         self.assertEqual("target\n", target.read_text(encoding="utf-8"))
 
+    def test_move_stays_outside_after_target_parent_becomes_junction(self) -> None:
+        source = self.root / "todo" / "20260823-rename-race-task.md"
+        target_parent = self.root / "working"
+        target = target_parent / source.name
+        outside_target = self.outside / source.name
+        source.write_text("source\n", encoding="utf-8")
+        original_try_open = onevoke_fs._try_open_leaf
+        swapped = False
+
+        def open_collision_then_swap(parent_handle, name, path, **kwargs):
+            nonlocal swapped
+            result = original_try_open(parent_handle, name, path, **kwargs)
+            if not swapped and path == target:
+                self.set_junction_reparse(target_parent, self.outside)
+                swapped = True
+            return result
+
+        try:
+            with mock.patch.object(
+                onevoke_fs, "_try_open_leaf", side_effect=open_collision_then_swap
+            ):
+                with self.assertRaises(onevoke_fs.UnsafePathError):
+                    onevoke_fs.rename_nofollow(self.root, source, target)
+
+            self.assertTrue(swapped, "the target-parent rename race hook did not run")
+            self.assertTrue(onevoke_fs.is_reparse_point(target_parent))
+            self.assertFalse(outside_target.exists())
+        finally:
+            if onevoke_fs.is_reparse_point(target_parent):
+                self.clear_junction_reparse(target_parent)
+
+        self.assertTrue(source.exists())
+        self.assertFalse(target.exists())
+
+    def test_large_create_stays_outside_after_parent_becomes_junction(self) -> None:
+        parent = self.root / "backlog"
+        directory = parent / "20260823-create-race-task"
+        outside_directory = self.outside / directory.name
+        original_try_open = onevoke_fs._try_open_leaf
+        swapped = False
+
+        def open_collision_then_swap(parent_handle, name, path, **kwargs):
+            nonlocal swapped
+            result = original_try_open(parent_handle, name, path, **kwargs)
+            if not swapped and path == directory:
+                self.set_junction_reparse(parent, self.outside)
+                swapped = True
+            return result
+
+        try:
+            with mock.patch.object(
+                onevoke_fs, "_try_open_leaf", side_effect=open_collision_then_swap
+            ):
+                with self.assertRaises(onevoke_fs.UnsafePathError):
+                    onevoke_fs.create_directory_with_text_file_nofollow(
+                        self.root, directory, "spec.md", "safe\n"
+                    )
+
+            self.assertTrue(swapped, "the parent publish race hook did not run")
+            self.assertTrue(onevoke_fs.is_reparse_point(parent))
+            self.assertFalse(outside_directory.exists())
+        finally:
+            if onevoke_fs.is_reparse_point(parent):
+                self.clear_junction_reparse(parent)
+
+        self.assertFalse(directory.exists())
+        self.assertEqual([], list(parent.iterdir()))
+
     def test_move_directory_renames_the_opened_task_entry(self) -> None:
         source = self.root / "todo" / "20260823-large-task"
         source.mkdir()
@@ -395,6 +636,10 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
 
         with self.assertRaises(onevoke_fs.UnsafePathError):
             onevoke_fs.read_regular_file_nofollow(self.root, outside_document)
+        with self.assertRaises(onevoke_fs.UnsafePathError):
+            onevoke_fs.write_text_atomic_nofollow(
+                self.root, self.root / "todo" / "task.md:alternate", "escape\n"
+            )
 
     def test_executable_search_never_uses_the_repository_cwd(self) -> None:
         planted = self.base / "untrusted-repository"

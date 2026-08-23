@@ -26,6 +26,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import BinaryIO
 
 _BIN = Path(__file__).resolve().parent
 if str(_BIN) not in sys.path:
@@ -39,7 +40,17 @@ from onevoke_config import (
     bind_effective_language,
     language_text,
 )
-from onevoke_fs import exclusive_file_lock
+from onevoke_fs import (
+    directory_exists_nofollow,
+    directory_identity_nofollow,
+    ensure_private_directory_nofollow,
+    exclusive_file_lock,
+    list_directory_nofollow,
+    open_private_append_file_nofollow,
+    read_regular_file_if_exists_nofollow,
+    read_regular_file_with_identity_nofollow,
+    validate_directory_path_nofollow,
+)
 
 t = language_text
 
@@ -51,12 +62,27 @@ SESSION_HEADER = re.compile(rb"^## Session ")
 ENTRY_MARKER = re.compile(
     rb"^<!-- merged-worktree-memory (?:entry|file-entry):([0-9a-f]+) -->$"
 )
+COMPLETION_MARKER = re.compile(
+    rb"^<!-- merged-worktree-memory (entry|file-entry):([0-9a-f]+) -->$"
+)
 SOURCE_MARKER = re.compile(rb"^<!-- merged-worktree-memory source:.* -->$")
 # Stop hook 可能在合并窗口内继续追加; 两次读取一致才视为来源稳定.
 # 注意: 进程成功返回之后的写入需要 MemSearch Stop hook 与清理流程的协作封口
 # 协议才能绝对消除, 本脚本只能 fail-closed 本进程可观测窗口; 见任务范围.
 SOURCE_STABLE_ATTEMPTS = 5
 SOURCE_STABLE_DELAY_SECONDS = 0.1
+
+
+class SourceSnapshots(dict[Path, bytes]):
+    """兼容既有 dict 消费者，同时携带每个来源文件的稳定身份."""
+
+    def __init__(
+        self,
+        values: dict[Path, bytes] | None = None,
+        identities: dict[Path, tuple[int, ...]] | None = None,
+    ) -> None:
+        super().__init__(values or {})
+        self.identities = dict(identities or {})
 
 
 def die(message: str) -> None:
@@ -163,17 +189,77 @@ def normalized_hash(data: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-def target_hashes(path: Path) -> set[str]:
-    """目标文件中已存在的条目哈希: 合并标记, 重新切分的条目, 以及回退整块."""
-    if not path.is_file():
-        return set()
+def hashes_from_target_data(data: bytes) -> set[str]:
+    """从固定快照提取已完整提交或可由正文证明完整的条目哈希.
 
-    data = path.read_bytes()
-    hashes = {
-        match.group(1).decode()
-        for match in (ENTRY_MARKER.match(line) for line in split_lines(data))
-        if match
-    }
+    新格式 completion marker 位于正文之后；旧格式 marker 位于 source 元数据
+    之前。旧 marker 可能已写完而正文因 ENOSPC 截断，因此只有其紧随正文可按
+    kind 完整解析且 normalized hash 一致时才兼容，不能无条件信任 marker.
+    """
+    lines = split_lines(data)
+    events: list[tuple[int, str, re.Match[bytes] | None]] = []
+    fence: tuple[bytes, int] | None = None
+    for index, line in enumerate(lines):
+        delimiter = fence_marker(line)
+        if delimiter:
+            if fence is None:
+                fence = delimiter
+            elif delimiter[0] == fence[0] and delimiter[1] >= fence[1]:
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        marker = COMPLETION_MARKER.match(line)
+        if marker:
+            events.append((index, "marker", marker))
+        elif SOURCE_MARKER.match(line):
+            events.append((index, "source", None))
+
+    def body_matches(kind: str, expected_hash: str, body_lines: list[bytes]) -> bool:
+        body = b"\n".join(body_lines)
+        if body_lines:
+            body += b"\n"
+        if kind == "entry":
+            blocks = emit_entry_blocks(body)
+            return (
+                len(blocks) == 1
+                and normalized_hash(blocks[0]) == expected_hash
+            )
+        if emit_entry_blocks(body):
+            return False
+        fallback = emit_fallback_block(body)
+        return bool(fallback) and normalized_hash(fallback) == expected_hash
+
+    hashes: set[str] = set()
+    for event_index, (line_index, event_kind, marker) in enumerate(events):
+        if event_kind != "marker" or marker is None:
+            continue
+        kind = marker.group(1).decode()
+        expected_hash = marker.group(2).decode()
+
+        # 新格式: source metadata -> body -> completion marker.
+        if event_index > 0 and events[event_index - 1][1] == "source":
+            source_index = events[event_index - 1][0]
+            if body_matches(kind, expected_hash, lines[source_index + 1:line_index]):
+                hashes.add(expected_hash)
+                continue
+
+        # 旧格式: marker 后必须立即是 source metadata，正文延伸到下一结构事件.
+        if event_index + 1 < len(events):
+            source_index, next_kind, _ = events[event_index + 1]
+            if next_kind == "source" and source_index == line_index + 1:
+                body_end = (
+                    events[event_index + 2][0]
+                    if event_index + 2 < len(events)
+                    else len(lines)
+                )
+                if body_matches(
+                    kind,
+                    expected_hash,
+                    lines[source_index + 1:body_end],
+                ):
+                    hashes.add(expected_hash)
+
     hashes.update(normalized_hash(block) for block in emit_entry_blocks(data))
 
     fallback = emit_fallback_block(data)
@@ -182,12 +268,25 @@ def target_hashes(path: Path) -> set[str]:
     return hashes
 
 
+def target_hashes(path: Path, target_root: Path | None = None) -> set[str]:
+    """目标文件中已存在的条目哈希: 合并标记, 重新切分的条目, 以及回退整块."""
+    if os.name == "nt":
+        if target_root is None:
+            raise ValueError("target_root is required for a protected Windows read")
+        data = read_regular_file_if_exists_nofollow(target_root, path)
+        return set() if data is None else hashes_from_target_data(data)
+
+    if not path.is_file():
+        return set()
+    return hashes_from_target_data(path.read_bytes())
+
+
 def clean_bytes(data: bytes) -> bytes:
     """丢弃非法 UTF-8 序列; 已有的合法 U+FFFD 保留."""
     return data.decode("utf-8", errors="ignore").encode("utf-8")
 
 
-def scan_dirty_files(directory: Path) -> tuple[int, int]:
+def scan_dirty_files(directory: Path, target_root: Path | None = None) -> tuple[int, int]:
     """扫描非法 UTF-8, 但不改写已有文件.
 
     新合并条目在写入前已清理. 对可能被 Stop hook 并发追加的目标文件做
@@ -196,6 +295,41 @@ def scan_dirty_files(directory: Path) -> tuple[int, int]:
     """
     scanned = 0
     dirty = 0
+    if os.name == "nt":
+        if target_root is None:
+            memory_root = next(
+                (
+                    candidate
+                    for candidate in (directory, *directory.parents)
+                    if candidate.name == "memory"
+                    and candidate.parent.name == ".memsearch"
+                ),
+                None,
+            )
+            if memory_root is None:
+                raise ValueError(
+                    "cannot infer protected worktree root from memory directory"
+                )
+            target_root = memory_root.parent.parent
+        for name, kind in list_directory_nofollow(target_root, directory):
+            path = directory / name
+            if kind == "directory":
+                ensure_private_directory_nofollow(target_root, path)
+                sub_scanned, sub_dirty = scan_dirty_files(path, target_root)
+                scanned += sub_scanned
+                dirty += sub_dirty
+            elif kind == "file":
+                # 即使不是 markdown，也把 memory 边界内的既有普通文件迁移到
+                # 当前用户独占 DACL；markdown 同时在这一固定句柄上完成扫描.
+                with open_private_append_file_nofollow(target_root, path) as handle:
+                    if path.suffix.lower() == ".md":
+                        scanned += 1
+                        handle.seek(0)
+                        original = handle.read()
+                        if clean_bytes(original) != original:
+                            dirty += 1
+        return scanned, dirty
+
     for entry in list(os.scandir(directory)):
         path = Path(entry.path)
         if entry.is_dir(follow_symlinks=False):
@@ -210,8 +344,19 @@ def scan_dirty_files(directory: Path) -> tuple[int, int]:
     return scanned, dirty
 
 
-def source_memory_identity(source_memory: Path) -> tuple[int, int]:
+def source_memory_identity(source_memory: Path) -> tuple[int, ...]:
     """返回来源 memory 目录的 (dev, ino); 缺失/软链/非常规路径直接失败."""
+    if os.name == "nt":
+        source_root = source_memory.parent.parent
+        try:
+            return directory_identity_nofollow(source_root, source_memory)
+        except OSError as error:
+            die_both(
+                f"来源 memory 消失、不安全或不可读: {source_memory}: {error}",
+                f"source memory disappeared, is unsafe, or unreadable: "
+                f"{source_memory}: {error}",
+            )
+
     if source_memory.is_symlink():
         die_both(
             f"来源 memory 不得为符号链接: {source_memory}",
@@ -235,6 +380,23 @@ def source_memory_identity(source_memory: Path) -> tuple[int, int]:
 def list_source_memory_files(source_memory: Path) -> list[Path]:
     """枚举来源 `*.md`; 软链或非普通文件立即失败, 禁止静默跳过."""
     source_memory_identity(source_memory)
+    if os.name == "nt":
+        source_root = source_memory.parent.parent
+        files: list[Path] = []
+        for name, kind in sorted(list_directory_nofollow(source_root, source_memory)):
+            path = source_memory / name
+            if path.suffix.lower() != ".md":
+                continue
+            if kind != "file":
+                die_both(
+                    f"来源 memory 条目不是普通文件: {name}; "
+                    "拒绝成功退出以免 worktree 被清理",
+                    f"source memory entry is not a regular file: {name}; "
+                    "refusing success so the worktree is not cleaned",
+                )
+            files.append(path)
+        return files
+
     files: list[Path] = []
     for path in sorted(source_memory.glob("*.md")):
         if path.is_symlink():
@@ -255,8 +417,8 @@ def list_source_memory_files(source_memory: Path) -> list[Path]:
     return files
 
 
-def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
-    """目录身份、成员与文件内容均须连续两次一致."""
+def read_stable_source_files(source_memory: Path) -> SourceSnapshots:
+    """目录身份、成员、文件身份与内容均须连续两次一致."""
     last_error = t(
         "来源 memory 文件不稳定",
         "source memory files were unstable",
@@ -269,10 +431,16 @@ def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
                     f"来源 memory 目录被替换: {source_memory}",
                     f"source memory directory was replaced: {source_memory}",
                 )
-            names_first = [path.name for path in list_source_memory_files(source_memory)]
+            first_files = list_source_memory_files(source_memory)
+            names_first = [path.name for path in first_files]
             first: dict[Path, bytes] = {}
-            for path in list_source_memory_files(source_memory):
-                first[path] = path.read_bytes()
+            first_identities: dict[Path, tuple[int, ...]] = {}
+            for path in first_files:
+                identity, data = read_regular_file_with_identity_nofollow(
+                    source_memory.parent.parent, path
+                )
+                first_identities[path] = identity
+                first[path] = data
             if [path.name for path in first] != names_first:
                 last_error = t(
                     f"列举来源 memory 时目录发生变化 (第 {attempt}/{SOURCE_STABLE_ATTEMPTS} 次)",
@@ -299,12 +467,16 @@ def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
                 continue
             stable = True
             for path, data in first.items():
-                if not path.is_file():
-                    die_both(
-                        f"来源 memory 文件消失: {path}",
-                        f"source memory file disappeared: {path}",
+                current_identity, current_data = (
+                    read_regular_file_with_identity_nofollow(
+                        source_memory.parent.parent, path
                     )
-                if path.read_bytes() != data:
+                )
+                unchanged = (
+                    current_identity == first_identities[path]
+                    and current_data == data
+                )
+                if not unchanged:
                     stable = False
                     last_error = t(
                         f"读取时来源 memory 发生变化: {path.name} "
@@ -316,7 +488,7 @@ def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
                     )
                     break
             if stable:
-                return first
+                return SourceSnapshots(first, first_identities)
         except OSError as error:
             last_error = t(
                 f"读取来源 memory 失败: {error}",
@@ -328,7 +500,7 @@ def read_stable_source_files(source_memory: Path) -> dict[Path, bytes]:
 def assert_source_unchanged(
     source_memory: Path,
     snapshots: dict[Path, bytes],
-    expected_identity: tuple[int, int] | None = None,
+    expected_identity: tuple[int, ...] | None = None,
 ) -> None:
     """合并后再核对目录身份、成员与内容; 任一变化都失败, 阻止清理 worktree."""
     try:
@@ -353,13 +525,26 @@ def assert_source_unchanged(
         )
     for path, expected in snapshots.items():
         try:
-            current = path.read_bytes()
+            current_identity, current = read_regular_file_with_identity_nofollow(
+                source_memory.parent.parent, path
+            )
         except OSError as error:
             die_both(
                 f"合并后来源 memory 不可读: {path}: {error}",
                 f"source memory unreadable after merge: {path}: {error}",
             )
-        if current != expected:
+        expected_file_identity = (
+            snapshots.identities.get(path)
+            if isinstance(snapshots, SourceSnapshots)
+            else None
+        )
+        if (
+            current != expected
+            or (
+                expected_file_identity is not None
+                and current_identity != expected_file_identity
+            )
+        ):
             die_both(
                 f"合并后来源 memory 发生变化: {path.name}; "
                 "拒绝成功退出以免 worktree 被清理",
@@ -389,6 +574,14 @@ def detect_main_tree(source_root: str) -> str | None:
 
 def resolve_roots(args: argparse.Namespace) -> tuple[str, str]:
     source_path = os.path.abspath(args.source or os.getcwd())
+    if os.name == "nt":
+        try:
+            validate_directory_path_nofollow(Path(source_path))
+        except OSError as error:
+            die_both(
+                f"来源路径不安全或不可读: {source_path}: {error}",
+                f"source path is unsafe or unreadable: {source_path}: {error}",
+            )
 
     source_root = git_output(source_path, "rev-parse", "--show-toplevel")
     if source_root:
@@ -412,6 +605,19 @@ def resolve_roots(args: argparse.Namespace) -> tuple[str, str]:
             )
         target_root = os.path.abspath(detected)
 
+    if os.name == "nt":
+        for label_zh, label_en, root in (
+            ("来源", "source", source_root),
+            ("目标", "target", target_root),
+        ):
+            try:
+                validate_directory_path_nofollow(Path(root))
+            except OSError as error:
+                die_both(
+                    f"{label_zh} worktree 不安全或不可读: {root}: {error}",
+                    f"{label_en} worktree is unsafe or unreadable: {root}: {error}",
+                )
+
     return source_root, target_root
 
 
@@ -419,12 +625,23 @@ def format_entry(marker_hash: str, kind: str, source_root: str, name: str,
                  timestamp: str, block: bytes) -> bytes:
     return (
         b"\n"
-        + f"<!-- merged-worktree-memory {kind}:{marker_hash} -->\n".encode()
         + f"<!-- merged-worktree-memory source:{source_root} file:{name}"
         f" merged-at:{timestamp} -->\n".encode()
         + block
         + b"\n"
+        # 完成标记必须最后提交；旧版前置 marker 仍由 target_hashes 兼容读取.
+        + f"<!-- merged-worktree-memory {kind}:{marker_hash} -->\n".encode()
     )
+
+
+def append_payload_fully(handle: BinaryIO, payload: bytes, target: Path) -> None:
+    """处理短写；异常时不把尚未落完正文的条目视为已提交."""
+    offset = 0
+    while offset < len(payload):
+        written = handle.write(payload[offset:])
+        if not written:
+            raise OSError(f"short append to protected file: {target}")
+        offset += written
 
 
 def merge_files(
@@ -433,18 +650,23 @@ def merge_files(
     source_memory: Path,
     snapshots: dict[Path, bytes],
     dry_run: bool,
-    source_identity: tuple[int, int] | None = None,
+    source_identity: tuple[int, ...] | None = None,
 ) -> None:
     target_memory = Path(target_root) / ".memsearch" / "memory"
     if not dry_run:
-        target_memory.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            ensure_private_directory_nofollow(Path(target_root), target_memory)
+            # 写入任何目标记忆前先完整遍历边界：拒绝 nested reparse，并迁移
+            # 全部既有子目录/文件的 DACL。失败时不会先产生部分合并结果.
+            scan_dirty_files(target_memory)
+        else:
+            target_memory.mkdir(parents=True, exist_ok=True)
 
     merged = skipped = empty = 0
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
 
     for source_file in sorted(snapshots, key=lambda path: path.name):
         target_file = target_memory / source_file.name
-        seen = target_hashes(target_file)
         data = snapshots[source_file]
 
         blocks = emit_entry_blocks(data)
@@ -464,29 +686,63 @@ def merge_files(
             cleaned = clean_bytes(fallback)
             entries = [(normalized_hash(cleaned), "file-entry", cleaned)]
 
-        for entry_hash, kind, block in entries:
-            if entry_hash in seen:
-                skipped += 1
-                continue
-            seen.add(entry_hash)
+        def process_entries(seen: set[str], writer) -> None:
+            nonlocal merged, skipped
+            for entry_hash, kind, block in entries:
+                if entry_hash in seen:
+                    skipped += 1
+                    continue
+                seen.add(entry_hash)
 
-            if dry_run:
-                label = t("条目", "entry") if kind == "entry" else t("文件条目", "file entry")
-                print(
-                    t(
-                        f"将合并 {source_file.name} {label} {entry_hash}",
-                        f"Would merge {source_file.name} {label} {entry_hash}",
+                if dry_run:
+                    label = (
+                        t("条目", "entry")
+                        if kind == "entry"
+                        else t("文件条目", "file entry")
                     )
-                )
-            else:
-                with open(target_file, "ab") as handle:
-                    handle.write(
-                        format_entry(
-                            entry_hash, kind, source_root, source_file.name,
-                            timestamp, block,
+                    print(
+                        t(
+                            f"将合并 {source_file.name} {label} {entry_hash}",
+                            f"Would merge {source_file.name} {label} {entry_hash}",
                         )
                     )
-            merged += 1
+                else:
+                    payload = format_entry(
+                        entry_hash,
+                        kind,
+                        source_root,
+                        source_file.name,
+                        timestamp,
+                        block,
+                    )
+                    writer(payload)
+                merged += 1
+
+        if dry_run:
+            process_entries(
+                target_hashes(target_file, Path(target_root)),
+                lambda _payload: None,
+            )
+        elif os.name == "nt":
+            # 从去重读取直到所有 append 完成都固定同一个不共享 DELETE 的句柄.
+            with open_private_append_file_nofollow(
+                Path(target_root), target_file
+            ) as handle:
+                handle.seek(0)
+                seen = hashes_from_target_data(handle.read())
+
+                def append_payload(payload: bytes) -> None:
+                    append_payload_fully(handle, payload, target_file)
+
+                process_entries(seen, append_payload)
+        else:
+            seen = target_hashes(target_file)
+
+            def append_payload(payload: bytes) -> None:
+                with open(target_file, "ab") as handle:
+                    append_payload_fully(handle, payload, target_file)
+
+            process_entries(seen, append_payload)
 
     print(
         t(
@@ -505,7 +761,7 @@ def merge_files(
                 f"Would scan invalid UTF-8 in {target_memory} without rewriting live files",
             )
         )
-    elif target_memory.is_dir():
+    elif os.name == "nt" or target_memory.is_dir():
         scanned, dirty = scan_dirty_files(target_memory)
         print(
             t(
@@ -524,18 +780,42 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
     source_memory = Path(source_root) / ".memsearch" / "memory"
 
     # git 返回物理路径而 --target 可能是逻辑路径, 同一目录的两种写法要判等.
-    if os.path.realpath(source_root) == os.path.realpath(target_root):
+    if os.name == "nt":
+        try:
+            source_root_identity = validate_directory_path_nofollow(Path(source_root))
+            target_root_identity = validate_directory_path_nofollow(Path(target_root))
+        except OSError as error:
+            die_both(
+                f"worktree 根目录不安全或不可读: {error}",
+                f"worktree root is unsafe or unreadable: {error}",
+            )
+        roots_are_equal = source_root_identity == target_root_identity
+    else:
+        roots_are_equal = os.path.realpath(source_root) == os.path.realpath(target_root)
+    if roots_are_equal:
         print(t("来源即主 worktree; 无需合并 memory.", "Source is the main worktree; no memory merge needed."))
         return
 
     # 源 worktree 没有 .memsearch/memory 时是正常空操作: 常见于未装 memsearch,
     # 或已装但本 worktree 尚未产生记忆. 不创建任何目录, 以 0 退出.
-    if not source_memory.is_dir() or source_memory.is_symlink():
+    if os.name == "nt":
+        try:
+            source_memory_exists = directory_exists_nofollow(
+                Path(source_root), source_memory
+            )
+        except OSError as error:
+            die_both(
+                f"来源 memory 路径不安全或不可读: {source_memory}: {error}",
+                f"source memory path is unsafe or unreadable: {source_memory}: {error}",
+            )
+    else:
+        source_memory_exists = source_memory.is_dir() and not source_memory.is_symlink()
         if source_memory.is_symlink():
             die_both(
                 f"来源 memory 不得为符号链接: {source_memory}",
                 f"source memory must not be a symlink: {source_memory}",
             )
+    if not source_memory_exists:
         print(
             t(
                 f"无需合并: {source_memory} 不存在",
@@ -574,9 +854,17 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         return
 
     state_dir = Path(target_root) / ".memsearch"
-    state_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        ensure_private_directory_nofollow(Path(target_root), state_dir)
+    else:
+        state_dir.mkdir(parents=True, exist_ok=True)
     lock_path = state_dir / ".merge-worktree-memory.lock"
-    with lock_path.open("a+b") as lock:
+    lock_context = (
+        open_private_append_file_nofollow(Path(target_root), lock_path)
+        if os.name == "nt"
+        else lock_path.open("a+b")
+    )
+    with lock_context as lock:
         with exclusive_file_lock(lock):
             # 持锁后再采一次稳定快照, 避免等待锁期间 Stop hook 已写入新条目或新文件.
             source_identity = source_memory_identity(source_memory)
@@ -626,7 +914,13 @@ def main() -> int:
     args = parser.parse_args()
 
     source_root, target_root = resolve_roots(args)
-    merge(source_root, target_root, args.dry_run)
+    try:
+        merge(source_root, target_root, args.dry_run)
+    except OSError as error:
+        die_both(
+            f"安全文件操作失败: {error}",
+            f"secure file operation failed: {error}",
+        )
     return 0
 
 

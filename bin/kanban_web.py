@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import queue
 import re
 import socket
@@ -36,7 +37,7 @@ def resolve_share_dir(explicit: Optional[Path] = None) -> Path:
             raise KanbanWebError(t(f"Web 资源目录不存在: {path}", f"web assets directory not found: {path}"))
         return path
     candidates = []
-    env_share = __import__("os").environ.get("ONEVOKE_SHARE")
+    env_share = os.environ.get("ONEVOKE_SHARE")
     if env_share:
         candidates.append(Path(env_share) / "kanban-web")
     here = Path(__file__).resolve()
@@ -50,6 +51,17 @@ def resolve_share_dir(explicit: Optional[Path] = None) -> Path:
     for candidate in candidates:
         if candidate.is_dir() and (candidate / "board.html").is_file():
             return candidate
+    if os.name == "nt":
+        raise KanbanWebError(
+            t(
+                "未找到 kanban web 资源; 请在 Onevoke 仓库根目录运行 "
+                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\install.ps1 "
+                "重装, 或设置 ONEVOKE_SHARE",
+                "kanban web assets not found; from the Onevoke repository root, run "
+                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\install.ps1 "
+                "to reinstall, or set ONEVOKE_SHARE",
+            )
+        )
     raise KanbanWebError(
         t(
             "未找到 kanban web 资源; 请运行 ./install.sh 重装或设置 ONEVOKE_SHARE",
