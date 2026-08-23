@@ -29,7 +29,10 @@ from pathlib import Path, PureWindowsPath
 from typing import IO, NoReturn
 
 from onevoke_config import configured_language, effective_config
-from onevoke_fs import tighten_private_directory_permissions
+from onevoke_fs import (
+    PrivateTemporaryDirectoryCleanupError,
+    private_temporary_directory_nofollow,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -312,6 +315,26 @@ def user_error(message: str) -> None:
     print(f"{prefix}: {message}", file=sys.stderr)
 
 
+def review_temp_root() -> Path:
+    """取得临时根路径；Windows 不用 tempfile 的写探测解析路径."""
+    if os.name != "nt":
+        return Path(tempfile.gettempdir()).resolve()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetTempPathW.argtypes = [wintypes.DWORD, wintypes.LPWSTR]
+    kernel32.GetTempPathW.restype = wintypes.DWORD
+    capacity = 32768
+    buffer = ctypes.create_unicode_buffer(capacity)
+    length = kernel32.GetTempPathW(capacity, buffer)
+    if length == 0 or length >= capacity:
+        code = ctypes.get_last_error()
+        detail = ctypes.FormatError(code) if code else "invalid temporary path"
+        raise GateError(t(
+            f"无法取得 Windows 临时目录: {detail}",
+            f"could not determine the Windows temporary directory: {detail}",
+        ))
+    return Path(os.path.abspath(buffer.value))
+
+
 def usage() -> None:
     if LANGUAGE == "cn":
         print(
@@ -554,7 +577,7 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
             t(f"CWD 不在 Git worktree 内: {cwd_text}", f"CWD is not inside a Git worktree: {cwd_text}")
         ) from error
 
-    temp_root = Path(tempfile.gettempdir()).resolve()
+    temp_root = review_temp_root()
     home = settings.review_home
     if not home.is_dir() or not os.access(home, os.R_OK | os.W_OK):
         raise GateError(
@@ -993,17 +1016,6 @@ def print_error_tail(path: Path) -> None:
         print("\n".join(lines[-10:]), file=sys.stderr)
 
 
-def remove_runtime(path: Path) -> None:
-    def make_writable(function: object, filename: str, _error: object) -> None:
-        try:
-            os.chmod(filename, stat.S_IWRITE | stat.S_IREAD)
-            function(filename)  # type: ignore[operator]
-        except OSError:
-            pass
-
-    shutil.rmtree(path, onerror=make_writable)
-
-
 def reviewer_arguments(
     context: ReviewContext,
     runtime: Path,
@@ -1168,8 +1180,7 @@ def parse_review_output(context: ReviewContext, output_file: Path, stdout_file: 
     print(text)
 
 
-def execute_review(context: ReviewContext) -> int:
-    runtime = Path(tempfile.mkdtemp(prefix=f"{context.agent}-review.", dir=context.temp_root))
+def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
     output_file = runtime / context.settings.output_name
     stdout_file = runtime / "stdout.log"
     error_file = runtime / "error.log"
@@ -1182,21 +1193,13 @@ def execute_review(context: ReviewContext) -> int:
     exit_code = 1
     failure: GateError | None = None
     try:
-        try:
-            tighten_private_directory_permissions(runtime)
-        except OSError as error:
-            raise GateError(
-                t(
-                    f"无法收紧审核运行目录权限: {runtime}: {error}",
-                    f"could not secure review runtime directory: {runtime}: {error}",
-                )
-            ) from error
         task_context = context.task_context
         if context.agent == "claude" and context.task_spec is not None:
             snapshot = runtime / "task-spec.md"
             try:
                 shutil.copyfile(context.task_spec, snapshot)
-                os.chmod(snapshot, stat.S_IRUSR)
+                if os.name != "nt":
+                    os.chmod(snapshot, stat.S_IRUSR)
             except OSError as error:
                 raise GateError(
                     t(
@@ -1269,6 +1272,15 @@ def execute_review(context: ReviewContext) -> int:
     except GateError as error:
         failure = error
         exit_code = error.code
+    except OSError as error:
+        failure = GateError(
+            t(
+                f"审核运行目录读写失败: {runtime}: {error}",
+                f"review runtime I/O failed: {runtime}: {error}",
+            ),
+            2,
+        )
+        exit_code = failure.code
     except ReviewInterrupted as interrupted:
         exit_code = interrupted.code
     except KeyboardInterrupt:
@@ -1294,8 +1306,31 @@ def execute_review(context: ReviewContext) -> int:
                 )
             )
             exit_code = 2
-        remove_runtime(runtime)
     return exit_code
+
+
+def execute_review(context: ReviewContext) -> int:
+    try:
+        with private_temporary_directory_nofollow(
+            context.temp_root, prefix=f"{context.agent}-review."
+        ) as runtime:
+            return _execute_review_in_runtime(context, runtime)
+    except PrivateTemporaryDirectoryCleanupError as error:
+        user_error(
+            t(
+                f"无法安全清理私有审核运行目录: {error}",
+                f"could not safely clean the private review runtime: {error}",
+            )
+        )
+        return 2
+    except OSError as error:
+        user_error(
+            t(
+                f"无法创建私有审核运行目录: {error}",
+                f"could not create the private review runtime: {error}",
+            )
+        )
+        return 1
 
 
 def signal_handler(signum: int, _frame: object) -> NoReturn:

@@ -12,7 +12,7 @@
 | Claude | `claude` | `claude` | `--permission-mode plan`, `--tools Read,Grep,Glob`, `--safe-mode`, `--no-session-persistence` |
 | Grok | `grok` | `grok` | `--sandbox read-only`, `--no-memory`, `--no-subagents` |
 
-- 三者都在只读隔离下运行: Codex 在目标 worktree 内跑只读 shell; Claude 与 Grok 在 worktree 外的 runtime 目录运行, 只读访问目标树并只开放读取, 搜索类工具. Claude 使用目标树外的任务 spec 时, 先把该文件快照到仅当前用户可访问的 runtime 目录, 不授权原文件父目录. runtime 目录在 POSIX 用 `0700`, Windows 用关闭继承且只允许当前用户访问的受保护 DACL; 权限收紧失败时审核失败. 禁为了统一实现或适配 Windows 而交换或放宽三套隔离参数.
+- 三者都在只读隔离下运行: Codex 在目标 worktree 内跑只读 shell; Claude 与 Grok 在 worktree 外的 runtime 目录运行, 只读访问目标树并只开放读取, 搜索类工具. Claude 使用目标树外的任务 spec 时, 先把该文件快照到仅当前用户可访问的 runtime 目录, 不授权原文件父目录. runtime 目录在 POSIX 用 `0700`; Windows 必须相对固定临时根句柄以 `CREATE_NEW` 创建, 创建瞬间即使用关闭继承且只允许当前用户访问的受保护 DACL, 随机名碰撞安全重试, 不得先发布继承 ACL 的目录再收紧. Windows runtime 根句柄不得共享 WRITE/DELETE, 且必须持续持有到敏感文件写入、Reviewer 运行、进程树收集和 worktree 校验完成, 同时阻止改名与原地切换为 reparse point; 退出时从该固定句柄逐层 no-follow 且有界清理, reparse point、占用、预算耗尽或其他清理失败必须使审核失败, 禁静默遗留. 禁为了统一实现或适配 Windows 而交换或放宽三套隔离参数.
 - `PM`, `CSA`, `Hacker`, `QA` 分别选择 reviewer, 按优先级取该角色第一个明确指定的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则; (4) `~/.config/onevoke/config.json` 中该角色的取值. 前三档都未指定时运行 `onevoke review` 读取第 (4) 档, 配置不存在时回落到 Codex. 第 (3) 档只对本节的 reviewer 取值有效, 不改变入口的通用优先级链; 该档文件未载入且当前任务需要判定时读取它, 读不到按未指定处理.
 - 不同角色可以使用不同 reviewer. 同一角色的修复重跑和结论确认必须继续使用该角色本轮选定的 reviewer; 中途更换时该角色已有结论作废并重跑该阶段, 已通过的其他角色不因此作废.
 - 下文的「reviewer」和「reviewer CLI」均指当前审核角色选定的那一个; 「审核入口」指当前平台的 `onevoke-review.sh` 或 `onevoke-review.cmd`, 两者共同进入 `onevoke_review.py`.

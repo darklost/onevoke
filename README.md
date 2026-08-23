@@ -78,7 +78,7 @@ kanban web
 
 `kanban web` 默认在 `http://127.0.0.1:8080` 启动只读看板. 服务端每 60 秒扫描任务, 仅在数据变化时通过 SSE 推送; 客户端原位更新对应卡片.
 
-Windows 后端拒绝看板及记忆合并边界中的符号链接, junction 和其他 reparse point, 并通过已校验的 Win32 句柄完成任务读写、迁移、记忆读取和追加. 配置路径也从卷根逐级拒绝 reparse point; 读取期间固定配置文件句柄并拒绝写入/替换, schema 通过后在同一句柄上迁移 DACL; 保存时只收紧新建配置目录, 临时文件先变为私有再写入并通过固定父句柄原子替换. 在 Windows 上, 配置文件、审核运行目录及目标记忆目录/文件使用只允许当前用户访问的受保护 DACL, 记忆合并使用 `LockFileEx` 独占锁. 这些改动不改变 POSIX 现有的 no-follow 文件操作、`0600`/`0700` 权限和 `flock` 边界.
+Windows 后端拒绝看板、Git exclude 及记忆合并边界中的符号链接, junction 和其他 reparse point, 并通过已校验的 Win32 句柄完成任务读写、迁移、Git exclude 去重追加、记忆读取和追加; Git exclude 保持既有 ACL. 配置路径也从卷根逐级拒绝 reparse point; 读取期间固定配置文件句柄并拒绝写入/替换, schema 通过后在同一句柄上迁移 DACL; 保存时只收紧新建配置目录, 临时文件先变为私有再写入并通过固定父句柄原子替换. 在 Windows 上, 新看板目录、配置文件、审核运行目录及目标记忆目录/文件在创建瞬间即使用只允许当前用户访问的受保护 DACL; 审核运行目录的不共享 WRITE/DELETE 句柄会一直持有到 Reviewer 进程树收集和敏感文件 no-follow 清理完成, 同时阻止改名和原地 reparse 切换, 清理失败时审核失败. 记忆合并和 Git exclude 更新使用文件锁. 这些改动不改变 POSIX 现有的 no-follow 文件操作、`0600`/`0700` 权限和 `flock` 边界.
 
 看板总览:
 

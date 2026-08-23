@@ -33,11 +33,16 @@ from onevoke_config import (
 import kanban_web
 from onevoke_fs import (
     UnsafePathError,
+    create_private_directory_nofollow,
     create_directory_with_text_file_nofollow,
+    directory_identity_nofollow,
+    ensure_inherited_directory_path_nofollow,
+    ensure_private_directory_nofollow,
+    exclusive_file_lock,
     is_reparse_point,
+    open_append_file_nofollow,
     read_regular_file_nofollow,
     rename_nofollow,
-    tighten_private_directory_permissions,
     write_text_atomic_nofollow,
 )
 
@@ -201,9 +206,14 @@ def add_git_exclude(root: Path) -> Optional[Path]:
         return None
     if git_root_result.returncode != 0:
         return None
-    git_root = Path(git_root_result.stdout.strip()).resolve()
+    if os.name == "nt":
+        git_root = Path(os.path.abspath(git_root_result.stdout.strip()))
+        board_root = Path(os.path.abspath(os.fspath(root)))
+    else:
+        git_root = Path(git_root_result.stdout.strip()).resolve()
+        board_root = root.resolve()
     try:
-        relative = root.resolve().relative_to(git_root)
+        relative = board_root.relative_to(git_root)
     except ValueError:
         return None
     exclude_result = subprocess.run(
@@ -218,6 +228,23 @@ def add_git_exclude(root: Path) -> Optional[Path]:
     if not exclude.is_absolute():
         exclude = git_root / exclude
     pattern = f"/{relative.as_posix().strip('/')}/"
+    if os.name == "nt":
+        exclude = Path(os.path.abspath(os.fspath(exclude)))
+        ensure_inherited_directory_path_nofollow(exclude.parent)
+        anchor = Path(exclude.anchor)
+        with open_append_file_nofollow(anchor, exclude) as file:
+            with exclusive_file_lock(file):
+                file.seek(0)
+                existing = file.read().decode("utf-8")
+                if pattern not in existing.splitlines():
+                    addition = (
+                        ("\n" if existing and not existing.endswith("\n") else "")
+                        + pattern
+                        + "\n"
+                    )
+                    file.write(addition.encode("utf-8"))
+        return exclude
+
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     if pattern not in existing.splitlines():
         exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -226,6 +253,26 @@ def add_git_exclude(root: Path) -> Optional[Path]:
                 file.write("\n")
             file.write(pattern + "\n")
     return exclude.resolve()
+
+
+def ensure_private_board_directory(path: Path) -> None:
+    """Windows 上幂等打开私有目录，缺失时以 CREATE_NEW 安全发布."""
+    if path.parent == path:
+        raise KanbanError(t(
+            f"看板目录不能是文件系统根: {path}",
+            f"Board directory cannot be a filesystem root: {path}",
+        ))
+    ensure_inherited_directory_path_nofollow(path.parent)
+    try:
+        directory_identity_nofollow(path.parent, path)
+    except FileNotFoundError:
+        # 安全 probe 后发生同名创建时，严格 CREATE_NEW 必须失败，不能
+        # 接受竞态产生的目录作为既有看板边界.
+        create_private_directory_nofollow(path.parent, path)
+    else:
+        # 只迁移叶目录，既有父目录 ACL 保持不变；probe 后消失也不得
+        # 静默重建，因此显式关闭 create.
+        ensure_private_directory_nofollow(path.parent, path, create=False)
 
 
 def command_init(args: argparse.Namespace) -> None:
@@ -246,19 +293,21 @@ def command_init(args: argparse.Namespace) -> None:
     ensure_windows_lexical_path_safe(root)
     if root.exists() and not root.is_dir():
         raise KanbanError(t(f"看板路径不是目录: {root}", f"Board path is not a directory: {root}"))
-    root.mkdir(parents=True, exist_ok=True)
-    ensure_windows_lexical_path_safe(root)
     if os.name == "nt":
-        tighten_private_directory_permissions(root)
+        ensure_private_board_directory(root)
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        ensure_windows_lexical_path_safe(root)
     for state in STATES:
         path = root / state
         ensure_windows_lexical_path_safe(path)
         if path.exists() and not path.is_dir():
             raise KanbanError(t(f"状态路径不是目录: {path}", f"State path is not a directory: {path}"))
-        path.mkdir(exist_ok=True)
-        ensure_windows_lexical_path_safe(path)
         if os.name == "nt":
-            tighten_private_directory_permissions(path)
+            ensure_private_board_directory(path)
+        else:
+            path.mkdir(exist_ok=True)
+            ensure_windows_lexical_path_safe(path)
     exclude = add_git_exclude(root)
     print(t(f"已初始化: {root}", f"initialized: {root}"))
     if exclude:

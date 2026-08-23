@@ -4,22 +4,34 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import io
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+if os.name == "nt":
+    from ctypes import wintypes
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BIN_DIR = PROJECT_ROOT / "bin"
 REVIEWER = PROJECT_ROOT / "bin" / "onevoke-review.cmd"
 REVIEW_IMPLEMENTATION = PROJECT_ROOT / "bin" / "onevoke_review.py"
 ONEVOKE = PROJECT_ROOT / "bin" / "onevoke"
+sys.path.insert(0, str(BIN_DIR))
+import onevoke_fs
+import onevoke_review
+sys.path.pop(0)
 
 FAKE_REVIEWER = r'''from __future__ import annotations
 
@@ -262,7 +274,12 @@ class WindowsReviewGateTest(unittest.TestCase):
         self.git("commit", "-q", "-m", message)
         return self.git("rev-parse", "HEAD")
 
-    def review(self, agent: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+    def review(
+        self,
+        agent: str,
+        task_goal: str = "确认 Windows 审核正确",
+        **overrides: str,
+    ) -> subprocess.CompletedProcess[str]:
         environment = {**self.environment, "FAKE_AGENT": agent, **overrides}
         return subprocess.run(
             [
@@ -272,7 +289,7 @@ class WindowsReviewGateTest(unittest.TestCase):
                 self.base,
                 self.head,
                 "QA",
-                "确认 Windows 审核正确",
+                task_goal,
             ],
             env=environment,
             text=True,
@@ -281,6 +298,373 @@ class WindowsReviewGateTest(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def acl_text(self, path: Path) -> str:
+        result = subprocess.run(
+            ["icacls.exe", str(path)],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return result.stdout
+
+    def assert_private_acl(self, path: Path) -> None:
+        acl = self.acl_text(path)
+        self.assertNotIn("(I)", acl, acl)
+        self.assertEqual(1, acl.count("(F)"), acl)
+
+    @staticmethod
+    def set_junction_reparse(directory: Path, target: Path) -> None:
+        """将既有空目录原地改成 mount-point reparse point."""
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.DeviceIoControl.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.c_void_p,
+        ]
+        kernel32.DeviceIoControl.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateFileW(
+            str(directory),
+            0x40000000,  # GENERIC_WRITE
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,  # OPEN_EXISTING
+            0x02000000 | 0x00200000,
+            None,
+        )
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            print_name = str(target.resolve())
+            substitute = ("\\??\\" + print_name).encode("utf-16-le")
+            printable = print_name.encode("utf-16-le")
+            path_buffer = substitute + b"\x00\x00" + printable + b"\x00\x00"
+            reparse = struct.pack(
+                "<IHHHHHH",
+                0xA0000003,
+                8 + len(path_buffer),
+                0,
+                0,
+                len(substitute),
+                len(substitute) + 2,
+                len(printable),
+            ) + path_buffer
+            returned = wintypes.DWORD()
+            input_buffer = ctypes.create_string_buffer(reparse)
+            if not kernel32.DeviceIoControl(
+                handle,
+                0x000900A4,  # FSCTL_SET_REPARSE_POINT
+                input_buffer,
+                len(reparse),
+                None,
+                0,
+                ctypes.byref(returned),
+                None,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def test_runtime_directory_is_private_for_entire_lease(self) -> None:
+        original_open = onevoke_fs._open_relative_handle
+        observed: list[Path] = []
+
+        def inspect_created_acl(parent_handle, name, path, **kwargs):
+            handle = original_open(parent_handle, name, path, **kwargs)
+            if kwargs.get("private_creation") == "directory":
+                self.assertEqual(onevoke_fs._CREATE_NEW, kwargs.get("creation"))
+                self.assert_private_acl(path)
+                observed.append(path)
+            return handle
+
+        with mock.patch.object(
+            onevoke_fs, "_open_relative_handle", side_effect=inspect_created_acl
+        ):
+            with onevoke_fs.private_temporary_directory_nofollow(
+                self.runtime, prefix="codex-review."
+            ) as created:
+                self.assertEqual([created], observed)
+                self.assert_private_acl(created)
+                with self.assertRaises(OSError):
+                    created.rename(self.root / "replaced-runtime")
+                with self.assertRaises(OSError):
+                    self.runtime.rename(self.root / "replaced-temp-parent")
+                with self.assertRaises(OSError):
+                    self.root.rename(self.root.parent / f"{self.root.name}-replaced")
+                (created / "evidence.txt").write_text(
+                    "sensitive\n", encoding="utf-8"
+                )
+
+        self.assertEqual([created], observed)
+        self.assertFalse(created.exists())
+
+    def test_runtime_directory_creation_retries_random_name_collision(self) -> None:
+        collision = self.runtime / "codex-review.collision"
+        collision.mkdir()
+        with mock.patch.object(
+            onevoke_fs.secrets,
+            "token_hex",
+            side_effect=("collision", "fresh"),
+        ) as token_hex:
+            with onevoke_fs.private_temporary_directory_nofollow(
+                self.runtime, prefix="codex-review."
+            ) as created:
+                self.assertEqual(self.runtime / "codex-review.fresh", created)
+                self.assert_private_acl(created)
+
+        self.assertEqual(2, token_hex.call_count)
+        self.assertTrue(collision.is_dir())
+        self.assertFalse(created.exists())
+
+    def test_runtime_directory_hardening_failure_leaves_no_entry_or_handle(self) -> None:
+        candidate = self.runtime / "codex-review.failure"
+        with mock.patch.object(
+            onevoke_fs.secrets, "token_hex", return_value="failure"
+        ), mock.patch.object(
+            onevoke_fs,
+            "_tighten_private_handle",
+            side_effect=OSError("forced runtime ACL failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "forced runtime ACL failure"):
+                with onevoke_fs.private_temporary_directory_nofollow(
+                    self.runtime, prefix="codex-review."
+                ):
+                    self.fail("an insecure runtime must never be yielded")
+
+        self.assertFalse(candidate.exists())
+        self.assertEqual([], list(self.runtime.iterdir()))
+        moved = self.root / "runtime-moved"
+        self.runtime.rename(moved)
+        moved.rename(self.runtime)
+
+    def test_execute_review_holds_runtime_lease_through_sensitive_writes(self) -> None:
+        observed: list[Path] = []
+
+        def inspect_runtime(_context: object, runtime: Path) -> int:
+            observed.append(runtime)
+            self.assert_private_acl(runtime)
+            with self.assertRaises(OSError):
+                runtime.rename(self.root / "runtime-replacement")
+            (runtime / "prompt.txt").write_text("secret\n", encoding="utf-8")
+            return 0
+
+        context = mock.Mock(temp_root=self.runtime, agent="codex")
+        with mock.patch.object(
+            onevoke_review,
+            "_execute_review_in_runtime",
+            side_effect=inspect_runtime,
+        ):
+            result = onevoke_review.execute_review(context)
+
+        self.assertEqual(0, result)
+        self.assertEqual(1, len(observed))
+        self.assertFalse(observed[0].exists())
+        self.assertEqual([], list(self.runtime.iterdir()))
+
+    def test_execute_review_blocks_in_place_runtime_reparse(self) -> None:
+        outside = self.root / "runtime-reparse-outside"
+        outside.mkdir()
+        observed: list[Path] = []
+
+        def attempt_reparse(_context: object, runtime: Path) -> int:
+            observed.append(runtime)
+            with self.assertRaises(OSError):
+                self.set_junction_reparse(runtime, outside)
+            self.assertFalse(onevoke_fs.is_reparse_point(runtime))
+            (runtime / "prompt.txt").write_text("secret\n", encoding="utf-8")
+            return 0
+
+        context = mock.Mock(temp_root=self.runtime, agent="codex")
+        with mock.patch.object(
+            onevoke_review,
+            "_execute_review_in_runtime",
+            side_effect=attempt_reparse,
+        ):
+            result = onevoke_review.execute_review(context)
+
+        self.assertEqual(0, result)
+        self.assertEqual(1, len(observed))
+        self.assertFalse(observed[0].exists())
+        self.assertEqual([], list(outside.iterdir()))
+
+    def test_runtime_lease_covers_real_process_tree_collection(self) -> None:
+        original_stop = onevoke_review.stop_process_tree
+        phases: list[str] = []
+        observed: list[Path] = []
+
+        def inspect_collection(process: subprocess.Popen[bytes]) -> bool:
+            active = list(self.runtime.glob("codex-review.*"))
+            self.assertEqual(1, len(active))
+            runtime = active[0]
+            observed.append(runtime)
+            phases.append("before-stop")
+            with self.assertRaises(OSError):
+                runtime.rename(self.root / "runtime-during-stop")
+            result = original_stop(process)
+            phases.append("after-stop")
+            self.assertTrue(runtime.is_dir())
+            with self.assertRaises(OSError):
+                runtime.rename(self.root / "runtime-after-stop")
+            return result
+
+        arguments = [
+            str(self.repo),
+            self.base,
+            self.head,
+            "QA",
+            "verify runtime lease covers process tree collection",
+        ]
+        environment = {
+            **self.environment,
+            "FAKE_AGENT": "codex",
+            "FAKE_REPORT": "lease collection complete",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            context = onevoke_review.validate_context("codex", arguments)
+            with mock.patch.object(
+                onevoke_review,
+                "stop_process_tree",
+                side_effect=inspect_collection,
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    result = onevoke_review.execute_review(context)
+
+        self.assertEqual(0, result)
+        self.assertEqual(["before-stop", "after-stop"], phases)
+        self.assertEqual(1, len(observed))
+        self.assertFalse(observed[0].exists())
+
+    def test_execute_review_rejects_reparse_cleanup_without_touching_target(self) -> None:
+        outside = self.root / "cleanup-outside"
+        outside.mkdir()
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        observed: list[Path] = []
+
+        def plant_reparse(_context: object, runtime: Path) -> int:
+            observed.append(runtime)
+            result = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(runtime / "unsafe-child"),
+                    str(outside),
+                ],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise unittest.SkipTest(
+                    f"cannot create a Windows junction: {result.stderr}"
+                )
+            return 0
+
+        context = mock.Mock(temp_root=self.runtime, agent="codex")
+        error_output = io.StringIO()
+        with mock.patch.object(
+            onevoke_review,
+            "_execute_review_in_runtime",
+            side_effect=plant_reparse,
+        ), mock.patch("sys.stderr", error_output):
+            result = onevoke_review.execute_review(context)
+
+        self.assertEqual(2, result)
+        self.assertIn(
+            "cannot safely remove private temporary directory",
+            error_output.getvalue(),
+        )
+        self.assertTrue(sentinel.is_file())
+        self.assertEqual("keep\n", sentinel.read_text(encoding="utf-8"))
+        self.assertEqual(1, len(observed))
+        self.assert_private_acl(observed[0])
+        unsafe_child = observed[0] / "unsafe-child"
+        if os.path.lexists(unsafe_child):
+            os.rmdir(unsafe_child)
+        shutil.rmtree(observed[0], ignore_errors=True)
+
+    def test_execute_review_reports_cleanup_budget_exhaustion(self) -> None:
+        observed: list[Path] = []
+
+        def create_extra_files(_context: object, runtime: Path) -> int:
+            observed.append(runtime)
+            (runtime / "one.txt").write_text("one\n", encoding="utf-8")
+            (runtime / "two.txt").write_text("two\n", encoding="utf-8")
+            return 0
+
+        context = mock.Mock(temp_root=self.runtime, agent="codex")
+        error_output = io.StringIO()
+        with mock.patch.object(
+            onevoke_review,
+            "_execute_review_in_runtime",
+            side_effect=create_extra_files,
+        ), mock.patch.object(
+            onevoke_fs,
+            "_PRIVATE_TEMP_CLEANUP_MAX_ENTRIES",
+            1,
+        ), mock.patch("sys.stderr", error_output):
+            result = onevoke_review.execute_review(context)
+
+        self.assertEqual(2, result)
+        self.assertIn("entry budget exceeded", error_output.getvalue())
+        self.assertEqual(1, len(observed))
+        self.assert_private_acl(observed[0])
+        shutil.rmtree(observed[0], ignore_errors=True)
+
+    def test_reparse_temp_root_is_rejected_before_any_write(self) -> None:
+        outside = self.root / "outside-temp-target"
+        outside.mkdir()
+        temporary_link = self.root / "unsafe-temp"
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(temporary_link), str(outside)],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest(f"cannot create a Windows junction: {result.stderr}")
+        try:
+            review = self.review(
+                "codex",
+                TMPDIR=str(temporary_link),
+                TEMP=str(temporary_link),
+                TMP=str(temporary_link),
+            )
+        finally:
+            if os.path.lexists(temporary_link):
+                os.rmdir(temporary_link)
+
+        self.assertEqual(1, review.returncode, review.stderr)
+        self.assertIn("private review runtime", review.stderr)
+        self.assertNotIn("Traceback", review.stderr)
+        self.assertEqual([], list(outside.iterdir()))
 
     def test_cmd_entry_runs_each_reviewer_with_isolation_contract(self) -> None:
         for agent in ("codex", "claude", "grok"):
@@ -307,6 +691,27 @@ class WindowsReviewGateTest(unittest.TestCase):
                     self.assertIn("--no-memory", arguments)
                     self.assertIn("--no-subagents", arguments)
                     self.assertNotIn("--model", arguments)
+
+    def test_claude_spec_snapshot_is_cleaned_after_success(self) -> None:
+        spec = self.root / "authoritative-spec.md"
+        spec.write_text("# Windows spec\n", encoding="utf-8")
+
+        result = self.review(
+            "claude",
+            task_goal=str(spec.resolve()),
+            FAKE_REPORT="claude spec complete",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        prompt = self.prompt_log.read_text(encoding="utf-8")
+        marker = "Authoritative spec file: "
+        snapshot_text = prompt.split(marker, 1)[1].split(
+            ". Read it completely before reviewing.", 1
+        )[0]
+        snapshot = Path(snapshot_text)
+        self.assertEqual("task-spec.md", snapshot.name)
+        self.assertFalse(snapshot.exists())
+        self.assertEqual([], list(self.runtime.iterdir()))
 
     def test_default_reviewer_home_uses_userprofile_instead_of_home(self) -> None:
         profile = self.root / "windows-profile"

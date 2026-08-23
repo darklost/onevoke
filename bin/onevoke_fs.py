@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
 import stat
-import tempfile
 import time
 from pathlib import Path
 from typing import BinaryIO, Iterator
@@ -23,6 +23,15 @@ from typing import BinaryIO, Iterator
 
 class UnsafePathError(OSError):
     """路径越界、含 reparse point，或最终对象类型不符合契约."""
+
+
+class PrivateTemporaryDirectoryCleanupError(OSError):
+    """私有临时目录无法通过固定句柄完整清理."""
+
+
+_PRIVATE_TEMP_CLEANUP_MAX_DEPTH = 64
+_PRIVATE_TEMP_CLEANUP_MAX_ENTRIES = 4096
+_PRIVATE_TEMP_CLEANUP_MAX_PASSES = 16
 
 
 def _absolute_path(path: Path) -> Path:
@@ -715,7 +724,12 @@ if os.name == "nt":
 
 
     def _open_or_create_regular_file_handle(
-        parent_handle: int, name: str, path: Path, *, access: int
+        parent_handle: int,
+        name: str,
+        path: Path,
+        *,
+        access: int,
+        private_creation: bool,
     ) -> int:
         """先用最小权限识别既有叶对象，再固定身份并取得高权限句柄."""
         while True:
@@ -742,7 +756,7 @@ if os.name == "nt":
                     creation=_CREATE_NEW,
                     expected="file",
                     share_delete=False,
-                    private_creation="file",
+                    private_creation="file" if private_creation else None,
                 )
             except OSError as error:
                 code = getattr(error, "winerror", None) or getattr(error, "errno", None)
@@ -1092,6 +1106,304 @@ if os.name == "nt":
                     _close_handle(handle)
 
 
+    def ensure_inherited_directory_path_nofollow(path: Path) -> Path:
+        """从卷根逐分量打开或创建目录, 不改写任何对象的 DACL."""
+        candidate = _absolute_path(path)
+        anchor = Path(candidate.anchor)
+        if not candidate.anchor:
+            raise UnsafePathError(
+                f"protected directory has no absolute anchor: {candidate}"
+            )
+        _, _, parts = _relative_parts(anchor, candidate)
+        handles: list[int] = []
+        current = anchor
+        with _open_chain(
+            anchor,
+            anchor,
+            final_access=_FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (_, root_handle):
+            parent_handle = root_handle
+            try:
+                for part in parts:
+                    current /= part
+                    handle = _try_open_leaf(
+                        parent_handle,
+                        part,
+                        current,
+                        expected="directory",
+                    )
+                    if handle is None:
+                        try:
+                            handle = _open_relative_handle(
+                                parent_handle,
+                                part,
+                                current,
+                                access=_FILE_READ_ATTRIBUTES,
+                                creation=_CREATE_NEW,
+                                expected="directory",
+                            )
+                        except OSError as create_error:
+                            code = (
+                                getattr(create_error, "winerror", None)
+                                or getattr(create_error, "errno", None)
+                            )
+                            if code not in (_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS):
+                                raise
+                            handle = _try_open_leaf(
+                                parent_handle,
+                                part,
+                                current,
+                                expected="directory",
+                            )
+                            if handle is None:
+                                raise FileNotFoundError(current)
+                    handles.append(handle)
+                    parent_handle = handle
+                return candidate
+            finally:
+                for handle in reversed(handles):
+                    _close_handle(handle)
+
+
+    def _create_private_temporary_directory_handle_nofollow(
+        parent: Path, parent_handle: int, *, prefix: str
+    ) -> tuple[Path, int]:
+        """在固定父句柄下原子创建私有目录并返回持续固定其身份的句柄."""
+        for _ in range(128):
+            name = f"{prefix}{secrets.token_hex(16)}"
+            candidate = parent / name
+            try:
+                handle = _open_relative_handle(
+                    parent_handle,
+                    name,
+                    candidate,
+                    access=(
+                        _DELETE
+                        | _READ_CONTROL
+                        | _WRITE_DAC
+                        | _FILE_LIST_DIRECTORY
+                        | _FILE_READ_ATTRIBUTES
+                    ),
+                    creation=_CREATE_NEW,
+                    expected="directory",
+                    share_write=False,
+                    private_creation="directory",
+                )
+            except OSError as error:
+                code = (
+                    getattr(error, "winerror", None)
+                    or getattr(error, "errno", None)
+                )
+                if code in (_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS):
+                    continue
+                raise
+            try:
+                _tighten_private_handle(
+                    handle, candidate, expected="directory"
+                )
+            except BaseException as harden_error:
+                cleanup_error: BaseException | None = None
+                try:
+                    _delete_handle(handle, candidate, required=True)
+                except BaseException as error:
+                    cleanup_error = error
+                finally:
+                    _close_handle(handle)
+                if cleanup_error is not None:
+                    raise cleanup_error from harden_error
+                raise
+            else:
+                return candidate, handle
+        raise FileExistsError(
+            f"cannot allocate unique private directory under: {parent}"
+        )
+
+
+    def _directory_names_from_handle(
+        directory_handle: int, directory: Path, *, remaining_entries: int
+    ) -> list[str]:
+        """从已固定目录句柄枚举直接成员名称."""
+        names: list[str] = []
+        restart = True
+        while True:
+            buffer = ctypes.create_string_buffer(1 << 16)
+            io_status = _IO_STATUS_BLOCK()
+            status = _ntdll.NtQueryDirectoryFile(
+                directory_handle,
+                None,
+                None,
+                None,
+                ctypes.byref(io_status),
+                buffer,
+                len(buffer),
+                _NT_FILE_NAMES_INFORMATION_CLASS,
+                False,
+                None,
+                restart,
+            )
+            unsigned = _unsigned_ntstatus(status)
+            if unsigned == _STATUS_NO_MORE_FILES:
+                break
+            if status < 0:
+                _raise_nt_error(
+                    "cannot enumerate protected directory", status, directory
+                )
+            restart = False
+            offset = 0
+            used = int(io_status.Information)
+            while offset + 12 <= used:
+                next_offset = wintypes.ULONG.from_buffer(buffer, offset).value
+                name_length = wintypes.ULONG.from_buffer(buffer, offset + 8).value
+                end = offset + 12 + name_length
+                if end > used:
+                    raise UnsafePathError(
+                        f"invalid directory enumeration result: {directory}"
+                    )
+                name = buffer.raw[offset + 12:end].decode("utf-16-le")
+                if name not in (".", ".."):
+                    names.append(name)
+                    if len(names) > remaining_entries:
+                        raise UnsafePathError(
+                            f"private temporary directory cleanup entry budget exceeded: {directory}"
+                        )
+                if not next_offset:
+                    break
+                offset += int(next_offset)
+        return names
+
+
+    def _remove_directory_contents_from_handle_nofollow(
+        directory_handle: int,
+        directory: Path,
+        *,
+        depth: int = 0,
+        entries_seen: list[int] | None = None,
+    ) -> None:
+        """只从固定父句柄递归删除成员; reparse point 一律拒绝."""
+        if depth > _PRIVATE_TEMP_CLEANUP_MAX_DEPTH:
+            raise UnsafePathError(
+                f"private temporary directory cleanup depth exceeded: {directory}"
+            )
+        if entries_seen is None:
+            entries_seen = [0]
+        for _ in range(_PRIVATE_TEMP_CLEANUP_MAX_PASSES):
+            remaining = _PRIVATE_TEMP_CLEANUP_MAX_ENTRIES - entries_seen[0]
+            if remaining < 0:
+                raise UnsafePathError(
+                    f"private temporary directory cleanup entry budget exceeded: {directory}"
+                )
+            names = _directory_names_from_handle(
+                directory_handle,
+                directory,
+                remaining_entries=remaining,
+            )
+            if not names:
+                return
+            entries_seen[0] += len(names)
+            for name in names:
+                child_path = directory / name
+                try:
+                    probe = _try_open_leaf(
+                        directory_handle,
+                        name,
+                        child_path,
+                        expected="any",
+                        share_write=False,
+                        share_delete=False,
+                    )
+                except OSError as error:
+                    if _is_missing_windows_error(error):
+                        continue
+                    raise
+                if probe is None:
+                    continue
+                try:
+                    info = _attribute_info(probe, child_path)
+                    is_directory = bool(
+                        info.FileAttributes & _FILE_ATTRIBUTE_DIRECTORY
+                    )
+                finally:
+                    _close_handle(probe)
+
+                access = _DELETE | _FILE_READ_ATTRIBUTES
+                if is_directory:
+                    access |= _FILE_LIST_DIRECTORY
+                try:
+                    child = _try_open_leaf(
+                        directory_handle,
+                        name,
+                        child_path,
+                        access=access,
+                        expected="directory" if is_directory else "file",
+                        share_write=False,
+                        share_delete=False,
+                    )
+                except OSError as error:
+                    if _is_missing_windows_error(error):
+                        continue
+                    raise
+                if child is None:
+                    continue
+                try:
+                    if is_directory:
+                        _remove_directory_contents_from_handle_nofollow(
+                            child,
+                            child_path,
+                            depth=depth + 1,
+                            entries_seen=entries_seen,
+                        )
+                    _delete_handle(child, child_path, required=True)
+                finally:
+                    _close_handle(child)
+        raise UnsafePathError(
+            f"private temporary directory cleanup did not become stable: {directory}"
+        )
+
+
+    @contextlib.contextmanager
+    def private_temporary_directory_nofollow(
+        parent: Path, *, prefix: str
+    ) -> Iterator[Path]:
+        """租用私有临时目录，并在整个敏感生命周期固定其根对象.
+
+        根句柄不共享 DELETE，因此父目录的 ``DELETE_CHILD`` 不能在调用方
+        写入证据、提示词或日志期间替换该入口。退出时从同一根句柄递归清理，
+        任何 reparse point 或仍被占用的成员都会显式失败而不是跟随或静默遗留.
+        """
+        parent_absolute = _absolute_path(parent)
+        anchor = Path(parent_absolute.anchor)
+        if not parent_absolute.anchor:
+            raise UnsafePathError(
+                f"protected directory has no absolute anchor: {parent_absolute}"
+            )
+        with _open_chain(
+            anchor,
+            parent_absolute,
+            final_access=_FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (_, parent_handle):
+            candidate, handle = _create_private_temporary_directory_handle_nofollow(
+                parent_absolute, parent_handle, prefix=prefix
+            )
+            try:
+                yield candidate
+            finally:
+                try:
+                    try:
+                        _validate_handle_kind(handle, candidate, "directory")
+                        _remove_directory_contents_from_handle_nofollow(
+                            handle, candidate
+                        )
+                        _delete_handle(handle, candidate, required=True)
+                    except Exception as error:
+                        raise PrivateTemporaryDirectoryCleanupError(
+                            f"cannot safely remove private temporary directory: {candidate}: {error}"
+                        ) from error
+                finally:
+                    _close_handle(handle)
+
+
     def directory_identity_nofollow(
         root: Path, path: Path
     ) -> tuple[int, ...]:
@@ -1204,7 +1516,67 @@ if os.name == "nt":
             return entries
 
 
-    def ensure_private_directory_nofollow(root: Path, path: Path) -> Path:
+    def create_private_directory_nofollow(root: Path, path: Path) -> Path:
+        """相对固定父句柄严格创建一个私有目录; 既有入口一律碰撞失败."""
+        root_absolute, candidate, parts = _relative_parts(root, path)
+        if not parts:
+            raise UnsafePathError(
+                f"protected directory cannot be the root: {candidate}"
+            )
+        with _open_chain(
+            root_absolute,
+            candidate.parent,
+            final_access=_FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (_, parent_handle):
+            try:
+                handle = _open_relative_handle(
+                    parent_handle,
+                    candidate.name,
+                    candidate,
+                    access=(
+                        _DELETE
+                        | _READ_CONTROL
+                        | _WRITE_DAC
+                        | _FILE_READ_ATTRIBUTES
+                    ),
+                    creation=_CREATE_NEW,
+                    expected="directory",
+                    private_creation="directory",
+                )
+            except OSError as error:
+                code = (
+                    getattr(error, "winerror", None)
+                    or getattr(error, "errno", None)
+                )
+                if code in (_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS):
+                    raise FileExistsError(
+                        code,
+                        f"protected directory already exists: {candidate}",
+                        os.fspath(candidate),
+                    ) from error
+                raise
+            try:
+                try:
+                    _tighten_private_handle(
+                        handle, candidate, expected="directory"
+                    )
+                except BaseException as harden_error:
+                    try:
+                        _delete_handle(
+                            handle, candidate, required=True
+                        )
+                    except BaseException as cleanup_error:
+                        raise cleanup_error from harden_error
+                    raise
+            finally:
+                _close_handle(handle)
+        return candidate
+
+
+    def ensure_private_directory_nofollow(
+        root: Path, path: Path, *, create: bool = True
+    ) -> Path:
         """逐级创建或打开目录，并把新旧叶目录都收紧为私有 DACL."""
         root_absolute, candidate, parts = _relative_parts(root, path)
         handles: list[int] = []
@@ -1229,6 +1601,12 @@ if os.name == "nt":
                         expected="directory",
                     )
                     if handle is None:
+                        if not create:
+                            raise FileNotFoundError(
+                                _ERROR_FILE_NOT_FOUND,
+                                f"protected directory does not exist: {current}",
+                                os.fspath(current),
+                            )
                         try:
                             handle = _open_relative_handle(
                                 parent_handle,
@@ -1273,15 +1651,9 @@ if os.name == "nt":
 
 
     @contextlib.contextmanager
-    def open_private_append_file_nofollow(
-        root: Path, path: Path
+    def _open_append_file_nofollow(
+        root: Path, path: Path, *, private: bool
     ) -> Iterator[BinaryIO]:
-        """安全创建/打开私有普通文件并在固定 append 句柄上读写.
-
-        句柄不共享 DELETE，所以从读取去重状态到追加完成期间，路径不能被
-        rename/replace。只授予 ``FILE_APPEND_DATA`` 而不授予普通写入权限，
-        让每次底层 WriteFile 都定位到当时 EOF，保留并发 append 语义.
-        """
         root_absolute, candidate, parts = _relative_parts(root, path)
         if not parts:
             raise UnsafePathError(f"protected file cannot be the root: {candidate}")
@@ -1298,14 +1670,15 @@ if os.name == "nt":
                 access=(
                     _GENERIC_READ
                     | _FILE_APPEND_DATA
-                    | _READ_CONTROL
-                    | _WRITE_DAC
                     | _FILE_READ_ATTRIBUTES
+                    | ((_READ_CONTROL | _WRITE_DAC) if private else 0)
                 ),
+                private_creation=private,
             )
             file: BinaryIO | None = None
             try:
-                _tighten_private_handle(handle, candidate, expected="file")
+                if private:
+                    _tighten_private_handle(handle, candidate, expected="file")
                 flags = os.O_RDWR | os.O_APPEND | os.O_BINARY
                 descriptor = msvcrt.open_osfhandle(handle, flags)
                 handle = _INVALID_HANDLE_VALUE
@@ -1318,6 +1691,24 @@ if os.name == "nt":
                     file.close()
                 else:
                     _close_handle(handle)
+
+
+    @contextlib.contextmanager
+    def open_append_file_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO]:
+        """固定普通文件句柄读取和追加, 且不修改既有 ACL."""
+        with _open_append_file_nofollow(root, path, private=False) as file:
+            yield file
+
+
+    @contextlib.contextmanager
+    def open_private_append_file_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO]:
+        """固定私有普通文件句柄读取和追加, 并收紧其 DACL."""
+        with _open_append_file_nofollow(root, path, private=True) as file:
+            yield file
 
 
     def write_text_atomic_nofollow(
@@ -1787,6 +2178,203 @@ else:
             os.close(dir_fd)
 
 
+    def ensure_inherited_directory_path_nofollow(path: Path) -> Path:
+        """逐分量创建目录, 保留既有 mode 且让新目录应用调用方 umask."""
+        candidate = _absolute_path(path)
+        anchor = Path(candidate.anchor)
+        if not candidate.anchor:
+            raise UnsafePathError(
+                f"protected directory has no absolute anchor: {candidate}"
+            )
+        _, _, parts = _relative_parts(anchor, candidate)
+        dir_fd = os.open(
+            anchor,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            for part in parts:
+                try:
+                    next_fd = _openat_nofollow(
+                        dir_fd,
+                        part,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(part, mode=0o777, dir_fd=dir_fd)
+                    except FileExistsError:
+                        pass
+                    next_fd = _openat_nofollow(
+                        dir_fd,
+                        part,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                os.close(dir_fd)
+                dir_fd = next_fd
+            return candidate
+        finally:
+            os.close(dir_fd)
+
+
+    @contextlib.contextmanager
+    def private_temporary_directory_nofollow(
+        parent: Path, *, prefix: str
+    ) -> Iterator[Path]:
+        """用固定 parent/root fd 创建和清理 0700 私有临时目录."""
+
+        def directory_names(
+            directory_fd: int, directory: Path, remaining_entries: int
+        ) -> list[str]:
+            names: list[str] = []
+            with os.scandir(directory_fd) as iterator:
+                for entry in iterator:
+                    names.append(entry.name)
+                    if len(names) > remaining_entries:
+                        raise UnsafePathError(
+                            f"private temporary directory cleanup entry budget exceeded: {directory}"
+                        )
+            return names
+
+        def remove_contents(
+            directory_fd: int,
+            directory: Path,
+            *,
+            depth: int = 0,
+            entries_seen: list[int] | None = None,
+        ) -> None:
+            if depth > _PRIVATE_TEMP_CLEANUP_MAX_DEPTH:
+                raise UnsafePathError(
+                    f"private temporary directory cleanup depth exceeded: {directory}"
+                )
+            if entries_seen is None:
+                entries_seen = [0]
+            os.fchmod(directory_fd, 0o700)
+            for _ in range(_PRIVATE_TEMP_CLEANUP_MAX_PASSES):
+                remaining = _PRIVATE_TEMP_CLEANUP_MAX_ENTRIES - entries_seen[0]
+                if remaining < 0:
+                    raise UnsafePathError(
+                        f"private temporary directory cleanup entry budget exceeded: {directory}"
+                    )
+                names = directory_names(directory_fd, directory, remaining)
+                if not names:
+                    return
+                entries_seen[0] += len(names)
+                for name in names:
+                    child_path = directory / name
+                    try:
+                        info = os.stat(
+                            name, dir_fd=directory_fd, follow_symlinks=False
+                        )
+                    except FileNotFoundError:
+                        continue
+                    if not stat.S_ISDIR(info.st_mode):
+                        try:
+                            os.unlink(name, dir_fd=directory_fd)
+                        except FileNotFoundError:
+                            pass
+                        continue
+
+                    try:
+                        os.chmod(
+                            name,
+                            0o700,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                        child_fd = _openat_nofollow(
+                            directory_fd,
+                            name,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                        )
+                    except FileNotFoundError:
+                        continue
+                    try:
+                        opened = os.fstat(child_fd)
+                        if (opened.st_dev, opened.st_ino) != (
+                            info.st_dev,
+                            info.st_ino,
+                        ):
+                            raise UnsafePathError(
+                                f"protected path identity changed while opening: {child_path}"
+                            )
+                        remove_contents(
+                            child_fd,
+                            child_path,
+                            depth=depth + 1,
+                            entries_seen=entries_seen,
+                        )
+                    finally:
+                        os.close(child_fd)
+                    current = os.stat(
+                        name, dir_fd=directory_fd, follow_symlinks=False
+                    )
+                    if (current.st_dev, current.st_ino) != (
+                        info.st_dev,
+                        info.st_ino,
+                    ):
+                        raise UnsafePathError(
+                            f"protected path identity changed before removal: {child_path}"
+                        )
+                    os.rmdir(name, dir_fd=directory_fd)
+            raise UnsafePathError(
+                f"private temporary directory cleanup did not become stable: {directory}"
+            )
+
+        parent_absolute = _absolute_path(parent)
+        anchor = Path(parent_absolute.anchor)
+        if not parent_absolute.anchor:
+            raise UnsafePathError(
+                f"protected directory has no absolute anchor: {parent_absolute}"
+            )
+        with _open_posix_directory(anchor, parent_absolute) as (_, parent_fd):
+            candidate: Path | None = None
+            root_fd = -1
+            for _ in range(128):
+                name = f"{prefix}{secrets.token_hex(16)}"
+                possible = parent_absolute / name
+                try:
+                    os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    continue
+                candidate = possible
+                try:
+                    root_fd = _openat_nofollow(
+                        parent_fd,
+                        name,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                    os.fchmod(root_fd, 0o700)
+                except BaseException:
+                    if root_fd >= 0:
+                        os.close(root_fd)
+                        root_fd = -1
+                    try:
+                        os.rmdir(name, dir_fd=parent_fd)
+                    except OSError:
+                        pass
+                    raise
+                break
+            if candidate is None or root_fd < 0:
+                raise FileExistsError(
+                    f"cannot allocate unique private directory under: {parent_absolute}"
+                )
+            try:
+                yield candidate
+            finally:
+                try:
+                    try:
+                        remove_contents(root_fd, candidate)
+                        os.rmdir(candidate.name, dir_fd=parent_fd)
+                    except Exception as error:
+                        raise PrivateTemporaryDirectoryCleanupError(
+                            f"cannot safely remove private temporary directory: {candidate}: {error}"
+                        ) from error
+                finally:
+                    os.close(root_fd)
+
+
     def directory_identity_nofollow(
         root: Path, path: Path
     ) -> tuple[int, ...]:
@@ -1829,7 +2417,33 @@ else:
             return entries
 
 
-    def ensure_private_directory_nofollow(root: Path, path: Path) -> Path:
+    def create_private_directory_nofollow(root: Path, path: Path) -> Path:
+        """相对 no-follow 父目录严格创建单个 0700 目录."""
+        with _open_posix_parent(root, path) as (candidate, parent_fd):
+            os.mkdir(candidate.name, mode=0o700, dir_fd=parent_fd)
+            directory_fd = -1
+            try:
+                directory_fd = _openat_nofollow(
+                    parent_fd,
+                    candidate.name,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                os.fchmod(directory_fd, 0o700)
+            except BaseException:
+                try:
+                    os.rmdir(candidate.name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+                raise
+            finally:
+                if directory_fd >= 0:
+                    os.close(directory_fd)
+            return candidate
+
+
+    def ensure_private_directory_nofollow(
+        root: Path, path: Path, *, create: bool = True
+    ) -> Path:
         root_absolute, candidate, parts = _relative_parts(root, path)
         dir_fd = os.open(
             root_absolute,
@@ -1846,6 +2460,8 @@ else:
                         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
                     )
                 except FileNotFoundError:
+                    if not create:
+                        raise
                     try:
                         os.mkdir(part, mode=0o700, dir_fd=dir_fd)
                     except FileExistsError:
@@ -1866,15 +2482,15 @@ else:
 
 
     @contextlib.contextmanager
-    def open_private_append_file_nofollow(
-        root: Path, path: Path
+    def _open_append_file_nofollow(
+        root: Path, path: Path, *, private: bool
     ) -> Iterator[BinaryIO]:
         with _open_posix_parent(root, path) as (candidate, parent_fd):
             fd = _openat_nofollow(
                 parent_fd,
                 candidate.name,
                 os.O_RDWR | os.O_CREAT | os.O_APPEND,
-                0o600,
+                0o600 if private else 0o666,
             )
             file: BinaryIO | None = None
             try:
@@ -1883,7 +2499,8 @@ else:
                     raise UnsafePathError(
                         f"task document is not a regular file: {candidate}"
                     )
-                os.fchmod(fd, 0o600)
+                if private:
+                    os.fchmod(fd, 0o600)
                 file = os.fdopen(fd, "a+b", buffering=0)
                 fd = -1
                 yield file
@@ -1894,6 +2511,23 @@ else:
                     file.close()
                 elif fd >= 0:
                     os.close(fd)
+
+
+    @contextlib.contextmanager
+    def open_append_file_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO]:
+        """固定普通文件描述符读取和追加, 且不修改既有 mode."""
+        with _open_append_file_nofollow(root, path, private=False) as file:
+            yield file
+
+
+    @contextlib.contextmanager
+    def open_private_append_file_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO]:
+        with _open_append_file_nofollow(root, path, private=True) as file:
+            yield file
 
 
     def write_text_atomic_nofollow(

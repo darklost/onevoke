@@ -133,6 +133,89 @@ class PortableFileSystemTest(unittest.TestCase):
                     root_link, root_link / "backlog" / document.name
                 )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow backend only")
+    def test_posix_neutral_append_and_inherited_directories_preserve_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git_directory = root / ".git"
+            git_directory.mkdir()
+            git_directory.chmod(0o755)
+            info = git_directory / "info"
+
+            previous_umask = os.umask(0o022)
+            try:
+                onevoke_fs.ensure_inherited_directory_path_nofollow(info)
+            finally:
+                os.umask(previous_umask)
+
+            self.assertEqual(0o755, git_directory.stat().st_mode & 0o777)
+            self.assertEqual(0o755, info.stat().st_mode & 0o777)
+            exclude = info / "exclude"
+            exclude.write_bytes(b"# local\n")
+            exclude.chmod(0o644)
+
+            for _ in range(2):
+                with onevoke_fs.open_append_file_nofollow(
+                    root, exclude
+                ) as stream:
+                    stream.seek(0)
+                    existing = stream.read()
+                    if b"/kanban/" not in existing.splitlines():
+                        stream.write(b"/kanban/\n")
+
+            self.assertEqual(b"# local\n/kanban/\n", exclude.read_bytes())
+            self.assertEqual(0o644, exclude.stat().st_mode & 0o777)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow backend only")
+    def test_posix_private_directory_create_is_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private = root / "private"
+
+            onevoke_fs.create_private_directory_nofollow(root, private)
+            self.assertEqual(0o700, private.stat().st_mode & 0o777)
+            with self.assertRaises(FileExistsError):
+                onevoke_fs.create_private_directory_nofollow(root, private)
+
+            missing = root / "missing"
+            with self.assertRaises(FileNotFoundError):
+                onevoke_fs.ensure_private_directory_nofollow(
+                    root, missing, create=False
+                )
+            self.assertFalse(missing.exists())
+
+            existing = root / "existing"
+            existing.mkdir(mode=0o755)
+            existing.chmod(0o755)
+            onevoke_fs.ensure_private_directory_nofollow(
+                root, existing, create=False
+            )
+            self.assertEqual(0o700, existing.stat().st_mode & 0o777)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow backend only")
+    def test_posix_private_runtime_cleanup_never_follows_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            parent = base / "runtime-parent"
+            parent.mkdir()
+            victim = base / "victim.txt"
+            victim.write_text("outside\n", encoding="utf-8")
+            victim.chmod(0o644)
+
+            with onevoke_fs.private_temporary_directory_nofollow(
+                parent, prefix="codex-review."
+            ) as runtime:
+                (runtime / "planted-link").symlink_to(victim)
+                locked = runtime / "locked"
+                locked.mkdir()
+                (locked / "inside.txt").write_text("inside\n", encoding="utf-8")
+                locked.chmod(0o000)
+                runtime.chmod(0o500)
+
+            self.assertFalse(runtime.exists())
+            self.assertEqual("outside\n", victim.read_text(encoding="utf-8"))
+            self.assertEqual(0o644, victim.stat().st_mode & 0o777)
+
 
 @unittest.skipUnless(os.name == "nt", "Windows handle backend only")
 class WindowsSafeFileSystemTest(unittest.TestCase):
@@ -313,6 +396,18 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
         self.assertEqual(0, acl.returncode, acl.stderr)
         return acl.stdout
 
+    @staticmethod
+    def append_exclude_pattern(exclude: Path) -> None:
+        onevoke_fs.ensure_inherited_directory_path_nofollow(exclude.parent)
+        anchor = Path(exclude.anchor)
+        with onevoke_fs.open_append_file_nofollow(anchor, exclude) as stream:
+            stream.seek(0)
+            existing = stream.read()
+            if b"/kanban/" not in existing.splitlines():
+                if existing and not existing.endswith(b"\n"):
+                    stream.write(b"\n")
+                stream.write(b"/kanban/\n")
+
     def make_completed_large_entry(self, task_id: str):
         task = self.root / "working" / task_id
         task.mkdir()
@@ -352,6 +447,235 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
         self.assertEqual(b"new\n", onevoke_fs.read_regular_file_nofollow(self.root, target))
         self.assert_private_acl(target)
 
+    def test_neutral_append_preserves_acl_and_deduplicates(self) -> None:
+        git_directory = self.base / "neutral-project" / ".git"
+        git_directory.mkdir(parents=True)
+        git_acl = self.acl_text(git_directory)
+        exclude = git_directory / "info" / "exclude"
+
+        self.append_exclude_pattern(exclude)
+        info_acl = self.acl_text(exclude.parent)
+        exclude_acl = self.acl_text(exclude)
+        self.append_exclude_pattern(exclude)
+
+        self.assertEqual(b"/kanban/\n", exclude.read_bytes())
+        self.assertEqual(git_acl, self.acl_text(git_directory))
+        self.assertEqual(info_acl, self.acl_text(exclude.parent))
+        self.assertEqual(exclude_acl, self.acl_text(exclude))
+        self.assertIn("(I)", info_acl, info_acl)
+        self.assertIn("(I)", exclude_acl, exclude_acl)
+
+    def test_kanban_git_exclude_preserves_acl_and_deduplicates(self) -> None:
+        project = self.base / "kanban-git-project"
+        project.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(project)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        exclude = project / ".git" / "info" / "exclude"
+        original_acl = self.acl_text(exclude)
+
+        for _ in range(2):
+            returned = self.kanban.add_git_exclude(project / "kanban")
+            self.assertEqual(exclude, returned)
+
+        self.assertEqual(
+            1,
+            exclude.read_text(encoding="utf-8").splitlines().count("/kanban/"),
+        )
+        self.assertEqual(original_acl, self.acl_text(exclude))
+
+    def test_kanban_git_exclude_rejects_info_junction(self) -> None:
+        project = self.base / "kanban-junction-project"
+        project.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(project)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        info = project / ".git" / "info"
+        info.rename(project / ".git" / "info-original")
+        outside_exclude = self.outside / "exclude"
+        outside_bytes = b"outside exclude must stay unchanged\n"
+        outside_exclude.write_bytes(outside_bytes)
+        outside_acl = self.acl_text(outside_exclude)
+        self.make_junction(info, self.outside)
+
+        with self.assertRaises(OSError):
+            self.kanban.add_git_exclude(project / "kanban")
+
+        self.assertEqual(outside_bytes, outside_exclude.read_bytes())
+        self.assertEqual(outside_acl, self.acl_text(outside_exclude))
+        self.assertEqual([outside_exclude], list(self.outside.iterdir()))
+
+    def test_neutral_append_rejects_static_info_junction(self) -> None:
+        git_directory = self.base / "junction-project" / ".git"
+        git_directory.mkdir(parents=True)
+        info = git_directory / "info"
+        outside_exclude = self.outside / "exclude"
+        outside_bytes = b"outside exclude must stay unchanged\n"
+        outside_exclude.write_bytes(outside_bytes)
+        outside_acl = self.acl_text(outside_exclude)
+        self.make_junction(info, self.outside)
+
+        with self.assertRaises(OSError):
+            self.append_exclude_pattern(info / "exclude")
+
+        self.assertEqual(outside_bytes, outside_exclude.read_bytes())
+        self.assertEqual(outside_acl, self.acl_text(outside_exclude))
+        self.assertEqual([outside_exclude], list(self.outside.iterdir()))
+
+    def test_neutral_append_fails_closed_when_info_gets_reparse_tag(self) -> None:
+        git_directory = self.base / "fsctl-project" / ".git"
+        info = git_directory / "info"
+        info.mkdir(parents=True)
+        exclude = info / "exclude"
+        outside_exclude = self.outside / "exclude"
+        outside_bytes = b"outside exclude must stay unchanged\n"
+        outside_exclude.write_bytes(outside_bytes)
+        outside_acl = self.acl_text(outside_exclude)
+        original_try_open = onevoke_fs._try_open_leaf
+        info_opens = 0
+        swapped = False
+
+        def open_then_swap(parent_handle, name, path, **kwargs):
+            nonlocal info_opens, swapped
+            handle = original_try_open(parent_handle, name, path, **kwargs)
+            if path == info:
+                info_opens += 1
+                if info_opens == 2:
+                    self.set_junction_reparse(info, self.outside)
+                    swapped = True
+            return handle
+
+        try:
+            with mock.patch.object(
+                onevoke_fs, "_try_open_leaf", side_effect=open_then_swap
+            ):
+                with self.assertRaises(OSError):
+                    self.append_exclude_pattern(exclude)
+
+            self.assertTrue(swapped, "the info FSCTL race hook did not run")
+            self.assertTrue(onevoke_fs.is_reparse_point(info))
+            self.assertEqual(outside_bytes, outside_exclude.read_bytes())
+            self.assertEqual(outside_acl, self.acl_text(outside_exclude))
+            self.assertEqual([outside_exclude], list(self.outside.iterdir()))
+        finally:
+            if onevoke_fs.is_reparse_point(info):
+                self.clear_junction_reparse(info)
+
+        self.assertFalse(exclude.exists())
+        self.assertEqual([], list(info.iterdir()))
+
+    def test_neutral_append_pins_leaf_and_preserves_existing_acl(self) -> None:
+        info = self.base / "leaf-project" / ".git" / "info"
+        info.mkdir(parents=True)
+        exclude = info / "exclude"
+        original_bytes = b"# local exclude"
+        exclude.write_bytes(original_bytes)
+        original_acl = self.acl_text(exclude)
+        replacement = self.outside / "replacement"
+        replacement_bytes = b"replacement must stay outside\n"
+        replacement.write_bytes(replacement_bytes)
+        original_open = onevoke_fs._open_or_create_regular_file_handle
+        replacement_errors: list[OSError] = []
+
+        def open_then_replace(*args, **kwargs):
+            handle = original_open(*args, **kwargs)
+            try:
+                os.replace(replacement, exclude)
+            except OSError as error:
+                replacement_errors.append(error)
+            else:
+                self.fail("exclude replacement succeeded while leaf was pinned")
+            return handle
+
+        with mock.patch.object(
+            onevoke_fs,
+            "_open_or_create_regular_file_handle",
+            side_effect=open_then_replace,
+        ):
+            self.append_exclude_pattern(exclude)
+
+        self.assertEqual(1, len(replacement_errors))
+        self.assertEqual(
+            original_bytes + b"\n/kanban/\n", exclude.read_bytes()
+        )
+        self.assertEqual(original_acl, self.acl_text(exclude))
+        self.assertEqual(replacement_bytes, replacement.read_bytes())
+
+    def test_private_directory_create_is_atomic_strict_and_cleanup_safe(self) -> None:
+        parent = self.base / "strict-private-parent"
+        parent.mkdir()
+        private = parent / "private"
+        original_open = onevoke_fs._open_relative_handle
+        observed_creation_acl: list[Path] = []
+
+        def inspect_creation(parent_handle, name, path, **kwargs):
+            handle = original_open(parent_handle, name, path, **kwargs)
+            if path == private:
+                self.assertEqual("directory", kwargs.get("private_creation"))
+                self.assertEqual(onevoke_fs._CREATE_NEW, kwargs.get("creation"))
+                self.assert_private_acl(path)
+                observed_creation_acl.append(path)
+            return handle
+
+        with mock.patch.object(
+            onevoke_fs, "_open_relative_handle", side_effect=inspect_creation
+        ):
+            onevoke_fs.create_private_directory_nofollow(parent, private)
+
+        self.assertEqual([private], observed_creation_acl)
+        self.assert_private_acl(private)
+        with mock.patch.object(
+            onevoke_fs,
+            "_tighten_private_handle",
+            side_effect=AssertionError("collision unexpectedly reused directory"),
+        ):
+            with self.assertRaises(FileExistsError):
+                onevoke_fs.create_private_directory_nofollow(parent, private)
+
+        failed = parent / "failed"
+        original_tighten = onevoke_fs._tighten_private_handle
+
+        def fail_hardening(handle, path, *, expected):
+            if path == failed:
+                raise OSError("forced directory ACL failure")
+            return original_tighten(handle, path, expected=expected)
+
+        with mock.patch.object(
+            onevoke_fs, "_tighten_private_handle", side_effect=fail_hardening
+        ):
+            with self.assertRaisesRegex(OSError, "forced directory ACL failure"):
+                onevoke_fs.create_private_directory_nofollow(parent, failed)
+
+        self.assertFalse(failed.exists())
+        moved = self.base / "strict-private-parent-moved"
+        parent.rename(moved)
+        moved.rename(parent)
+
+    def test_private_directory_ensure_without_create_never_creates(self) -> None:
+        parent = self.base / "ensure-existing-parent"
+        parent.mkdir()
+        missing = parent / "missing"
+
+        with self.assertRaises(FileNotFoundError):
+            onevoke_fs.ensure_private_directory_nofollow(
+                parent, missing, create=False
+            )
+        self.assertFalse(missing.exists())
+
+        existing = parent / "existing"
+        existing.mkdir()
+        self.assertIn("(I)", self.acl_text(existing))
+        onevoke_fs.ensure_private_directory_nofollow(
+            parent, existing, create=False
+        )
+        self.assert_private_acl(existing)
+
     def test_kanban_init_and_new_make_private_board_entries(self) -> None:
         board = self.base / "private-board"
         env = os.environ.copy()
@@ -362,6 +686,7 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
         })
 
         for arguments in (
+            ["init"],
             ["init"],
             ["new", "chore", "private-small", "Private small"],
             ["new", "--large", "chore", "private-large", "Private large"],
@@ -387,6 +712,59 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
             large / "spec.md",
         ):
             self.assert_private_acl(path)
+
+    def test_kanban_init_board_directories_are_private_when_create_returns(self) -> None:
+        project = self.base / "creation-time-board-project"
+        project.mkdir()
+        board = project / "kanban"
+        expected = {board, *(board / state for state in self.kanban.STATES)}
+        observed: set[Path] = set()
+        original_open = onevoke_fs._open_relative_handle
+
+        def inspect_created_acl(parent_handle, name, path, **kwargs):
+            handle = original_open(parent_handle, name, path, **kwargs)
+            if path in expected and kwargs.get("private_creation") == "directory":
+                self.assertEqual(onevoke_fs._CREATE_NEW, kwargs.get("creation"))
+                self.assert_private_acl(path)
+                observed.add(path)
+            return handle
+
+        with mock.patch.object(
+            onevoke_fs, "_open_relative_handle", side_effect=inspect_created_acl
+        ), mock.patch("builtins.print"):
+            self.kanban.command_init(Namespace(project=str(project)))
+
+        self.assertEqual(expected, observed)
+
+    def test_kanban_init_fails_closed_on_board_create_collision(self) -> None:
+        project = self.base / "board-create-race-project"
+        project.mkdir()
+        board = project / "kanban"
+        original_open = onevoke_fs._open_relative_handle
+        injected = False
+
+        def create_collision(parent_handle, name, path, **kwargs):
+            nonlocal injected
+            if (
+                not injected
+                and path == board
+                and kwargs.get("creation") == onevoke_fs._CREATE_NEW
+                and kwargs.get("private_creation") == "directory"
+            ):
+                board.mkdir()
+                injected = True
+            return original_open(parent_handle, name, path, **kwargs)
+
+        with mock.patch.object(
+            onevoke_fs, "_open_relative_handle", side_effect=create_collision
+        ), mock.patch("builtins.print"):
+            with self.assertRaises(FileExistsError):
+                self.kanban.command_init(Namespace(project=str(project)))
+
+        self.assertTrue(injected, "board create collision hook did not run")
+        self.assertTrue(board.is_dir())
+        self.assertIn("(I)", self.acl_text(board))
+        self.assertEqual([], list(board.iterdir()))
 
     def test_new_rejects_backlog_junction_swapped_after_board_scan(self) -> None:
         for large in (False, True):
