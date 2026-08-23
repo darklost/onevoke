@@ -28,6 +28,47 @@ function Test-ReparsePoint {
   return ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
 }
 
+function Get-PythonLaunchers {
+  $specifications = @(
+    [PSCustomObject]@{
+      Name = "py.exe"
+      Arguments = @("-3", "-X", "utf8")
+    },
+    [PSCustomObject]@{
+      Name = "python.exe"
+      Arguments = @("-X", "utf8")
+    }
+  )
+
+  $launchers = @()
+  foreach ($specification in $specifications) {
+    $command = Get-Command $specification.Name -CommandType Application -ErrorAction SilentlyContinue |
+      Select-Object -First 1
+    if ($null -eq $command) {
+      continue
+    }
+    $currentDirectoryCandidate = [IO.Path]::GetFullPath(
+      (Join-Path ([Environment]::CurrentDirectory) $specification.Name)
+    )
+    try {
+      $absolute = [IO.Path]::GetFullPath([string]$command.Source)
+    } catch {
+      continue
+    }
+    if (
+      $absolute.Equals($currentDirectoryCandidate, [StringComparison]::OrdinalIgnoreCase) -or
+      -not [IO.File]::Exists($absolute)
+    ) {
+      continue
+    }
+    $launchers += [PSCustomObject]@{
+      Path = $absolute
+      Arguments = @($specification.Arguments)
+    }
+  }
+  return $launchers
+}
+
 function Get-ConfiguredLanguage {
   param([string]$ProjectDir)
 
@@ -36,35 +77,27 @@ function Get-ConfiguredLanguage {
     return $null
   }
 
-  $launcher = Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-  $launcherArgs = @("-3", "-X", "utf8")
-  if ($null -eq $launcher) {
-    $launcher = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue |
-      Select-Object -First 1
-    $launcherArgs = @("-X", "utf8")
-  }
-  if ($null -eq $launcher) {
-    return $null
-  }
-
+  $previousNoBytecode = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
   try {
-    $previousNoBytecode = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
     [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1", "Process")
-    $result = @(& $launcher.Source @launcherArgs $configScript "configured-language" 2>$null)
+    foreach ($launcher in @(Get-PythonLaunchers)) {
+      try {
+        $result = @(
+          & $launcher.Path @($launcher.Arguments) $configScript "configured-language" 2>$null
+        )
+      } catch {
+        continue
+      }
+      if ($LASTEXITCODE -ne 0 -or $result.Count -eq 0) {
+        continue
+      }
+      $language = ([string]$result[0]).Trim().ToLowerInvariant()
+      if ($language -in @("cn", "en")) {
+        return $language
+      }
+    }
+  } finally {
     [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $previousNoBytecode, "Process")
-    if ($LASTEXITCODE -ne 0 -or $result.Count -eq 0) {
-      return $null
-    }
-    $language = ([string]$result[0]).Trim().ToLowerInvariant()
-    if ($language -in @("cn", "en")) {
-      return $language
-    }
-  } catch {
-    if (Get-Variable previousNoBytecode -ErrorAction SilentlyContinue) {
-      [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $previousNoBytecode, "Process")
-    }
-    return $null
   }
   return $null
 }

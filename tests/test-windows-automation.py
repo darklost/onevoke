@@ -26,9 +26,12 @@ class WindowsAutomationDocumentationTest(unittest.TestCase):
         git_rules = GIT_RULES.read_text(encoding="utf-8")
         review_rules = REVIEW_RULES.read_text(encoding="utf-8")
         self.assertIn(
-            'py -3 -X utf8 "$env:USERPROFILE\\.local\\bin\\merge-worktree-memory.py"',
+            '& "$env:USERPROFILE\\.local\\bin\\merge-worktree-memory.cmd"',
             git_rules,
         )
+        self.assertIn("不得固定假设 `py -3` 可用", git_rules)
+        self.assertIn("系统 py.exe -3", git_rules)
+        self.assertIn("PATH 中 python.exe", git_rules)
         self.assertIn(
             '& "$env:USERPROFILE\\.local\\bin\\onevoke-review.cmd"',
             review_rules,
@@ -40,8 +43,12 @@ class WindowsAutomationDocumentationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile & percent % bang ! 空格"
-            script = profile / ".local" / "bin" / "argv-probe.py"
+            script = profile / ".local" / "bin" / "merge-worktree-memory.py"
             script.parent.mkdir(parents=True)
+            shutil.copy2(
+                PROJECT_ROOT / "bin" / "merge-worktree-memory.cmd",
+                script.with_suffix(".cmd"),
+            )
             script.write_text(
                 "import json, os, sys\n"
                 "from pathlib import Path\n"
@@ -50,20 +57,19 @@ class WindowsAutomationDocumentationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             argument_log = root / "argv.json"
-            expected = "goal & value | 50% ! 中文"
+            expected = "ordinary worktree 空格"
             environment = os.environ.copy()
             environment.update(
                 {
                     "USERPROFILE": str(profile),
                     "ONEVOKE_ARGV_LOG": str(argument_log),
                     "ONEVOKE_TEST_ARGUMENT": expected,
-                    "ONEVOKE_TEST_PYTHON": sys.executable,
+                    "ONEVOKE_PYTHON": sys.executable,
                 }
             )
             command = (
-                '& $env:ONEVOKE_TEST_PYTHON -X utf8 '
-                '"$env:USERPROFILE\\.local\\bin\\argv-probe.py" '
-                '$env:ONEVOKE_TEST_ARGUMENT'
+                '& "$env:USERPROFILE\\.local\\bin\\merge-worktree-memory.cmd" '
+                '--source $env:ONEVOKE_TEST_ARGUMENT'
             )
             result = subprocess.run(
                 [str(POWERSHELL), "-NoProfile", "-Command", command],
@@ -77,7 +83,8 @@ class WindowsAutomationDocumentationTest(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(
-                [expected], json.loads(argument_log.read_text(encoding="utf-8"))
+                ["--source", expected],
+                json.loads(argument_log.read_text(encoding="utf-8")),
             )
 
             arbitrary = 'goal & value | 50% ! "quoted" tail\\'

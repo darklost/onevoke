@@ -362,6 +362,31 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertIn("error: --lang must be cn or en", invalid.stderr)
         self.assertFalse((home / ".local").exists())
 
+    def test_installer_falls_back_from_broken_py_to_python(self) -> None:
+        home = self.root / "python-fallback-home"
+        home.mkdir(parents=True)
+        self.write_valid_config(
+            home,
+            welcome_complete=True,
+            language="en",
+        )
+        where_executable = shutil.which("where.exe")
+        self.assertIsNotNone(where_executable)
+        shutil.copy2(where_executable, self.fake_bin / "py.exe")
+        isolated_path = os.pathsep.join(
+            (str(self.fake_bin), str(Path(sys.executable).parent))
+        )
+
+        result = self.run_installer(
+            home,
+            PATH=isolated_path,
+            ONEVOKE_LANG="cn",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertNotIn("welcome did not complete", result.stderr)
+
     def test_installer_invokes_absolute_welcome_with_explicit_language(self) -> None:
         project = self.root / "minimal project"
         (project / "bin").mkdir(parents=True)
