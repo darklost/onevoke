@@ -1,0 +1,14 @@
+* text=auto
+
+# POSIX entry points must remain executable by /bin/sh or /usr/bin/env on Windows checkouts.
+*.sh text eol=lf
+bin/onevoke text eol=lf
+bin/kanban text eol=lf
+
+# Python and published rules use a single repository representation on every platform.
+*.py text eol=lf
+*.md text eol=lf
+
+# Native Windows command wrappers use the platform line ending expected by cmd.exe.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

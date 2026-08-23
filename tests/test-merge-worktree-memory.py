@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import importlib.util
-import fcntl
 import os
 import shutil
 import subprocess
@@ -16,6 +15,7 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MERGER = PROJECT_ROOT / "bin" / "merge-worktree-memory.py"
+MERGER_COMMAND = (sys.executable, str(MERGER))
 _LOCALE_VARS = ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
 
 
@@ -143,13 +143,14 @@ class MergeTest(unittest.TestCase):
     def run_merger(self, *args: str, **env_overrides: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [
-                str(MERGER),
+                *MERGER_COMMAND,
                 "--source", str(self.source),
                 "--target", str(self.target),
                 *args,
             ],
             env=merger_env(**env_overrides),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -173,17 +174,17 @@ class MergeTest(unittest.TestCase):
         lock_path = self.target / ".memsearch" / ".merge-worktree-memory.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            process = subprocess.Popen(
-                [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            time.sleep(0.2)
-            self.assertIsNone(process.poll(), "merger ignored the held target lock")
-            self.assertFalse((self.target_memory / "a.md").exists())
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            with merger.exclusive_file_lock(lock):
+                process = subprocess.Popen(
+                    [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.target)],
+                    text=True,
+                    encoding="utf-8",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                time.sleep(0.2)
+                self.assertIsNone(process.poll(), "merger ignored the held target lock")
+                self.assertFalse((self.target_memory / "a.md").exists())
             stdout, stderr = process.communicate(timeout=10)
 
         self.assertEqual(0, process.returncode, stderr)
@@ -201,8 +202,9 @@ class MergeTest(unittest.TestCase):
 
         processes = [
             subprocess.Popen(
-                [str(MERGER), "--source", str(source), "--target", str(self.target)],
+                [*MERGER_COMMAND, "--source", str(source), "--target", str(self.target)],
                 text=True,
+                encoding="utf-8",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -273,7 +275,8 @@ class MergeTest(unittest.TestCase):
 
         self.run_merger()
 
-        self.assertEqual(0o640, target_file.stat().st_mode & 0o777)
+        if os.name != "nt":
+            self.assertEqual(0o640, target_file.stat().st_mode & 0o777)
         self.assertIn(b"\xff", target_file.read_bytes())
 
     def test_entry_pending_in_another_worktree_is_not_skipped(self) -> None:
@@ -296,9 +299,10 @@ class MergeTest(unittest.TestCase):
         (other / ".memsearch" / "memory" / "a.md").write_bytes(entry_two)
         subprocess.run(["git", "-C", str(other), "init", "-q"], check=True)
         result = subprocess.run(
-            [str(MERGER), "--source", str(other), "--target", str(self.target)],
+            [*MERGER_COMMAND, "--source", str(other), "--target", str(self.target)],
             env=merger_env(),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -318,9 +322,10 @@ class MergeTest(unittest.TestCase):
 
     def test_source_equal_to_target_is_a_noop(self) -> None:
         result = subprocess.run(
-            [str(MERGER), "--source", str(self.source), "--target", str(self.source)],
+            [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.source)],
             env=merger_env(),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -338,9 +343,10 @@ class MergeTest(unittest.TestCase):
         fresh_target.mkdir()
 
         result = subprocess.run(
-            [str(MERGER), "--source", str(bare), "--target", str(fresh_target)],
+            [*MERGER_COMMAND, "--source", str(bare), "--target", str(fresh_target)],
             env=merger_env(),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -354,9 +360,10 @@ class MergeTest(unittest.TestCase):
         (self.target_memory / "keep.md").write_bytes(b"### 09:30\n- kept\n")
 
         result = subprocess.run(
-            [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
+            [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.target)],
             env=merger_env(),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -367,9 +374,10 @@ class MergeTest(unittest.TestCase):
 
     def test_merge_messages_default_to_chinese_without_locale(self) -> None:
         result = subprocess.run(
-            [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
+            [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.target)],
             env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -379,9 +387,10 @@ class MergeTest(unittest.TestCase):
 
     def test_merge_help_defaults_to_chinese_without_locale(self) -> None:
         result = subprocess.run(
-            [str(MERGER), "--help"],
+            [*MERGER_COMMAND, "--help"],
             env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -396,9 +405,10 @@ class MergeTest(unittest.TestCase):
             encoding="utf-8",
         )
         result = subprocess.run(
-            [str(MERGER), "--lang", "en", "--source", str(self.source), "--target", str(self.target)],
+            [*MERGER_COMMAND, "--lang", "en", "--source", str(self.source), "--target", str(self.target)],
             env=merger_env(ONEVOKE_CONFIG=str(config_path)),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -407,9 +417,10 @@ class MergeTest(unittest.TestCase):
 
     def test_merge_invalid_argument_defaults_to_chinese_without_locale(self) -> None:
         result = subprocess.run(
-            [str(MERGER), "--nope"],
+            [*MERGER_COMMAND, "--nope"],
             env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -422,13 +433,19 @@ class MergeTest(unittest.TestCase):
         real = self.source_memory / "real-body.md"
         real.write_bytes(b"### 09:30\n- secret memory that must not be dropped\n")
         link = self.source_memory / "a.md"
-        link.symlink_to(real.name)
+        try:
+            link.symlink_to(real.name)
+        except OSError as error:
+            if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows symlink privilege is unavailable")
+            raise
         before = real.read_bytes()
 
         result = subprocess.run(
-            [str(MERGER), "--source", str(self.source), "--target", str(self.target)],
+            [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.target)],
             env=merger_env(),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )

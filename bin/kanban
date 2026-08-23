@@ -31,6 +31,15 @@ from onevoke_config import (
     load_config,
 )
 import kanban_web
+from onevoke_fs import (
+    UnsafePathError,
+    create_directory_with_text_file_nofollow,
+    is_reparse_point,
+    read_regular_file_nofollow,
+    rename_nofollow,
+    tighten_private_directory_permissions,
+    write_text_atomic_nofollow,
+)
 
 apply_language_argument(sys.argv[1:])
 bind_effective_language()
@@ -108,24 +117,61 @@ def git_main_worktree(directory: Path) -> Optional[Path]:
         return None
     for line in git.stdout.splitlines():
         if line.startswith("worktree "):
-            return Path(line.removeprefix("worktree ")).resolve()
+            return absolute_user_path(Path(line.removeprefix("worktree ")))
     return None
+
+
+def absolute_user_path(path: Path) -> Path:
+    """生成绝对路径；Windows 保留词法路径，不用 resolve 隐藏 junction."""
+    expanded = path.expanduser()
+    if os.name == "nt":
+        return Path(os.path.abspath(os.fspath(expanded)))
+    return expanded.resolve()
+
+
+def ensure_windows_lexical_path_safe(path: Path) -> None:
+    """Windows 上拒绝路径自身或任一已存在祖先中的 reparse point."""
+    if os.name != "nt":
+        return
+    absolute = absolute_user_path(path)
+    parts = absolute.parts
+    if not parts:
+        raise KanbanError(t(f"无效看板路径: {path}", f"Invalid board path: {path}"))
+    current = Path(parts[0])
+    candidates = [current]
+    for part in parts[1:]:
+        current /= part
+        candidates.append(current)
+    for candidate in candidates:
+        if not os.path.lexists(candidate):
+            # 后续分量不可能在缺失祖先下独立存在；init 可从这里安全创建.
+            break
+        if is_reparse_point(candidate):
+            raise KanbanError(t(
+                f"看板路径分量不得是符号链接/重解析点: {candidate}",
+                f"Board path component must not be a symlink/reparse point: {candidate}",
+            ))
 
 
 def board_root() -> Path:
     configured = os.environ.get("KANBAN_DIR")
     if configured:
-        return Path(configured).expanduser().resolve()
+        root = absolute_user_path(Path(configured))
+        ensure_windows_lexical_path_safe(root)
+        return root
     main_worktree = git_main_worktree(Path.cwd())
     if main_worktree:
         candidate = main_worktree / "kanban"
+        ensure_windows_lexical_path_safe(candidate)
         if candidate.is_dir():
-            return candidate.resolve()
-    current = Path.cwd().resolve()
+            return absolute_user_path(candidate)
+    current = absolute_user_path(Path.cwd())
+    ensure_windows_lexical_path_safe(current)
     for parent in (current, *current.parents):
         candidate = parent / "kanban"
+        ensure_windows_lexical_path_safe(candidate)
         if candidate.is_dir():
-            return candidate.resolve()
+            return absolute_user_path(candidate)
     raise KanbanError(t(
         "找不到看板目录; 请在项目内运行或设置 KANBAN_DIR",
         "Board directory not found; run inside a project or set KANBAN_DIR",
@@ -187,23 +233,32 @@ def command_init(args: argparse.Namespace) -> None:
     if args.project and configured:
         raise KanbanError(t("不能同时指定 project-path 和 KANBAN_DIR", "project-path and KANBAN_DIR cannot be used together"))
     if args.project:
-        project = Path(args.project).expanduser().resolve()
+        project = absolute_user_path(Path(args.project))
+        ensure_windows_lexical_path_safe(project)
         if not project.is_dir():
             raise KanbanError(t(f"项目目录不存在: {project}", f"Project directory does not exist: {project}"))
         root = project / "kanban"
     elif configured:
-        root = Path(configured).expanduser().resolve()
+        root = absolute_user_path(Path(configured))
     else:
-        project = git_main_worktree(Path.cwd()) or Path.cwd().resolve()
+        project = git_main_worktree(Path.cwd()) or absolute_user_path(Path.cwd())
         root = project / "kanban"
+    ensure_windows_lexical_path_safe(root)
     if root.exists() and not root.is_dir():
         raise KanbanError(t(f"看板路径不是目录: {root}", f"Board path is not a directory: {root}"))
     root.mkdir(parents=True, exist_ok=True)
+    ensure_windows_lexical_path_safe(root)
+    if os.name == "nt":
+        tighten_private_directory_permissions(root)
     for state in STATES:
         path = root / state
+        ensure_windows_lexical_path_safe(path)
         if path.exists() and not path.is_dir():
             raise KanbanError(t(f"状态路径不是目录: {path}", f"State path is not a directory: {path}"))
         path.mkdir(exist_ok=True)
+        ensure_windows_lexical_path_safe(path)
+        if os.name == "nt":
+            tighten_private_directory_permissions(path)
     exclude = add_git_exclude(root)
     print(t(f"已初始化: {root}", f"initialized: {root}"))
     if exclude:
@@ -212,12 +267,13 @@ def command_init(args: argparse.Namespace) -> None:
 
 
 def ensure_layout(root: Path) -> None:
-    if not root.is_dir() or root.is_symlink():
-        raise KanbanError(t(f"看板目录不存在或不得是符号链接: {root}", f"Board directory does not exist or is a symlink: {root}"))
+    ensure_windows_lexical_path_safe(root)
+    if not root.is_dir() or is_reparse_point(root):
+        raise KanbanError(t(f"看板目录不存在或不得是符号链接/重解析点: {root}", f"Board directory does not exist or is a symlink/reparse point: {root}"))
     for state in STATES:
         path = root / state
-        if path.is_symlink():
-            raise KanbanError(t(f"状态目录不得是符号链接: {path}", f"State directory must not be a symlink: {path}"))
+        if is_reparse_point(path):
+            raise KanbanError(t(f"状态目录不得是符号链接/重解析点: {path}", f"State directory must not be a symlink/reparse point: {path}"))
         if not path.is_dir():
             raise KanbanError(t(f"状态目录不存在: {path}", f"State directory does not exist: {path}"))
 
@@ -238,8 +294,8 @@ def scan(root: Path) -> Board:
         for path in sorted((root / state).iterdir(), key=lambda item: item.name):
             if path.name.startswith("."):
                 continue
-            if path.is_symlink():
-                reject(path, t(f"任务入口不得是符号链接: {path}", f"Task entry must not be a symlink: {path}"))
+            if is_reparse_point(path):
+                reject(path, t(f"任务入口不得是符号链接/重解析点: {path}", f"Task entry must not be a symlink/reparse point: {path}"))
                 continue
             if path.is_file() and path.name.endswith("-task.md"):
                 task_id, document, kind = path.name[:-3], path, "small"
@@ -252,10 +308,10 @@ def scan(root: Path) -> Board:
                 reject(path, t(f"无效任务 ID: {task_id}", f"Invalid task ID: {task_id}"))
                 continue
             if kind == "large":
-                if document.is_symlink():
+                if is_reparse_point(document):
                     reject(
                         path,
-                        t(f"大任务 spec.md 不得是符号链接: {document}", f"Large-task spec.md must not be a symlink: {document}"),
+                        t(f"大任务 spec.md 不得是符号链接/重解析点: {document}", f"Large-task spec.md must not be a symlink/reparse point: {document}"),
                         task_id,
                     )
                     continue
@@ -377,6 +433,17 @@ def open_task_document(entry: Entry, *, write: bool = False) -> int:
 
 def read_document(entry: Entry) -> str:
     try:
+        if os.name == "nt":
+            try:
+                data = read_regular_file_nofollow(
+                    board_root_from_entry(entry), entry.document
+                )
+            except UnsafePathError as error:
+                raise KanbanError(t(
+                    f"任务路径不得包含符号链接/重解析点且文档必须是普通文件: {error}",
+                    f"Task path must not contain a symlink/reparse point and the document must be a regular file: {error}",
+                )) from error
+            return data.decode("utf-8")
         fd = open_task_document(entry, write=False)
         try:
             chunks: list[bytes] = []
@@ -467,8 +534,8 @@ def open_dir_nofollow(root: Path, directory: Path) -> int:
 def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -> None:
     """通过父目录 fd 创建临时文件并 replace, 避免校验后父路径被换成软链."""
     if entry is None:
-        if path.is_symlink():
-            raise KanbanError(t(f"任务文档不得是符号链接: {path}", f"Task document must not be a symlink: {path}"))
+        if is_reparse_point(path):
+            raise KanbanError(t(f"任务文档不得是符号链接/重解析点: {path}", f"Task document must not be a symlink/reparse point: {path}"))
         handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
         temp_path = Path(temp_name)
         try:
@@ -483,6 +550,15 @@ def write_text_atomic(path: Path, text: str, *, entry: Optional[Entry] = None) -
         return
 
     root = board_root_from_entry(entry)
+    if os.name == "nt":
+        try:
+            write_text_atomic_nofollow(root, path, text)
+        except UnsafePathError as error:
+            raise KanbanError(t(
+                f"任务路径不得包含符号链接/重解析点且文档必须是普通文件: {error}",
+                f"Task path must not contain a symlink/reparse point and the document must be a regular file: {error}",
+            )) from error
+        return
     parent_fd = open_dir_nofollow(root, path.parent)
     temp_name = f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
     temp_fd = None
@@ -613,6 +689,42 @@ def command_new(args: argparse.Namespace, root: Path) -> None:
     if task_id in board.entries or task_id in board.blocked:
         raise KanbanError(t(f"任务已存在: {task_id}", f"Task already exists: {task_id}"))
     contract = render_contract(title, args.type)
+    if os.name == "nt":
+        try:
+            if args.large:
+                target = create_directory_with_text_file_nofollow(
+                    root,
+                    root / "backlog" / task_id,
+                    "spec.md",
+                    contract,
+                )
+            else:
+                target = root / "backlog" / f"{task_id}.md"
+                content = contract + """## 实施与验证
+
+<填写>
+
+## 完成总结
+
+<填写>
+"""
+                write_text_atomic_nofollow(
+                    root,
+                    target,
+                    content,
+                    replace=False,
+                )
+        except FileExistsError as error:
+            raise KanbanError(
+                t(f"任务已存在: {task_id}", f"Task already exists: {task_id}")
+            ) from error
+        except UnsafePathError as error:
+            raise KanbanError(t(
+                f"任务路径不得包含符号链接/重解析点: {error}",
+                f"Task path must not contain a symlink/reparse point: {error}",
+            )) from error
+        print(target)
+        return
     if args.large:
         target = root / "backlog" / task_id
         target.mkdir()
@@ -761,6 +873,22 @@ def command_show(args: argparse.Namespace, root: Path) -> None:
 
 def rename_entry_nofollow(root: Path, entry: Entry, target_state: str) -> Path:
     """用状态目录 fd 完成 rename, 拒绝状态目录软链导致的越界迁移."""
+    if os.name == "nt":
+        target = root / target_state / entry.path.name
+        try:
+            rename_nofollow(root, entry.path, target)
+        except FileExistsError as error:
+            raise KanbanError(t(f"目标已存在: {target}", f"Target already exists: {target}")) from error
+        except UnsafePathError as error:
+            raise KanbanError(t(
+                f"任务路径不得包含符号链接/重解析点: {error}",
+                f"Task path must not contain a symlink/reparse point: {error}",
+            )) from error
+        except OSError as error:
+            raise KanbanError(t(f"迁移失败: {error}", f"Move failed: {error}")) from error
+        if os.path.lexists(entry.path) or not target.exists() or is_reparse_point(target):
+            raise KanbanError(t("迁移后状态校验失败, 请保留现场", "Post-move state verification failed; preserve the current state"))
+        return target
     ensure_no_symlinks_under_board(root, entry.path)
     source_state_fd = open_dir_nofollow(root, root / entry.state)
     try:
@@ -787,7 +915,7 @@ def rename_entry_nofollow(root: Path, entry: Entry, target_state: str) -> Path:
     finally:
         os.close(source_state_fd)
     target = root / target_state / entry.path.name
-    if entry.path.exists() or not target.exists() or target.is_symlink():
+    if entry.path.exists() or not target.exists() or is_reparse_point(target):
         raise KanbanError(t("迁移后状态校验失败, 请保留现场", "Post-move state verification failed; preserve the current state"))
     return target
 
@@ -963,6 +1091,11 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     agent = shutil.which(agent_name)
     if not agent:
         raise KanbanError(t(f"Agent 不在 PATH: {agent_name}", f"Agent is not in PATH: {agent_name}"))
+    if os.name == "nt" and Path(agent).suffix.lower() != ".exe":
+        raise KanbanError(t(
+            f"Windows Agent 必须是原生 .exe, 不会执行可能重解析参数的入口: {agent}",
+            f"Windows Agent must be a native .exe; refusing an entry point that can reparse arguments: {agent}",
+        ))
     project = root.parent.resolve()
     tmux = None
     session = None
@@ -976,10 +1109,17 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         else:
             # 项目专属 session 自己建, 因此不要求 start 本身跑在 tmux 里.
             session, session_exists = resolve_project_session(tmux, project)
+    elif launcher == "console":
+        if os.name != "nt":
+            raise KanbanError(t(
+                "console 启动方式只支持 Windows",
+                "The console launcher is available only on Windows",
+            ))
     elif not (sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()):
+        fallback = "console" if os.name == "nt" else "tmux"
         raise KanbanError(t(
-            "前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). 在 CI、管道或无 TTY 环境请改用: kanban start --launcher tmux <task-id>",
-            "Foreground mode requires an interactive terminal (stdin/stdout/stderr must be TTYs). In CI, pipelines, or environments without a TTY, use: kanban start --launcher tmux <task-id>",
+            f"前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). 在 CI、管道或无 TTY 环境请改用: kanban start --launcher {fallback} <task-id>",
+            f"Foreground mode requires an interactive terminal (stdin/stdout/stderr must be TTYs). In CI, pipelines, or environments without a TTY, use: kanban start --launcher {fallback} <task-id>",
         ))
 
     original = read_document(entry)
@@ -998,6 +1138,19 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         if launcher == "foreground":
             try:
                 process = subprocess.Popen(agent_argv, cwd=root.parent)
+            except OSError as error:
+                raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
+        elif launcher == "console":
+            try:
+                process = subprocess.Popen(
+                    agent_argv,
+                    cwd=root.parent,
+                    creationflags=(
+                        subprocess.CREATE_NEW_CONSOLE
+                        | subprocess.CREATE_NEW_PROCESS_GROUP
+                    ),
+                    close_fds=True,
+                )
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
         else:
@@ -1049,6 +1202,12 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 f"Agent 已启动但以非零状态退出: {returncode}; 卡片保留在 working",
                 f"Agent started but exited with status {returncode}; task remains in working",
             ))
+        return
+    if launcher == "console":
+        print(t(
+            f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=console\tPID={process.pid}",
+            f"started: {entry.task_id}\tagent={agent_name}\tlauncher=console\tPID={process.pid}",
+        ))
         return
     if launcher == "tmux-session":
         print(t(

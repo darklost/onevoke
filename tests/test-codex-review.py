@@ -45,6 +45,7 @@ exit 0
 """
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX shell wrapper test")
 class CodexReviewGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -458,19 +459,11 @@ class CodexReviewGateTest(unittest.TestCase):
         argv = self.argv_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual("env-model", argv[argv.index("--model") + 1])
 
-    def test_malformed_review_model_output_falls_back_to_builtin_default(self) -> None:
-        """配置查询输出不是恰好两行时按读取失败处理, 回落内置默认."""
-        fake_bin = self.root / "fake-python-bin"
-        fake_bin.mkdir()
-        fake_python = fake_bin / "python3"
-        fake_python.write_text(
-            "#!/bin/sh\nprintf 'cfg-model\\nmedium\\n\\n'\n", encoding="utf-8"
-        )
-        fake_python.chmod(0o755)
+    def test_malformed_model_config_falls_back_to_builtin_default(self) -> None:
+        """Python 核心读取到损坏配置时回落内置默认, 不阻塞审核."""
+        Path(self.env["ONEVOKE_CONFIG"]).write_text("{invalid", encoding="utf-8")
 
-        result = self.default_review(
-            PATH=f"{fake_bin}{os.pathsep}{self.env['PATH']}"
-        )
+        result = self.default_review()
 
         self.assertEqual(0, result.returncode, result.stderr)
         argv = self.argv_log.read_text(encoding="utf-8").splitlines()

@@ -12,13 +12,37 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from onevoke_fs import tighten_private_file_permissions
+
+
+def configure_stdio() -> None:
+    """Windows 的重定向流常沿用系统代码页；Onevoke 的 CLI 契约统一使用 UTF-8。"""
+    if os.name != "nt":
+        return
+    # Onevoke 经常在待处理仓库内运行。关闭 Windows 对当前目录的隐式可执行
+    # 文件搜索，避免仓库中的 git.exe/agent.exe 在参数校验前被执行；显式 PATH
+    # 中的工具仍照常解析。
+    os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            # 测试替换的内存流或已关闭流可能不支持重新配置；调用方仍可正常工作.
+            pass
+
+
+configure_stdio()
+
 
 SCHEMA_VERSION = 1
 EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 REVIEW_STAGE_MODES = ("auto", "skip", "required")
-LAUNCHERS = ("tmux", "tmux-session", "foreground")
+LAUNCHERS = ("tmux", "tmux-session", "foreground", "console")
 LANGUAGES = ("cn", "en")
 # model 允许空字符串, 表示用对应 CLI 自己的默认模型.
 KANBAN_MODEL_DEFAULTS = {
@@ -195,7 +219,7 @@ def default_config() -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "welcome_complete": False,
         "kanban_agent": "codex",
-        "launcher": "tmux",
+        "launcher": "console" if os.name == "nt" else "tmux",
         "reviewers": {role: "codex" for role in REVIEW_ROLES},
         "review_stages": default_review_stages(),
         "models": default_models(),
@@ -379,7 +403,7 @@ def save_config(config: dict[str, Any]) -> Path:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
+        tighten_private_file_permissions(temporary)
         os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)

@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from onevoke_fs import tighten_private_file_permissions
+
 
 ACTIVE_STATES = ("backlog", "todo", "working", "done")
 ALL_STATES = ACTIVE_STATES + ("archived", "trash")
@@ -277,7 +279,7 @@ def save_column_width(width: int) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
+        tighten_private_file_permissions(temporary)
         os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)

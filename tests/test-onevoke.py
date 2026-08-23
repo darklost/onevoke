@@ -5,7 +5,6 @@ import importlib.util
 import io
 import json
 import os
-import pty
 import signal
 import subprocess
 import sys
@@ -14,6 +13,11 @@ import threading
 import unittest
 from unittest import mock
 from pathlib import Path
+
+if os.name == "posix":
+    import pty
+else:
+    pty = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +39,7 @@ def load_onevoke_module():
     return module
 
 
+@unittest.skipUnless(os.name == "posix", "PTY welcome tests require POSIX")
 class OnevokeCommandTest(unittest.TestCase):
     def setUp(self) -> None:
         self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})

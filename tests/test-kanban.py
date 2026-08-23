@@ -2,12 +2,10 @@
 
 import argparse
 import base64
-import fcntl
 import hashlib
 import io
 import json
 import os
-import pty
 import re
 import runpy
 import shutil
@@ -15,13 +13,21 @@ import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import unicodedata
 import unittest
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from unittest import mock
+
+if os.name == "posix":
+    import fcntl
+    import pty
+    import termios
+else:
+    fcntl = None
+    pty = None
+    termios = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +56,7 @@ AGENT_RULES = RULES_DIR / "ONEVOKE-AGENTS.md"
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
 
 
+@unittest.skipUnless(os.name == "posix", "PTY, flock, tmux, and shell tests require POSIX")
 class KanbanCommandTest(unittest.TestCase):
     def setUp(self) -> None:
         self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})

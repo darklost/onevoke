@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import os
 import re
@@ -40,6 +39,7 @@ from onevoke_config import (
     bind_effective_language,
     language_text,
 )
+from onevoke_fs import exclusive_file_lock
 
 t = language_text
 
@@ -577,22 +577,22 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     lock_path = state_dir / ".merge-worktree-memory.lock"
     with lock_path.open("a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        # 持锁后再采一次稳定快照, 避免等待锁期间 Stop hook 已写入新条目或新文件.
-        source_identity = source_memory_identity(source_memory)
-        snapshots = read_stable_source_files(source_memory)
-        if not snapshots:
-            assert_source_unchanged(source_memory, snapshots, source_identity)
-            print(
-                t(
-                    f"无需合并: {source_memory} 中没有 memory 文件",
-                    f"Nothing to merge: no memory files in {source_memory}",
+        with exclusive_file_lock(lock):
+            # 持锁后再采一次稳定快照, 避免等待锁期间 Stop hook 已写入新条目或新文件.
+            source_identity = source_memory_identity(source_memory)
+            snapshots = read_stable_source_files(source_memory)
+            if not snapshots:
+                assert_source_unchanged(source_memory, snapshots, source_identity)
+                print(
+                    t(
+                        f"无需合并: {source_memory} 中没有 memory 文件",
+                        f"Nothing to merge: no memory files in {source_memory}",
+                    )
                 )
+                return
+            merge_files(
+                source_root, target_root, source_memory, snapshots, False, source_identity
             )
-            return
-        merge_files(
-            source_root, target_root, source_memory, snapshots, False, source_identity
-        )
 
 
 def main() -> int:
