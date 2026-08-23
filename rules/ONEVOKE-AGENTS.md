@@ -3,7 +3,7 @@
 - 规则集入口, 装在 `~/.agents/ONEVOKE-AGENTS.md`. 只放分册索引, 优先级和默认取值; 通用条款在 `~/.agents/BASE-RULES.md`.
 - POSIX 用 `install.sh`, 原生 Windows 用 `install.ps1`; 安装器每次用当前模板覆盖本文件和全部分册. 两个平台都把命令装到 `~/.local/bin`, Windows 不自动修改用户 `PATH`; `.cmd` 入口只供人工交互的普通参数. 含特殊字符的自动化必须用进程 API 的 argv 数组直接调用显式 Python 解释器和安装目录里的 Python 入口, 不得经过 PowerShell/cmd 命令字符串. 原生 Windows 的执行 Agent 与 Reviewer CLI 必须是原生 `.exe`, 不执行 `.cmd`/`.bat`. 本机的执行 Agent, launcher, 各审核角色及各 Agent 的模型档位保存在 `~/.config/onevoke/config.json`, 用 `onevoke config` 查看, `onevoke welcome --reset` 修改.
 - `~/.agents/AGENTS.md` 不存在时, POSIX 安装器将其符号链接到本文件; Windows 安装器优先创建硬链接并回落到符号链接, 无法安全创建则安装失败. 已有同名入口时保持不变.
-- 配置文件和审核运行目录必须仅允许当前用户访问: POSIX 使用 `0600`/`0700`, Windows 使用关闭继承的受保护 DACL. Windows 的目标记忆目录/文件也必须迁移为当前用户独占的受保护 DACL. 看板及记忆合并在 Windows 拒绝符号链接、junction 等 reparse point, 记忆合并通过固定句柄读取/追加并使用 `LockFileEx`; 禁绕过 Onevoke 命令直接操作这些边界.
+- 配置文件和审核运行目录必须仅允许当前用户访问: POSIX 使用 `0600`/`0700`, Windows 使用关闭继承的受保护 DACL. Windows 配置路径必须从卷/UNC anchor 逐分量拒绝 reparse point; 内容读取、schema 校验和有效旧配置 DACL 迁移必须保持同一固定句柄, 无效配置不迁移 ACL; 保存时临时文件先私有再写入, 并只收紧本次新建的配置目录, 不得改动既有祖先 DACL. Windows 的目标记忆目录/文件也必须迁移为当前用户独占的受保护 DACL. 看板及记忆合并在 Windows 拒绝符号链接、junction 等 reparse point, 记忆合并通过固定句柄读取/追加并使用 `LockFileEx`; 禁绕过 Onevoke 命令直接操作这些边界.
 
 ## 分册
 

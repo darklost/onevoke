@@ -1477,6 +1477,19 @@ class LanguageTextTest(unittest.TestCase):
         self.assertEqual(0, legacy_result.returncode, legacy_result.stderr)
         self.assertEqual("", legacy_result.stdout)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX config mode regression")
+    def test_save_config_replaces_public_file_with_private_mode(self) -> None:
+        self.config_path.write_text(
+            json.dumps(self._minimal_config()),
+            encoding="utf-8",
+        )
+        self.config_path.chmod(0o644)
+
+        self.config.save_config(self._minimal_config(language="en"))
+
+        self.assertEqual(0o600, self.config_path.stat().st_mode & 0o777)
+        self.assertEqual("en", self.config.load_config()["language"])
+
     def test_invalid_language_rejected(self) -> None:
         with self.assertRaises(self.config.ConfigError):
             self.config.validate_config(self._minimal_config(language="fr"))

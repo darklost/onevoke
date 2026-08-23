@@ -441,6 +441,67 @@ if os.name == "nt":
             raise UnsafePathError(f"invalid protected path component: {path}")
 
 
+    @contextlib.contextmanager
+    def _private_security_descriptor(
+        expected: str,
+    ) -> Iterator[ctypes.c_void_p]:
+        """构造仅当前用户完全控制的受保护 DACL, 并维持指针生命周期."""
+        if expected not in ("file", "directory"):
+            raise ValueError(f"unsupported private object kind: {expected}")
+        token = wintypes.HANDLE()
+        sid_string = wintypes.LPWSTR()
+        security_descriptor = ctypes.c_void_p()
+        try:
+            if not _advapi32.OpenProcessToken(
+                _kernel32.GetCurrentProcess(),
+                _TOKEN_QUERY,
+                ctypes.byref(token),
+            ):
+                _raise_windows_error("cannot open current process token")
+            size = wintypes.DWORD()
+            _advapi32.GetTokenInformation(
+                token,
+                _TOKEN_USER_CLASS,
+                None,
+                0,
+                ctypes.byref(size),
+            )
+            token_data = ctypes.create_string_buffer(size.value)
+            if not _advapi32.GetTokenInformation(
+                token,
+                _TOKEN_USER_CLASS,
+                token_data,
+                size,
+                ctypes.byref(size),
+            ):
+                _raise_windows_error("cannot read current user SID")
+            token_user = ctypes.cast(
+                token_data, ctypes.POINTER(_TOKEN_USER)
+            ).contents
+            if not _advapi32.ConvertSidToStringSidW(
+                token_user.User.Sid,
+                ctypes.byref(sid_string),
+            ):
+                _raise_windows_error("cannot format current user SID")
+            inheritance = "OICI" if expected == "directory" else ""
+            sddl = f"D:P(A;{inheritance};FA;;;{sid_string.value})"
+            if not _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl,
+                _SDDL_REVISION_1,
+                ctypes.byref(security_descriptor),
+                None,
+            ):
+                _raise_windows_error("cannot build private file ACL")
+            yield security_descriptor
+        finally:
+            if security_descriptor.value:
+                _kernel32.LocalFree(security_descriptor)
+            if sid_string:
+                _kernel32.LocalFree(sid_string)
+            if token:
+                _close_handle(token)
+
+
     def _open_relative_handle(
         parent_handle: int,
         name: str,
@@ -449,28 +510,28 @@ if os.name == "nt":
         access: int,
         creation: int = _OPEN_EXISTING,
         expected: str = "any",
+        share_write: bool = True,
         share_delete: bool = False,
+        private_creation: str | None = None,
     ) -> int:
         """相对已固定父目录打开单一分量, 永不重新解析绝对路径."""
         _validate_relative_name(name, path)
+        if private_creation is not None:
+            if creation != _CREATE_NEW:
+                raise ValueError("private_creation requires CREATE_NEW")
+            if (
+                private_creation != expected
+                or expected not in ("file", "directory")
+            ):
+                raise ValueError(
+                    "private_creation must match the created file or directory kind"
+                )
         name_buffer = ctypes.create_unicode_buffer(name)
         name_length = len(name.encode("utf-16-le"))
         object_name = _UNICODE_STRING(
             name_length,
             name_length + ctypes.sizeof(wintypes.WCHAR),
             ctypes.cast(name_buffer, wintypes.LPWSTR),
-        )
-        attributes = _OBJECT_ATTRIBUTES(
-            ctypes.sizeof(_OBJECT_ATTRIBUTES),
-            parent_handle,
-            ctypes.pointer(object_name),
-            # RootDirectory 已是固定文件对象. OBJ_DONT_REPARSE 会在该
-            # 对象验证后被原地加上 reparse tag 时拒绝相对访问,
-            # 反而破坏句柄固定语义. FILE_OPEN_REPARSE_POINT 保证新
-            # 打开的单分量自身不被跟随, 随后再从句柄检查 tag.
-            _OBJ_CASE_INSENSITIVE,
-            None,
-            None,
         )
         options = (
             _NT_FILE_SYNCHRONOUS_IO_NONALERT
@@ -483,24 +544,46 @@ if os.name == "nt":
         elif expected == "file":
             options |= _NT_FILE_NON_DIRECTORY_FILE
         disposition = _NT_FILE_CREATE if creation == _CREATE_NEW else _NT_FILE_OPEN
-        share = _FILE_SHARE_READ | _FILE_SHARE_WRITE
+        share = _FILE_SHARE_READ
+        if share_write:
+            share |= _FILE_SHARE_WRITE
         if share_delete:
             share |= _FILE_SHARE_DELETE
         handle = wintypes.HANDLE()
         io_status = _IO_STATUS_BLOCK()
-        status = _ntdll.NtCreateFile(
-            ctypes.byref(handle),
-            access | _SYNCHRONIZE,
-            ctypes.byref(attributes),
-            ctypes.byref(io_status),
-            None,
-            _FILE_ATTRIBUTE_NORMAL if expected != "directory" else 0,
-            share,
-            disposition,
-            options,
-            None,
-            0,
+        descriptor_context = (
+            _private_security_descriptor(private_creation)
+            if private_creation is not None
+            else contextlib.nullcontext(None)
         )
+        with descriptor_context as security_descriptor:
+            attributes = _OBJECT_ATTRIBUTES(
+                ctypes.sizeof(_OBJECT_ATTRIBUTES),
+                parent_handle,
+                ctypes.pointer(object_name),
+                # RootDirectory 已是固定文件对象. OBJ_DONT_REPARSE 会在该
+                # 对象验证后被原地加上 reparse tag 时拒绝相对访问,
+                # 反而破坏句柄固定语义. FILE_OPEN_REPARSE_POINT 保证新
+                # 打开的单分量自身不被跟随, 随后再从句柄检查 tag.
+                _OBJ_CASE_INSENSITIVE,
+                security_descriptor.value
+                if security_descriptor is not None
+                else None,
+                None,
+            )
+            status = _ntdll.NtCreateFile(
+                ctypes.byref(handle),
+                access | _SYNCHRONIZE,
+                ctypes.byref(attributes),
+                ctypes.byref(io_status),
+                None,
+                _FILE_ATTRIBUTE_NORMAL if expected != "directory" else 0,
+                share,
+                disposition,
+                options,
+                None,
+                0,
+            )
         if status < 0:
             _raise_nt_error("cannot open protected path", status, path)
         value = int(handle.value)
@@ -578,6 +661,7 @@ if os.name == "nt":
         *,
         access: int = _FILE_READ_ATTRIBUTES,
         expected: str = "any",
+        share_write: bool = True,
         share_delete: bool = False,
     ) -> int | None:
         probe: int | None = None
@@ -591,6 +675,7 @@ if os.name == "nt":
                 path,
                 access=_FILE_READ_ATTRIBUTES,
                 expected="any",
+                share_write=share_write,
                 share_delete=share_delete or bool(access & _DELETE),
             )
             _validate_handle_kind(probe, path, expected)
@@ -605,6 +690,7 @@ if os.name == "nt":
                 path,
                 access=access,
                 expected=expected,
+                share_write=share_write,
                 share_delete=share_delete,
             )
             if _handle_identity(result, path) != identity:
@@ -656,6 +742,7 @@ if os.name == "nt":
                     creation=_CREATE_NEW,
                     expected="file",
                     share_delete=False,
+                    private_creation="file",
                 )
             except OSError as error:
                 code = getattr(error, "winerror", None) or getattr(error, "errno", None)
@@ -756,14 +843,21 @@ if os.name == "nt":
             _raise_nt_error("cannot atomically rename protected path", status, target_path)
 
 
-    def _delete_handle(handle: int) -> None:
+    def _delete_handle(
+        handle: int,
+        path: Path | None = None,
+        *,
+        required: bool = False,
+    ) -> None:
         info = _FILE_DISPOSITION_INFO(True)
-        _kernel32.SetFileInformationByHandle(
+        deleted = _kernel32.SetFileInformationByHandle(
             handle,
             _FILE_DISPOSITION_INFO_CLASS,
             ctypes.byref(info),
             ctypes.sizeof(info),
         )
+        if not deleted and required:
+            _raise_windows_error("cannot delete failed protected path", path)
 
 
     def read_regular_file_nofollow(root: Path, path: Path) -> bytes:
@@ -820,6 +914,182 @@ if os.name == "nt":
             if _is_missing_windows_error(error):
                 return None
             raise
+
+
+    @contextlib.contextmanager
+    def _open_regular_stream_if_exists_nofollow(
+        root: Path,
+        path: Path,
+        *,
+        private_acl_access: bool,
+    ) -> Iterator[BinaryIO | None]:
+        """在不共享 WRITE/DELETE 的叶句柄上给调用方稳定读取.
+
+        ``private_acl_access`` 同时请求 READ_CONTROL/WRITE_DAC, 使调用方
+        可在校验内容后直接收紧同一句柄的 DACL.
+        """
+        root_absolute, candidate, parts = _relative_parts(root, path)
+        if not parts:
+            raise UnsafePathError(f"protected file cannot be the root: {candidate}")
+        stack = contextlib.ExitStack()
+        try:
+            _, parent_handle = stack.enter_context(_open_chain(
+                root_absolute,
+                candidate.parent,
+                final_access=_FILE_READ_ATTRIBUTES,
+                final_expected="directory",
+            ))
+            access = _GENERIC_READ | _FILE_READ_ATTRIBUTES
+            if private_acl_access:
+                access |= _READ_CONTROL | _WRITE_DAC
+            handle = _try_open_leaf(
+                parent_handle,
+                candidate.name,
+                candidate,
+                access=access,
+                expected="file",
+                share_write=False,
+                share_delete=False,
+            )
+        except OSError as error:
+            stack.close()
+            if _is_missing_windows_error(error):
+                yield None
+                return
+            raise
+        if handle is None:
+            stack.close()
+            yield None
+            return
+        file: BinaryIO | None = None
+        try:
+            descriptor = msvcrt.open_osfhandle(
+                handle, os.O_RDONLY | os.O_BINARY
+            )
+            handle = _INVALID_HANDLE_VALUE
+            file = os.fdopen(descriptor, "rb", buffering=0)
+            yield file
+        finally:
+            try:
+                if file is not None:
+                    file.close()
+                else:
+                    _close_handle(handle)
+            finally:
+                stack.close()
+
+
+    @contextlib.contextmanager
+    def open_regular_file_if_exists_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO | None]:
+        """安全打开可选普通文件; 句柄存活期内拒绝写入和替换."""
+        with _open_regular_stream_if_exists_nofollow(
+            root, path, private_acl_access=False
+        ) as file:
+            yield file
+
+
+    @contextlib.contextmanager
+    def open_private_regular_file_if_exists_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO | None]:
+        """打开可在内容校验后用同一句柄迁移 DACL 的可选文件."""
+        with _open_regular_stream_if_exists_nofollow(
+            root, path, private_acl_access=True
+        ) as file:
+            yield file
+
+
+    def ensure_directory_path_nofollow(path: Path) -> Path:
+        """从卷根逐分量打开或创建, 仅收紧本次新建目录的 DACL."""
+        candidate = _absolute_path(path)
+        anchor = Path(candidate.anchor)
+        if not candidate.anchor:
+            raise UnsafePathError(
+                f"protected directory has no absolute anchor: {candidate}"
+            )
+        _, _, parts = _relative_parts(anchor, candidate)
+        handles: list[int] = []
+        current = anchor
+        with _open_chain(
+            anchor,
+            anchor,
+            final_access=_FILE_READ_ATTRIBUTES,
+            final_expected="directory",
+        ) as (_, root_handle):
+            parent_handle = root_handle
+            try:
+                for part in parts:
+                    current /= part
+                    handle = _try_open_leaf(
+                        parent_handle,
+                        part,
+                        current,
+                        expected="directory",
+                    )
+                    if handle is None:
+                        try:
+                            handle = _open_relative_handle(
+                                parent_handle,
+                                part,
+                                current,
+                                access=(
+                                    _DELETE
+                                    | _READ_CONTROL
+                                    | _WRITE_DAC
+                                    | _FILE_READ_ATTRIBUTES
+                                ),
+                                creation=_CREATE_NEW,
+                                expected="directory",
+                                private_creation="directory",
+                            )
+                        except OSError as create_error:
+                            code = (
+                                getattr(create_error, "winerror", None)
+                                or getattr(create_error, "errno", None)
+                            )
+                            if code not in (_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS):
+                                raise
+                            handle = _try_open_leaf(
+                                parent_handle,
+                                part,
+                                current,
+                                expected="directory",
+                            )
+                            if handle is None:
+                                raise FileNotFoundError(current)
+                        else:
+                            # 先进入 cleanup 列表再收紧 ACL. 失败时用同一
+                            # DELETE 句柄删除未发布的空目录, 不得留下
+                            # 继承 ACL 的“既有祖先”影响下次重试.
+                            handles.append(handle)
+                            try:
+                                _tighten_private_handle(
+                                    handle, current, expected="directory"
+                                )
+                            except BaseException as harden_error:
+                                cleanup_error: BaseException | None = None
+                                try:
+                                    _delete_handle(
+                                        handle, current, required=True
+                                    )
+                                except BaseException as error:
+                                    cleanup_error = error
+                                finally:
+                                    handles.pop()
+                                    _close_handle(handle)
+                                if cleanup_error is not None:
+                                    raise cleanup_error from harden_error
+                                raise
+                            parent_handle = handle
+                            continue
+                    handles.append(handle)
+                    parent_handle = handle
+                return candidate
+            finally:
+                for handle in reversed(handles):
+                    _close_handle(handle)
 
 
     def directory_identity_nofollow(
@@ -971,6 +1241,7 @@ if os.name == "nt":
                                 ),
                                 creation=_CREATE_NEW,
                                 expected="directory",
+                                private_creation="directory",
                             )
                         except OSError as create_error:
                             code = (
@@ -1086,12 +1357,13 @@ if os.name == "nt":
                 creation=_CREATE_NEW,
                 expected="file",
                 share_delete=False,
+                private_creation="file",
             )
             moved = False
             try:
                 identity = _handle_identity(temp_handle, temp_path)
-                _write_handle(temp_handle, temp_path, text.encode("utf-8"))
                 _tighten_private_handle(temp_handle, temp_path, expected="file")
+                _write_handle(temp_handle, temp_path, text.encode("utf-8"))
                 _rename_handle(
                     temp_handle,
                     parent_handle,
@@ -1165,6 +1437,7 @@ if os.name == "nt":
                 ),
                 creation=_CREATE_NEW,
                 expected="directory",
+                private_creation="directory",
             )
             moved = False
             try:
@@ -1186,10 +1459,11 @@ if os.name == "nt":
                     ),
                     creation=_CREATE_NEW,
                     expected="file",
+                    private_creation="file",
                 )
                 try:
-                    _write_handle(child, child_path, text.encode("utf-8"))
                     _tighten_private_handle(child, child_path, expected="file")
+                    _write_handle(child, child_path, text.encode("utf-8"))
                 finally:
                     _close_handle(child)
                 _rename_handle(
@@ -1430,6 +1704,87 @@ else:
             return read_regular_file_nofollow(root, path)
         except FileNotFoundError:
             return None
+
+
+    @contextlib.contextmanager
+    def open_regular_file_if_exists_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO | None]:
+        stack = contextlib.ExitStack()
+        fd = -1
+        try:
+            candidate, parent_fd = stack.enter_context(_open_posix_parent(root, path))
+            fd = _openat_nofollow(parent_fd, candidate.name, os.O_RDONLY)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise UnsafePathError(
+                    f"task document is not a regular file: {candidate}"
+                )
+        except FileNotFoundError:
+            if fd >= 0:
+                os.close(fd)
+            stack.close()
+            yield None
+            return
+        file: BinaryIO | None = None
+        try:
+            file = os.fdopen(fd, "rb", buffering=0)
+            fd = -1
+            yield file
+        finally:
+            try:
+                if file is not None:
+                    file.close()
+                elif fd >= 0:
+                    os.close(fd)
+            finally:
+                stack.close()
+
+
+    @contextlib.contextmanager
+    def open_private_regular_file_if_exists_nofollow(
+        root: Path, path: Path
+    ) -> Iterator[BinaryIO | None]:
+        with open_regular_file_if_exists_nofollow(root, path) as file:
+            yield file
+
+
+    def ensure_directory_path_nofollow(path: Path) -> Path:
+        candidate = _absolute_path(path)
+        anchor = Path(candidate.anchor)
+        if not candidate.anchor:
+            raise UnsafePathError(
+                f"protected directory has no absolute anchor: {candidate}"
+            )
+        _, _, parts = _relative_parts(anchor, candidate)
+        dir_fd = os.open(
+            anchor,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            for part in parts:
+                try:
+                    next_fd = _openat_nofollow(
+                        dir_fd,
+                        part,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=dir_fd)
+                    except FileExistsError:
+                        pass
+                    next_fd = _openat_nofollow(
+                        dir_fd,
+                        part,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                os.close(dir_fd)
+                dir_fd = next_fd
+            return candidate
+        finally:
+            os.close(dir_fd)
 
 
     def directory_identity_nofollow(
@@ -1698,50 +2053,7 @@ def _tighten_private_handle(handle: int, path: Path, *, expected: str) -> None:
     """Windows: 直接收紧已固定对象句柄的 DACL."""
     if os.name != "nt":
         raise RuntimeError("private handle ACL is only available on Windows")
-    token = wintypes.HANDLE()  # type: ignore[name-defined]
-    sid_string = wintypes.LPWSTR()  # type: ignore[name-defined]
-    security_descriptor = ctypes.c_void_p()  # type: ignore[name-defined]
-    try:
-        if not _advapi32.OpenProcessToken(  # type: ignore[name-defined]
-            _kernel32.GetCurrentProcess(),  # type: ignore[name-defined]
-            _TOKEN_QUERY,  # type: ignore[name-defined]
-            ctypes.byref(token),  # type: ignore[name-defined]
-        ):
-            _raise_windows_error("cannot open current process token")
-        size = wintypes.DWORD()  # type: ignore[name-defined]
-        _advapi32.GetTokenInformation(  # type: ignore[name-defined]
-            token,
-            _TOKEN_USER_CLASS,  # type: ignore[name-defined]
-            None,
-            0,
-            ctypes.byref(size),  # type: ignore[name-defined]
-        )
-        token_data = ctypes.create_string_buffer(size.value)  # type: ignore[name-defined]
-        if not _advapi32.GetTokenInformation(  # type: ignore[name-defined]
-            token,
-            _TOKEN_USER_CLASS,  # type: ignore[name-defined]
-            token_data,
-            size,
-            ctypes.byref(size),  # type: ignore[name-defined]
-        ):
-            _raise_windows_error("cannot read current user SID")
-        token_user = ctypes.cast(  # type: ignore[name-defined]
-            token_data, ctypes.POINTER(_TOKEN_USER)  # type: ignore[name-defined]
-        ).contents
-        if not _advapi32.ConvertSidToStringSidW(  # type: ignore[name-defined]
-            token_user.User.Sid,
-            ctypes.byref(sid_string),  # type: ignore[name-defined]
-        ):
-            _raise_windows_error("cannot format current user SID")
-        inheritance = "OICI" if expected == "directory" else ""
-        sddl = f"D:P(A;{inheritance};FA;;;{sid_string.value})"
-        if not _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(  # type: ignore[name-defined]
-            sddl,
-            _SDDL_REVISION_1,  # type: ignore[name-defined]
-            ctypes.byref(security_descriptor),  # type: ignore[name-defined]
-            None,
-        ):
-            _raise_windows_error("cannot build private file ACL")
+    with _private_security_descriptor(expected) as security_descriptor:  # type: ignore[name-defined]
         present = wintypes.BOOL()  # type: ignore[name-defined]
         defaulted = wintypes.BOOL()  # type: ignore[name-defined]
         dacl = ctypes.c_void_p()  # type: ignore[name-defined]
@@ -1764,13 +2076,19 @@ def _tighten_private_handle(handle: int, path: Path, *, expected: str) -> None:
         if status:
             ctypes.set_last_error(status)  # type: ignore[name-defined]
             _raise_windows_error("cannot tighten private file ACL", path)
-    finally:
-        if security_descriptor.value:
-            _kernel32.LocalFree(security_descriptor)  # type: ignore[name-defined]
-        if sid_string:
-            _kernel32.LocalFree(sid_string)  # type: ignore[name-defined]
-        if token:
-            _close_handle(token)  # type: ignore[name-defined]
+
+
+def tighten_private_open_file_permissions(file: BinaryIO, path: Path) -> None:
+    """收紧已打开普通文件, 避免再次按路径解析时被替换."""
+    if os.name == "nt":
+        handle = msvcrt.get_osfhandle(file.fileno())  # type: ignore[name-defined]
+        _validate_handle_kind(handle, path, "file")  # type: ignore[name-defined]
+        _tighten_private_handle(handle, path, expected="file")
+        return
+    info = os.fstat(file.fileno())
+    if not stat.S_ISREG(info.st_mode):
+        raise UnsafePathError(f"task document is not a regular file: {path}")
+    os.fchmod(file.fileno(), 0o600)
 
 
 def _tighten_private_permissions(path: Path, *, expected: str) -> None:

@@ -12,7 +12,14 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from onevoke_fs import tighten_private_file_permissions
+from onevoke_fs import (
+    ensure_directory_path_nofollow,
+    open_private_regular_file_if_exists_nofollow,
+    open_regular_file_if_exists_nofollow,
+    tighten_private_file_permissions,
+    tighten_private_open_file_permissions,
+    write_text_atomic_nofollow,
+)
 
 
 def configure_stdio() -> None:
@@ -120,9 +127,19 @@ def configured_language() -> str | None:
     """Return explicitly saved language from a valid config.json, or None."""
     try:
         path = config_path()
-        if not path.is_file():
-            return None
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        if os.name == "nt":
+            absolute = Path(os.path.abspath(os.fspath(path)))
+            anchor = Path(absolute.anchor)
+            with open_regular_file_if_exists_nofollow(
+                anchor, absolute
+            ) as stream:
+                if stream is None:
+                    return None
+                raw = json.loads(stream.read().decode("utf-8"))
+        else:
+            if not path.is_file():
+                return None
+            raw = json.loads(path.read_text(encoding="utf-8"))
         validate_config(raw)
         return _explicit_config_language(raw)
     except (OSError, UnicodeError, json.JSONDecodeError, ConfigError):
@@ -368,6 +385,40 @@ def validate_config(raw: object) -> dict[str, Any]:
 
 def load_config(*, missing_ok: bool = True) -> dict[str, Any]:
     path = config_path()
+    if os.name == "nt":
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        anchor = Path(absolute.anchor)
+        try:
+            with open_private_regular_file_if_exists_nofollow(
+                anchor, absolute
+            ) as stream:
+                if stream is None:
+                    if missing_ok:
+                        return default_config()
+                    raise ConfigError(language_text(
+                        f"配置不存在: {path}",
+                        f"config does not exist: {path}",
+                    ))
+                raw = json.loads(stream.read().decode("utf-8"))
+                validated = validate_config(raw)
+                try:
+                    # 内容通过 schema 后再收紧读取所用的同一句柄;
+                    # 无效配置不会产生 ACL 迁移副作用.
+                    tighten_private_open_file_permissions(stream, absolute)
+                except OSError as error:
+                    raise ConfigError(language_text(
+                        f"收紧配置文件权限失败: {path}: {error}",
+                        f"failed to tighten config file permissions: {path}: {error}",
+                    )) from error
+                return validated
+        except ConfigError:
+            raise
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ConfigError(language_text(
+                f"读取配置失败: {path}: {error}",
+                f"failed to read config: {path}: {error}",
+            )) from error
+
     if not path.exists():
         if missing_ok:
             return default_config()
@@ -378,18 +429,7 @@ def load_config(*, missing_ok: bool = True) -> dict[str, Any]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ConfigError(language_text(f"读取配置失败: {path}: {error}", f"failed to read config: {path}: {error}")) from error
-    validated = validate_config(raw)
-    if os.name == "nt":
-        try:
-            # 旧版本可能留下了继承父目录 ACL 的有效配置。只在内容
-            # 通过 schema 校验后执行原地权限迁移，且失败必须阻断配置使用。
-            tighten_private_file_permissions(path)
-        except OSError as error:
-            raise ConfigError(language_text(
-                f"收紧配置文件权限失败: {path}: {error}",
-                f"failed to tighten config file permissions: {path}: {error}",
-            )) from error
-    return validated
+    return validate_config(raw)
 
 
 def effective_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -403,6 +443,14 @@ def effective_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
 def save_config(config: dict[str, Any]) -> Path:
     validated = validate_config(config)
     path = config_path()
+    if os.name == "nt":
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        anchor = Path(absolute.anchor)
+        ensure_directory_path_nofollow(absolute.parent)
+        payload = json.dumps(validated, ensure_ascii=False, indent=2) + "\n"
+        write_text_atomic_nofollow(anchor, absolute, payload, replace=True)
+        return path
+
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=path.name + ".", suffix=".tmp", dir=path.parent

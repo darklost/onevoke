@@ -2,7 +2,9 @@
 
 import importlib.machinery
 import importlib.util
+import contextlib
 import ctypes
+import json
 import os
 import shutil
 import struct
@@ -295,6 +297,11 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
             kernel32.CloseHandle(handle)
 
     def assert_private_acl(self, path: Path) -> None:
+        output = self.acl_text(path)
+        self.assertNotIn("(I)", output, output)
+        self.assertEqual(1, output.count("(F)"), output)
+
+    def acl_text(self, path: Path) -> str:
         acl = subprocess.run(
             ["icacls.exe", str(path)],
             text=True,
@@ -304,8 +311,7 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(0, acl.returncode, acl.stderr)
-        self.assertNotIn("(I)", acl.stdout, acl.stdout)
-        self.assertEqual(1, acl.stdout.count("(F)"), acl.stdout)
+        return acl.stdout
 
     def make_completed_large_entry(self, task_id: str):
         task = self.root / "working" / task_id
@@ -461,6 +467,417 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
 
         self.assertFalse(document.exists())
         self.assertEqual([], list(parent.iterdir()))
+
+    def test_config_rejects_parent_junction_without_touching_outside(self) -> None:
+        outside_config = self.outside / "config.json"
+        outside_payload = onevoke_config.default_config()
+        outside_payload["welcome_complete"] = True
+        outside_payload["language"] = "en"
+        outside_bytes = (
+            json.dumps(outside_payload, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+        outside_config.write_bytes(outside_bytes)
+        outside_acl = self.acl_text(outside_config)
+        parent = self.base / "config-parent"
+        self.make_junction(parent, self.outside)
+        configured = parent / "config.json"
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ):
+            self.assertIsNone(onevoke_config.configured_language())
+            with self.assertRaises(onevoke_config.ConfigError):
+                onevoke_config.load_config()
+            with self.assertRaises(OSError):
+                onevoke_config.save_config(onevoke_config.default_config())
+
+        self.assertEqual(outside_bytes, outside_config.read_bytes())
+        self.assertEqual(outside_acl, self.acl_text(outside_config))
+        self.assertEqual([outside_config], list(self.outside.iterdir()))
+
+    def test_config_save_fails_closed_when_parent_gets_reparse_tag(self) -> None:
+        parent = self.base / "config-fsctl-parent"
+        parent.mkdir()
+        configured = parent / "config.json"
+        sentinel = self.outside / "sentinel.txt"
+        sentinel_bytes = b"outside must remain unchanged\n"
+        sentinel.write_bytes(sentinel_bytes)
+        original_open = onevoke_fs._open_relative_handle
+        parent_opens = 0
+        swapped = False
+
+        def open_then_swap(parent_handle, name, path, **kwargs):
+            nonlocal parent_opens, swapped
+            handle = original_open(parent_handle, name, path, **kwargs)
+            if path == parent:
+                parent_opens += 1
+                if parent_opens == 2:
+                    self.set_junction_reparse(parent, self.outside)
+                    swapped = True
+            return handle
+
+        try:
+            with mock.patch.dict(
+                os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+            ), mock.patch.object(
+                onevoke_fs, "_open_relative_handle", side_effect=open_then_swap
+            ):
+                with self.assertRaises(OSError):
+                    onevoke_config.save_config(onevoke_config.default_config())
+
+            self.assertTrue(swapped, "the config FSCTL race hook did not run")
+            self.assertTrue(onevoke_fs.is_reparse_point(parent))
+            self.assertEqual(sentinel_bytes, sentinel.read_bytes())
+            self.assertEqual([sentinel], list(self.outside.iterdir()))
+        finally:
+            if onevoke_fs.is_reparse_point(parent):
+                self.clear_junction_reparse(parent)
+
+        self.assertEqual([], list(parent.iterdir()))
+
+    def test_config_dangling_leaf_junction_is_not_treated_as_missing(self) -> None:
+        parent = self.base / "dangling-config-parent"
+        parent.mkdir()
+        missing_target = self.base / "missing-config-target"
+        configured = parent / "config.json"
+        self.make_junction(configured, missing_target)
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ):
+            with self.assertRaises(onevoke_config.ConfigError):
+                onevoke_config.load_config(missing_ok=True)
+            with self.assertRaises(OSError):
+                onevoke_config.save_config(onevoke_config.default_config())
+
+        self.assertFalse(missing_target.exists())
+
+    def test_config_validation_pins_file_against_replacement(self) -> None:
+        parent = self.base / "pinned-config-parent"
+        parent.mkdir()
+        configured = parent / "config.json"
+        original_payload = onevoke_config.default_config()
+        original_payload["welcome_complete"] = True
+        original_payload["language"] = "en"
+        original_bytes = json.dumps(original_payload).encode("utf-8")
+        configured.write_bytes(original_bytes)
+        replacement = self.outside / "replacement.json"
+        replacement_bytes = b'{"attacker": true}\n'
+        replacement.write_bytes(replacement_bytes)
+        original_validate = onevoke_config.validate_config
+        replacement_error: list[OSError] = []
+        overwrite_error: list[OSError] = []
+
+        def validate_while_replacing(raw):
+            validated = original_validate(raw)
+            try:
+                os.replace(replacement, configured)
+            except OSError as error:
+                replacement_error.append(error)
+            else:
+                self.fail("config replacement succeeded while validation handle was pinned")
+            try:
+                configured.write_bytes(b'{"overwritten": true}\n')
+            except OSError as error:
+                overwrite_error.append(error)
+            else:
+                self.fail("config overwrite succeeded while validation handle was pinned")
+            return validated
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ), mock.patch.object(
+            onevoke_config, "validate_config", side_effect=validate_while_replacing
+        ):
+            loaded = onevoke_config.load_config()
+
+        self.assertEqual("en", loaded["language"])
+        self.assertEqual(1, len(replacement_error))
+        self.assertEqual(1, len(overwrite_error))
+        self.assertEqual(original_bytes, configured.read_bytes())
+        self.assertEqual(replacement_bytes, replacement.read_bytes())
+        self.assert_private_acl(configured)
+
+    def test_invalid_config_does_not_migrate_inherited_acl(self) -> None:
+        parent = self.base / "invalid-config-parent"
+        parent.mkdir()
+        configured = parent / "config.json"
+        invalid = onevoke_config.default_config()
+        invalid["schema_version"] = 999
+        configured.write_text(json.dumps(invalid), encoding="utf-8")
+        before = self.acl_text(configured)
+        self.assertIn("(I)", before, before)
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ):
+            with self.assertRaises(onevoke_config.ConfigError):
+                onevoke_config.load_config()
+
+        after = self.acl_text(configured)
+        self.assertEqual(before, after)
+
+    def test_config_save_creates_private_children_without_tightening_ancestor(self) -> None:
+        ancestor = self.base / "existing-config-ancestor"
+        ancestor.mkdir()
+        before = self.acl_text(ancestor)
+        self.assertIn("(I)", before, before)
+        configured = ancestor / "new-one" / "new-two" / "config.json"
+        original_write = onevoke_fs._write_handle
+        checked_private_before_write: list[Path] = []
+
+        def write_after_acl(handle, path, data):
+            self.assert_private_acl(path)
+            checked_private_before_write.append(path)
+            return original_write(handle, path, data)
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ), mock.patch.object(
+            onevoke_fs, "_write_handle", side_effect=write_after_acl
+        ):
+            onevoke_config.save_config(onevoke_config.default_config())
+            loaded = onevoke_config.load_config()
+
+        self.assertFalse(loaded["welcome_complete"])
+        self.assertEqual(before, self.acl_text(ancestor))
+        self.assert_private_acl(ancestor / "new-one")
+        self.assert_private_acl(ancestor / "new-one" / "new-two")
+        self.assert_private_acl(configured)
+        self.assertEqual(1, len(checked_private_before_write))
+
+    def test_private_creations_apply_acl_before_open_returns(self) -> None:
+        original_open = onevoke_fs._open_relative_handle
+        observed: list[tuple[Path, str]] = []
+
+        def inspect_created_acl(parent_handle, name, path, **kwargs):
+            handle = original_open(parent_handle, name, path, **kwargs)
+            kind = kwargs.get("private_creation")
+            if kind is not None:
+                self.assertEqual(onevoke_fs._CREATE_NEW, kwargs.get("creation"))
+                self.assertEqual(kind, kwargs.get("expected"))
+                # 此 hook 位于 NtCreateFile 返回后、调用方后验 tighten 前.
+                self.assert_private_acl(path)
+                observed.append((path, kind))
+            return handle
+
+        private_directory = self.root / "private-one" / "private-two"
+        append_file = self.root / "todo" / "append.log"
+        atomic_file = self.root / "todo" / "atomic.md"
+        published = self.root / "backlog" / "20260824-private-create-task"
+        config_ancestor = self.base / "creation-config-ancestor"
+        config_ancestor.mkdir()
+        configured = config_ancestor / "new-one" / "config.json"
+
+        with mock.patch.object(
+            onevoke_fs, "_open_relative_handle", side_effect=inspect_created_acl
+        ):
+            onevoke_fs.ensure_private_directory_nofollow(
+                self.root, private_directory
+            )
+            with onevoke_fs.open_private_append_file_nofollow(
+                self.root, append_file
+            ) as stream:
+                stream.write(b"append\n")
+            onevoke_fs.write_text_atomic_nofollow(
+                self.root, atomic_file, "atomic\n", replace=False
+            )
+            onevoke_fs.create_directory_with_text_file_nofollow(
+                self.root, published, "spec.md", "private\n"
+            )
+            with mock.patch.dict(
+                os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+            ):
+                onevoke_config.save_config(onevoke_config.default_config())
+
+        observed_kinds = {kind for _, kind in observed}
+        self.assertEqual({"file", "directory"}, observed_kinds)
+        self.assertIn((private_directory.parent, "directory"), observed)
+        self.assertIn((private_directory, "directory"), observed)
+        self.assertIn((append_file, "file"), observed)
+        self.assertIn((config_ancestor / "new-one", "directory"), observed)
+        self.assertTrue(
+            any(
+                path.parent == atomic_file.parent
+                and path.name.startswith(f".{atomic_file.name}.")
+                and path.name.endswith(".tmp")
+                and kind == "file"
+                for path, kind in observed
+            )
+        )
+        self.assertTrue(
+            any(
+                path.parent == published.parent
+                and path.name.startswith(f".{published.name}.")
+                and path.name.endswith(".tmp")
+                and kind == "directory"
+                for path, kind in observed
+            )
+        )
+        self.assertTrue(
+            any(
+                path.name == "spec.md"
+                and path.parent.name.startswith(f".{published.name}.")
+                and kind == "file"
+                for path, kind in observed
+            )
+        )
+        self.assertTrue(
+            any(
+                path.parent == configured.parent
+                and path.name.startswith(f".{configured.name}.")
+                and path.name.endswith(".tmp")
+                and kind == "file"
+                for path, kind in observed
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires CREATE_NEW"):
+            onevoke_fs._open_relative_handle(
+                0,
+                "unused",
+                self.base / "unused",
+                access=onevoke_fs._FILE_READ_ATTRIBUTES,
+                creation=onevoke_fs._OPEN_EXISTING,
+                expected="file",
+                private_creation="file",
+            )
+
+    def test_config_load_hardens_the_same_open_stream(self) -> None:
+        parent = self.base / "same-handle-config-parent"
+        parent.mkdir()
+        configured = parent / "config.json"
+        configured.write_text(
+            json.dumps(onevoke_config.default_config()), encoding="utf-8"
+        )
+        original_open = onevoke_config.open_private_regular_file_if_exists_nofollow
+        original_tighten = onevoke_config.tighten_private_open_file_permissions
+        yielded: list[object] = []
+        tightened: list[object] = []
+
+        @contextlib.contextmanager
+        def capture_stream(root, path):
+            with original_open(root, path) as stream:
+                yielded.append(stream)
+                yield stream
+
+        def assert_same_open_stream(stream, path):
+            self.assertIs(stream, yielded[-1])
+            self.assertFalse(stream.closed)
+            tightened.append(stream)
+            return original_tighten(stream, path)
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ), mock.patch.object(
+            onevoke_config,
+            "open_private_regular_file_if_exists_nofollow",
+            side_effect=capture_stream,
+        ), mock.patch.object(
+            onevoke_config,
+            "tighten_private_open_file_permissions",
+            side_effect=assert_same_open_stream,
+        ):
+            loaded = onevoke_config.load_config()
+
+        self.assertFalse(loaded["welcome_complete"])
+        self.assertEqual(1, len(yielded))
+        self.assertEqual(yielded, tightened)
+        self.assertTrue(yielded[0].closed)
+
+    def test_config_directory_acl_failure_removes_child_and_releases_handle(self) -> None:
+        ancestor = self.base / "acl-failure-ancestor"
+        ancestor.mkdir()
+        new_directory = ancestor / "new-one"
+        configured = new_directory / "nested" / "config.json"
+        original_tighten = onevoke_fs._tighten_private_handle
+        failures = 0
+
+        def fail_new_directory(handle, path, *, expected):
+            nonlocal failures
+            if path == new_directory:
+                failures += 1
+                raise OSError("forced directory ACL failure")
+            return original_tighten(handle, path, expected=expected)
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ), mock.patch.object(
+            onevoke_fs, "_tighten_private_handle", side_effect=fail_new_directory
+        ):
+            with self.assertRaisesRegex(OSError, "forced directory ACL failure"):
+                onevoke_config.save_config(onevoke_config.default_config())
+
+        self.assertEqual(1, failures)
+        self.assertFalse(new_directory.exists())
+        moved_ancestor = self.base / "acl-failure-ancestor-moved"
+        ancestor.rename(moved_ancestor)
+        moved_ancestor.rename(ancestor)
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ):
+            onevoke_config.save_config(onevoke_config.default_config())
+
+        self.assert_private_acl(new_directory)
+        self.assert_private_acl(new_directory / "nested")
+        self.assert_private_acl(configured)
+
+    def test_config_temp_acl_failure_writes_and_publishes_nothing(self) -> None:
+        parent = self.base / "temp-acl-failure-parent"
+        parent.mkdir()
+        configured = parent / "config.json"
+        original_bytes = b'{"existing": true}\n'
+        configured.write_bytes(original_bytes)
+        original_acl = self.acl_text(configured)
+        original_tighten = onevoke_fs._tighten_private_handle
+        original_write = onevoke_fs._write_handle
+        writes: list[Path] = []
+        failures = 0
+
+        def fail_temp_file(handle, path, *, expected):
+            nonlocal failures
+            if path.parent == parent and path.name.startswith(".config.json."):
+                failures += 1
+                raise OSError("forced temp ACL failure")
+            return original_tighten(handle, path, expected=expected)
+
+        def record_write(handle, path, data):
+            writes.append(path)
+            return original_write(handle, path, data)
+
+        with mock.patch.dict(
+            os.environ, {"ONEVOKE_CONFIG": str(configured)}, clear=False
+        ), mock.patch.object(
+            onevoke_fs, "_tighten_private_handle", side_effect=fail_temp_file
+        ), mock.patch.object(
+            onevoke_fs, "_write_handle", side_effect=record_write
+        ):
+            with self.assertRaisesRegex(OSError, "forced temp ACL failure"):
+                onevoke_config.save_config(onevoke_config.default_config())
+
+        self.assertEqual(1, failures)
+        self.assertEqual([], writes)
+        self.assertEqual(original_bytes, configured.read_bytes())
+        self.assertEqual(original_acl, self.acl_text(configured))
+        self.assertEqual([configured], list(parent.iterdir()))
+
+    def test_config_relative_override_uses_current_directory_boundary(self) -> None:
+        relative = Path("relative-config") / "nested" / "config.json"
+        configured = self.base / relative
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(self.base)
+            with mock.patch.dict(
+                os.environ, {"ONEVOKE_CONFIG": str(relative)}, clear=False
+            ):
+                onevoke_config.save_config(onevoke_config.default_config())
+                loaded = onevoke_config.load_config()
+        finally:
+            os.chdir(previous_cwd)
+
+        self.assertFalse(loaded["welcome_complete"])
+        self.assert_private_acl(configured)
 
     def test_large_report_validation_uses_verified_handle_reader(self) -> None:
         entry, text, report = self.make_completed_large_entry(
