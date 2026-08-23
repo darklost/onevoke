@@ -44,5 +44,5 @@
 - 主树 `git merge --ff-only` 前按「本地改动保护」暂存并在操作后恢复主树中的未提交改动. 主树 ff 因本地领先或分叉失败时只报告未同步的具体原因和恢复办法, 不阻塞清理. 禁 reset, 丢弃或提交主树里的用户改动.
 - 用 PR 时先 push 当前任务分支. PR 必须说明改了什么, 为何改, 如何验证; 可见 UI 变更附截图; 测试或快照变更列实际命令. 等 CI 全通过后, 按仓库策略 squash 或 rebase 合并, 仓库未指定默认 squash. 仓库未配 CI 先问用户, 不自动合并.
 - 清理的唯一前置是任务改动已进入 `develop`: 直接集成用 `git merge-base --is-ancestor <最终任务 commit> <origin/develop 或本地 develop>` 判定, 远端路径先 fetch; PR 路径因 squash 或 rebase 合并会重写 commit, 改以 PR 已标记为 merged 且目标分支是 `develop` 为准. 判不出来或判定为否时不清理, 保留 worktree 和分支并报告.
-- 满足清理前置后, 先跑 `~/.local/bin/merge-worktree-memory.py --source <worktree-path>`. 源 worktree 没有 `.memsearch/memory` (未装 memsearch, 或尚未产生记忆) 时该命令是空操作并以 0 退出, 照常执行, 不跳过也不据此报错; 来源在合并期间仍被写入且无法证明稳定时, 脚本必须失败. 脚本失败则保留 worktree 和分支.
+- 满足清理前置后, POSIX 先跑 `~/.local/bin/merge-worktree-memory.py --source <worktree-path>`, 原生 Windows 的自动化在 PowerShell 跑 `py -3 -X utf8 ~/.local/bin/merge-worktree-memory.py --source <worktree-path>`; 人工输入普通参数时也可用 `.cmd` 包装入口. 两条路径进入同一 Python 实现; 合并用平台独占锁保护, POSIX 为 `flock`, Windows 为 `LockFileEx`, 不得无锁执行. 源 worktree 没有 `.memsearch/memory` (未装 memsearch, 或尚未产生记忆) 时该命令是空操作并以 0 退出, 照常执行, 不跳过也不据此报错; 来源在合并期间仍被写入且无法证明稳定时, 脚本必须失败. 脚本失败则保留 worktree 和分支.
 - 脚本成功后, 删对应 worktree, 本地任务分支及仅为该 worktree 建的临时或预览 tag; 非本地集成还须删远端任务分支. 禁删正式发布 tag.
