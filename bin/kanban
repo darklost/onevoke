@@ -1124,6 +1124,11 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     config = effective_config(load_config())
     agent_name = args.agent or config["kanban_agent"]
     launcher = args.launcher or config["launcher"]
+    if os.name == "nt" and launcher in ("tmux", "tmux-session"):
+        raise KanbanError(t(
+            f"Windows 不支持 {launcher} 启动方式; 请使用 console 或 foreground",
+            f"Windows does not support the {launcher} launcher; use console or foreground",
+        ))
     agent = shutil.which(agent_name)
     if not agent:
         raise KanbanError(t(f"Agent 不在 PATH: {agent_name}", f"Agent is not in PATH: {agent_name}"))

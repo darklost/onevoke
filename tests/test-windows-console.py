@@ -141,6 +141,34 @@ class WindowsConsoleLauncherTest(unittest.TestCase):
         self.assertTrue(self.document.is_file())
         self.assertFalse((self.root / "working" / self.document.name).exists())
 
+    def assert_tmux_launcher_rejected(self, launcher: str | None) -> None:
+        popen = mock.Mock()
+        which = mock.Mock(return_value=r"C:\fake\codex.exe")
+        with (
+            mock.patch.object(self.kanban, "load_config", return_value=self.config),
+            mock.patch.object(self.kanban.shutil, "which", which),
+            mock.patch.object(self.kanban.subprocess, "Popen", popen),
+        ):
+            with self.assertRaises(self.kanban.KanbanError) as raised:
+                self.kanban.command_start(
+                    Namespace(task=self.task_id, agent=None, launcher=launcher), self.root
+                )
+
+        self.assertIn("Windows", str(raised.exception))
+        self.assertIn("console", str(raised.exception))
+        which.assert_not_called()
+        popen.assert_not_called()
+        self.assertTrue(self.document.is_file())
+        self.assertEqual(self.original, self.document.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / self.document.name).exists())
+
+    def test_windows_rejects_explicit_tmux_before_claiming_task(self) -> None:
+        self.assert_tmux_launcher_rejected("tmux")
+
+    def test_windows_rejects_configured_tmux_session_before_claiming_task(self) -> None:
+        self.config["launcher"] = "tmux-session"
+        self.assert_tmux_launcher_rejected(None)
+
 
 if __name__ == "__main__":
     unittest.main()

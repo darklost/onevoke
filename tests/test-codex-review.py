@@ -329,6 +329,19 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("spec path is not a readable file", result.stderr)
 
+    def test_windows_style_absolute_text_is_a_task_goal_on_posix(self) -> None:
+        task_goal = r"C:\release"
+
+        result = self.review(
+            str(self.repo), self.base, self.head, "PM", task_goal
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(
+            f"Authoritative task goal: {task_goal}",
+            self.stdin_log.read_text(encoding="utf-8"),
+        )
+
     def test_abbreviated_sha_is_rejected(self) -> None:
         result = self.review(
             str(self.repo), self.base[:8], self.head, "QA", "目标"

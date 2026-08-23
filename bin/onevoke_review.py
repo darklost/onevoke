@@ -490,7 +490,9 @@ def paths_overlap(first: Path, second: Path) -> bool:
 
 
 def looks_like_absolute_path(value: str) -> bool:
-    return Path(value).is_absolute() or PureWindowsPath(value).is_absolute()
+    return Path(value).is_absolute() or (
+        os.name == "nt" and PureWindowsPath(value).is_absolute()
+    )
 
 
 def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
