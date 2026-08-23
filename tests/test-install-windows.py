@@ -422,6 +422,92 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertEqual("Onevoke installed\n", result.stdout)
         self.assertNotIn("welcome did not complete", result.stderr)
 
+    def test_installer_skips_provider_location_python_after_set_location(self) -> None:
+        home = self.root / "provider-location-python-home"
+        home.mkdir(parents=True)
+        self.write_valid_config(
+            home,
+            welcome_complete=True,
+            language="en",
+        )
+        untrusted_directory = self.root / "provider-location-repository"
+        untrusted_directory.mkdir()
+        malicious_python = untrusted_directory / "python.exe"
+        shutil.copy2(sys.executable, malicious_python)
+        hook_directory = self.root / "python-hook"
+        hook_directory.mkdir()
+        marker = self.root / "malicious-python-ran"
+        (hook_directory / "sitecustomize.py").write_text(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "if Path(sys.executable).resolve() == "
+            "Path(os.environ['ONEVOKE_MALICIOUS_PYTHON']).resolve():\n"
+            "    Path(os.environ['ONEVOKE_MALICIOUS_MARKER']).write_text("
+            "'ran', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        isolated_path = os.pathsep.join(
+            (
+                str(untrusted_directory),
+                str(self.fake_bin),
+                str(Path(sys.executable).parent),
+            )
+        )
+        environment = self.install_env(
+            home,
+            PATH=isolated_path,
+            ONEVOKE_LANG="cn",
+            PYTHONPATH=str(hook_directory),
+            ONEVOKE_MALICIOUS_PYTHON=str(malicious_python),
+            ONEVOKE_MALICIOUS_MARKER=str(marker),
+            ONEVOKE_TEST_INSTALLER=str(INSTALLER),
+            ONEVOKE_TEST_PROVIDER_LOCATION=str(untrusted_directory),
+        )
+        malicious_probe = subprocess.run(
+            [str(malicious_python), "-X", "utf8", "-c", "pass"],
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, malicious_probe.returncode, malicious_probe.stderr)
+        self.assertTrue(marker.is_file(), "malicious Python probe did not run")
+        marker.unlink()
+        command = (
+            "Set-Location -LiteralPath $env:ONEVOKE_TEST_PROVIDER_LOCATION; "
+            "if ([Environment]::CurrentDirectory -eq "
+            "$ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path) { "
+            "throw 'test requires distinct process and provider locations' }; "
+            "& $env:ONEVOKE_TEST_INSTALLER"
+        )
+
+        result = subprocess.run(
+            [
+                str(POWERSHELL),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertFalse(marker.exists(), "provider-location python.exe was executed")
+        self.assertNotIn("welcome did not complete", result.stderr)
+
     def test_installer_invokes_absolute_welcome_with_explicit_language(self) -> None:
         project = self.root / "minimal project"
         (project / "bin").mkdir(parents=True)

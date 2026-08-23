@@ -43,9 +43,27 @@ function Get-PythonLaunchers {
   $launchers = @()
   $seenPaths = @{}
   foreach ($specification in $specifications) {
-    $currentDirectoryCandidate = [IO.Path]::GetFullPath(
-      (Join-Path ([Environment]::CurrentDirectory) $specification.Name)
-    )
+    $excludedCandidates = @{}
+    $currentDirectories = @([Environment]::CurrentDirectory)
+    try {
+      $providerDirectory = [string]$ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path
+      if (-not [string]::IsNullOrWhiteSpace($providerDirectory)) {
+        $currentDirectories += $providerDirectory
+      }
+    } catch {
+      # The Win32 process directory remains the fail-safe when no FileSystem
+      # provider location is available.
+    }
+    foreach ($currentDirectory in $currentDirectories) {
+      try {
+        $candidate = [IO.Path]::GetFullPath(
+          (Join-Path $currentDirectory $specification.Name)
+        )
+        $excludedCandidates[$candidate.ToLowerInvariant()] = $true
+      } catch {
+        continue
+      }
+    }
     $commands = @(
       Get-Command $specification.Name -CommandType Application -All -ErrorAction SilentlyContinue
     )
@@ -57,7 +75,7 @@ function Get-PythonLaunchers {
       }
       $pathKey = $absolute.ToLowerInvariant()
       if (
-        $absolute.Equals($currentDirectoryCandidate, [StringComparison]::OrdinalIgnoreCase) -or
+        $excludedCandidates.ContainsKey($pathKey) -or
         -not [IO.File]::Exists($absolute) -or
         $seenPaths.ContainsKey($pathKey)
       ) {
