@@ -41,29 +41,33 @@ function Get-PythonLaunchers {
   )
 
   $launchers = @()
+  $seenPaths = @{}
   foreach ($specification in $specifications) {
-    $command = Get-Command $specification.Name -CommandType Application -ErrorAction SilentlyContinue |
-      Select-Object -First 1
-    if ($null -eq $command) {
-      continue
-    }
     $currentDirectoryCandidate = [IO.Path]::GetFullPath(
       (Join-Path ([Environment]::CurrentDirectory) $specification.Name)
     )
-    try {
-      $absolute = [IO.Path]::GetFullPath([string]$command.Source)
-    } catch {
-      continue
-    }
-    if (
-      $absolute.Equals($currentDirectoryCandidate, [StringComparison]::OrdinalIgnoreCase) -or
-      -not [IO.File]::Exists($absolute)
-    ) {
-      continue
-    }
-    $launchers += [PSCustomObject]@{
-      Path = $absolute
-      Arguments = @($specification.Arguments)
+    $commands = @(
+      Get-Command $specification.Name -CommandType Application -All -ErrorAction SilentlyContinue
+    )
+    foreach ($command in $commands) {
+      try {
+        $absolute = [IO.Path]::GetFullPath([string]$command.Source)
+      } catch {
+        continue
+      }
+      $pathKey = $absolute.ToLowerInvariant()
+      if (
+        $absolute.Equals($currentDirectoryCandidate, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [IO.File]::Exists($absolute) -or
+        $seenPaths.ContainsKey($pathKey)
+      ) {
+        continue
+      }
+      $seenPaths[$pathKey] = $true
+      $launchers += [PSCustomObject]@{
+        Path = $absolute
+        Arguments = @($specification.Arguments)
+      }
     }
   }
   return $launchers

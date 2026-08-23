@@ -63,6 +63,7 @@ class WindowsInstallerTest(unittest.TestCase):
         *arguments: str,
         input_text: str | None = None,
         installer: Path = INSTALLER,
+        working_directory: Path | None = None,
         **environment: str,
     ) -> subprocess.CompletedProcess[str]:
         command = [
@@ -84,6 +85,8 @@ class WindowsInstallerTest(unittest.TestCase):
             "capture_output": True,
             "check": False,
         }
+        if working_directory is not None:
+            kwargs["cwd"] = working_directory
         if input_text is None:
             kwargs["stdin"] = subprocess.DEVNULL
         else:
@@ -379,6 +382,38 @@ class WindowsInstallerTest(unittest.TestCase):
 
         result = self.run_installer(
             home,
+            PATH=isolated_path,
+            ONEVOKE_LANG="cn",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertNotIn("welcome did not complete", result.stderr)
+
+    def test_installer_skips_current_directory_python_and_tries_next(self) -> None:
+        home = self.root / "current-directory-python-home"
+        home.mkdir(parents=True)
+        self.write_valid_config(
+            home,
+            welcome_complete=True,
+            language="en",
+        )
+        untrusted_directory = self.root / "untrusted-repository"
+        untrusted_directory.mkdir()
+        where_executable = shutil.which("where.exe")
+        self.assertIsNotNone(where_executable)
+        shutil.copy2(where_executable, untrusted_directory / "python.exe")
+        isolated_path = os.pathsep.join(
+            (
+                str(untrusted_directory),
+                str(self.fake_bin),
+                str(Path(sys.executable).parent),
+            )
+        )
+
+        result = self.run_installer(
+            home,
+            working_directory=untrusted_directory,
             PATH=isolated_path,
             ONEVOKE_LANG="cn",
         )
