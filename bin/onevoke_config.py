@@ -378,7 +378,18 @@ def load_config(*, missing_ok: bool = True) -> dict[str, Any]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ConfigError(language_text(f"读取配置失败: {path}: {error}", f"failed to read config: {path}: {error}")) from error
-    return validate_config(raw)
+    validated = validate_config(raw)
+    if os.name == "nt":
+        try:
+            # 旧版本可能留下了继承父目录 ACL 的有效配置。只在内容
+            # 通过 schema 校验后执行原地权限迁移，且失败必须阻断配置使用。
+            tighten_private_file_permissions(path)
+        except OSError as error:
+            raise ConfigError(language_text(
+                f"收紧配置文件权限失败: {path}: {error}",
+                f"failed to tighten config file permissions: {path}: {error}",
+            )) from error
+    return validated
 
 
 def effective_config(config: dict[str, Any] | None = None) -> dict[str, Any]:

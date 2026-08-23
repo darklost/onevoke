@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +90,50 @@ class WindowsInstallerTest(unittest.TestCase):
             kwargs["input"] = input_text
         return subprocess.run(command, **kwargs)
 
+    def assert_private_acl(self, path: Path) -> None:
+        acl = subprocess.run(
+            ["icacls.exe", str(path)],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, acl.returncode, acl.stderr)
+        self.assertNotIn("(I)", acl.stdout, acl.stdout)
+        self.assertEqual(1, acl.stdout.count("(F)"), acl.stdout)
+
+    def write_valid_config(
+        self,
+        home: Path,
+        *,
+        welcome_complete: bool,
+        language: str,
+    ) -> Path:
+        path = Path(self.install_env(home)["ONEVOKE_CONFIG"])
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": welcome_complete,
+                    "kanban_agent": "codex",
+                    "launcher": "console",
+                    "reviewers": {
+                        "PM": "codex",
+                        "CSA": "codex",
+                        "Hacker": "codex",
+                        "QA": "codex",
+                    },
+                    "memsearch": {"enabled": False},
+                    "language": language,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return path
+
     def test_installer_copies_payload_keeps_then_removes_legacy_entries(self) -> None:
         home = self.root / "install-home"
         installed_bin = home / ".local" / "bin"
@@ -162,6 +207,97 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertTrue((user_profile / ".agents" / "ONEVOKE-AGENTS.md").is_file())
         self.assertFalse((unrelated_home / ".local").exists())
         self.assertFalse((unrelated_home / ".agents").exists())
+
+    def test_valid_legacy_config_is_migrated_to_private_acl_when_loaded(self) -> None:
+        home = self.root / "legacy-config-home"
+        installed = self.run_installer(home)
+        self.assertEqual(0, installed.returncode, installed.stderr)
+
+        config_path = self.write_valid_config(
+            home,
+            welcome_complete=True,
+            language="cn",
+        )
+        reset_acl = subprocess.run(
+            ["icacls.exe", str(config_path), "/reset"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, reset_acl.returncode, reset_acl.stderr)
+        inherited_acl = subprocess.run(
+            ["icacls.exe", str(config_path)],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, inherited_acl.returncode, inherited_acl.stderr)
+        self.assertIn("(I)", inherited_acl.stdout, inherited_acl.stdout)
+
+        loaded = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-X",
+                "utf8",
+                str(home / ".local" / "bin" / "onevoke"),
+                "config",
+                "--json",
+            ],
+            env=self.install_env(home),
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, loaded.returncode, loaded.stderr)
+        self.assertTrue(json.loads(loaded.stdout)["welcome_complete"])
+        self.assert_private_acl(config_path)
+
+    def test_config_acl_migration_failure_is_explicit(self) -> None:
+        home = self.root / "acl-failure-home"
+        installed = self.run_installer(home)
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        self.write_valid_config(
+            home,
+            welcome_complete=False,
+            language="en",
+        )
+        installed_bin = home / ".local" / "bin"
+        probe = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(installed_bin)!r})\n"
+            "import onevoke_config as config\n"
+            "def denied(path):\n"
+            "    raise OSError('acl denied')\n"
+            "config.tighten_private_file_permissions = denied\n"
+            "try:\n"
+            "    config.load_config()\n"
+            "except config.ConfigError as error:\n"
+            "    print(error)\n"
+            "else:\n"
+            "    raise SystemExit('load_config accepted an ACL migration failure')\n"
+        )
+
+        failed = subprocess.run(
+            [sys.executable, "-B", "-X", "utf8", "-c", probe],
+            env=self.install_env(home, ONEVOKE_LANG="en"),
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, failed.returncode, failed.stderr)
+        self.assertIn("failed to tighten config file permissions", failed.stdout)
+        self.assertIn("acl denied", failed.stdout)
 
     def test_installer_preflights_all_targets_before_writing(self) -> None:
         home = self.root / "bad-target-home"

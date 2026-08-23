@@ -177,6 +177,20 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
         self.assertNotIn("(I)", acl.stdout, acl.stdout)
         self.assertEqual(1, acl.stdout.count("(F)"), acl.stdout)
 
+    def make_completed_large_entry(self, task_id: str):
+        task = self.root / "working" / task_id
+        task.mkdir()
+        text = self.kanban.render_contract("Windows large task", "chore").replace(
+            "- 结果:\n", "- 结果: completed\n", 1
+        )
+        spec = task / "spec.md"
+        spec.write_text(text, encoding="utf-8")
+        return (
+            self.kanban.Entry(task_id, "working", task, spec, "large"),
+            text,
+            task / "report.md",
+        )
+
     def test_read_write_and_move_use_verified_handles(self) -> None:
         source = self.root / "todo" / "20260823-safe-task.md"
         source.write_bytes(b"old\n")
@@ -274,6 +288,69 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
             )
 
         self.assertEqual("do not touch\n", outside_document.read_text(encoding="utf-8"))
+
+    def test_large_report_validation_uses_verified_handle_reader(self) -> None:
+        entry, text, report = self.make_completed_large_entry(
+            "20260823-report-helper-task"
+        )
+
+        with mock.patch.object(
+            self.kanban,
+            "read_regular_file_nofollow",
+            return_value=b"verified report\n",
+        ) as reader:
+            self.kanban.validate_target(entry, "done", text)
+
+        reader.assert_called_once_with(self.root, report)
+
+        with mock.patch.object(
+            self.kanban,
+            "read_regular_file_nofollow",
+            side_effect=onevoke_fs.UnsafePathError("reparse point is not allowed"),
+        ):
+            with self.assertRaises(self.kanban.KanbanError) as raised:
+                self.kanban.validate_target(entry, "done", text)
+        self.assertIn("reparse point", str(raised.exception))
+
+    def test_large_report_validation_handles_missing_empty_and_invalid_utf8(self) -> None:
+        entry, text, report = self.make_completed_large_entry(
+            "20260823-report-content-task"
+        )
+
+        with self.assertRaises(self.kanban.KanbanError) as missing:
+            self.kanban.validate_target(entry, "done", text)
+        self.assertIn("report.md", str(missing.exception))
+
+        report.write_bytes(b" \r\n\t")
+        with self.assertRaises(self.kanban.KanbanError) as empty:
+            self.kanban.validate_target(entry, "done", text)
+        self.assertIn("report.md", str(empty.exception))
+
+        report.write_bytes(b"\xff\xfe\x80")
+        with self.assertRaises(self.kanban.KanbanError) as invalid_utf8:
+            self.kanban.validate_target(entry, "done", text)
+        self.assertIn("UTF-8", str(invalid_utf8.exception))
+
+    def test_large_report_file_symlink_is_rejected_without_touching_target(self) -> None:
+        entry, _, report = self.make_completed_large_entry(
+            "20260823-report-symlink-task"
+        )
+        outside_report = self.outside / "report.md"
+        outside_report.write_bytes(b"outside report must stay unchanged\n")
+        try:
+            report.symlink_to(outside_report)
+        except (NotImplementedError, OSError) as error:
+            self.skipTest(f"cannot create a Windows file symlink: {error}")
+
+        with self.assertRaises(self.kanban.KanbanError) as raised:
+            self.kanban.move_entry(entry, self.root, "done")
+
+        self.assertIn("reparse point", str(raised.exception))
+        self.assertEqual(
+            b"outside report must stay unchanged\n", outside_report.read_bytes()
+        )
+        self.assertTrue(entry.path.exists())
+        self.assertFalse((self.root / "done" / entry.task_id).exists())
 
     def test_move_rejects_junction_entry_and_preserves_outside_directory(self) -> None:
         outside_document = self.outside / "spec.md"

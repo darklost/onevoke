@@ -625,7 +625,43 @@ def validate_target(entry: Entry, target_state: str, text: str) -> None:
                 raise KanbanError(t("小任务移入 done 前必须填写完成总结", "Complete the summary before moving a small task to done"))
         else:
             report = entry.path / "report.md"
-            if not report.is_file() or not report.read_text(encoding="utf-8").strip():
+            if os.name == "nt":
+                try:
+                    report_data = read_regular_file_nofollow(
+                        board_root_from_entry(entry), report
+                    )
+                except UnsafePathError as error:
+                    raise KanbanError(t(
+                        f"大任务 report.md 不得是符号链接/重解析点且必须是普通文件: {error}",
+                        f"Large-task report.md must not be a symlink/reparse point and must be a regular file: {error}",
+                    )) from error
+                except OSError as error:
+                    error_code = getattr(error, "winerror", None)
+                    if error_code is None:
+                        error_code = getattr(error, "errno", None)
+                    if isinstance(error, FileNotFoundError) or error_code in (2, 3):
+                        raise KanbanError(t(
+                            "大任务移入 done 前必须完成 report.md",
+                            "Complete report.md before moving a large task to done",
+                        )) from error
+                    raise KanbanError(t(
+                        f"无法读取大任务 report.md: {error}",
+                        f"Cannot read large-task report.md: {error}",
+                    )) from error
+                try:
+                    report_text = report_data.decode("utf-8")
+                except UnicodeError as error:
+                    raise KanbanError(t(
+                        f"大任务 report.md 不是有效 UTF-8: {report}",
+                        f"Large-task report.md is not valid UTF-8: {report}",
+                    )) from error
+                report_complete = bool(report_text.strip())
+            else:
+                report_complete = (
+                    report.is_file()
+                    and bool(report.read_text(encoding="utf-8").strip())
+                )
+            if not report_complete:
                 raise KanbanError(t("大任务移入 done 前必须完成 report.md", "Complete report.md before moving a large task to done"))
     elif target_state == "archived":
         result = result_from(text)

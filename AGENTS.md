@@ -22,7 +22,7 @@
 - `bin/kanban` 是 Python 3 CLI 的唯一实现入口, 包含看板定位、任务校验、状态迁移和命令解析; `bin/kanban.cmd` 是 Windows 包装入口. `bin/kanban_web.py` 与 `bin/kanban_tui.py` 分别封装只读 Web 和终端界面. `bin/onevoke` 负责首次引导、环境诊断、配置展示和 Reviewer 分发, `bin/onevoke.cmd` 是 Windows 包装入口.
 - `bin/onevoke_review.py` 是 Codex、Claude 与 Grok 共用的单一审核门禁实现, 集中维护 commit 校验、evidence、prompt 骨架、超时监督和 worktree 篡改检测; POSIX 的公开入口是 `bin/onevoke-review.sh`, Windows 的人工交互入口是 `bin/onevoke-review.cmd`, `onevoke review` 的 Windows 程序化分发直接进入该 Python 实现. 模型与推理档位按 环境变量 > Onevoke 配置 > 内置默认 解析, 配置读取失败时回落到内置默认, 不阻塞审核. 用户可见输出语言优先级为 `ONEVOKE_LANG_CLI` 标记的显式 `--lang` > 配置 > 环境变量. Codex 在目标 worktree 内以 `--sandbox read-only --ephemeral` 运行; Claude 在外部 runtime 目录以 `--permission-mode plan --tools Read,Grep,Glob --safe-mode --no-session-persistence` 运行; Grok 在外部 runtime 目录以 `--sandbox read-only --no-memory --no-subagents` 运行且只开放 `read_file,grep,list_dir`. Windows 上 Reviewer CLI 必须是原生 `.exe`, 禁执行 `.cmd`/`.bat`; Windows 适配不得改变隔离参数. 新增 reviewer 只扩展该实现的 agent 适配层, 不新增脚本.
 - `bin/onevoke_fs.py` 是跨平台安全文件边界. POSIX 继续使用 no-follow/openat 语义、`0600`/`0700` 和 `flock`; Windows 必须拒绝符号链接、junction 等所有 reparse point, 用已校验的 Win32 句柄完成普通文件读写、同边界原子替换与迁移, 用受保护 DACL 限制当前用户访问, 用 `LockFileEx` 实现阻塞式独占锁. 不得在 Windows 回落到未经句柄校验的 `Path.rename()`、继承 ACL 或无锁实现. `bin/merge-worktree-memory.py` 在集成后合并 worktree 的 memsearch 记忆, 清除合并结果中的非法 UTF-8 字节, 并通过该文件系统层加锁; Windows 由 `bin/merge-worktree-memory.cmd` 包装启动.
-- `tests/test-onevoke.py` 用临时 HOME 和伪终端覆盖 welcome、配置和 Reviewer 分发. `tests/test-kanban.py` 覆盖看板生命周期、POSIX launcher (含 `tmux-session` 的建/复用/退避/回滚)、安装及初始化, 并用伪终端覆盖 TUI 启动退出. `tests/test-merge-worktree-memory.py` 覆盖跨平台记忆合并; 三个 agent 的 POSIX 审核测试覆盖共用门禁. `tests/test-install-windows.py`, `tests/test-windows-console.py`, `tests/test-windows-fs.py`, `tests/test-windows-review.py`, `tests/test-windows-web.py` 分别覆盖 PowerShell 安装与 `.cmd` 入口、Windows console 领取/启动/PID/失败回滚、Win32 reparse/ACL/LockFileEx 文件安全、Windows 审核隔离/超时/篡改检测与分发、原生 Windows Web 的 UTF-8 HTTP 端到端流程.
+- `tests/test-onevoke.py` 用临时 HOME 和伪终端覆盖 welcome、配置和 Reviewer 分发. `tests/test-kanban.py` 覆盖看板生命周期、POSIX launcher (含 `tmux-session` 的建/复用/退避/回滚)、安装及初始化, 并用伪终端覆盖 TUI 启动退出. `tests/test-merge-worktree-memory.py` 覆盖跨平台记忆合并; 三个 agent 的 POSIX 审核测试覆盖共用门禁. `tests/test-install-windows.py`, `tests/test-windows-automation.py`, `tests/test-windows-console.py`, `tests/test-windows-fs.py`, `tests/test-windows-review.py`, `tests/test-windows-web.py` 分别覆盖 PowerShell 安装与 `.cmd` 入口、Windows 自动化文档的路径展开和 argv 边界、Windows console 领取/启动/PID/失败回滚、Win32 reparse/ACL/LockFileEx 文件安全、Windows 审核隔离/超时/篡改检测与分发、原生 Windows Web 的 UTF-8 HTTP 端到端流程.
 - 运行时创建的 `kanban/` 是本机共享数据, 不属于仓库源码, 不得提交.
 
 ## Build, Test, and Development Commands
@@ -51,11 +51,12 @@ sh -n install.sh && sh -n bin/onevoke-review.sh
 py -3 bin\kanban --help
 py -3 tests\test-merge-worktree-memory.py
 py -3 tests\test-install-windows.py
+py -3 tests\test-windows-automation.py
 py -3 tests\test-windows-console.py
 py -3 tests\test-windows-fs.py
 py -3 tests\test-windows-review.py
 py -3 tests\test-windows-web.py
-py -3 -m py_compile bin\onevoke bin\onevoke_config.py bin\onevoke_fs.py bin\onevoke_review.py bin\kanban bin\kanban_web.py bin\merge-worktree-memory.py tests\test-install-windows.py tests\test-windows-console.py tests\test-windows-fs.py tests\test-windows-review.py tests\test-windows-web.py
+py -3 -m py_compile bin\onevoke bin\onevoke_config.py bin\onevoke_fs.py bin\onevoke_review.py bin\kanban bin\kanban_web.py bin\merge-worktree-memory.py tests\test-install-windows.py tests\test-windows-automation.py tests\test-windows-console.py tests\test-windows-fs.py tests\test-windows-review.py tests\test-windows-web.py
 ```
 
 测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; 三个 POSIX 审核测试和 `tests/test-windows-review.py` 都用假 Codex/Claude/Grok 二进制驱动, 不调用真的 CLI, 也不产生网络请求. Windows 专项测试只在原生 Windows 运行, 其他平台会 skip; POSIX 的 pty/tmux 专项测试不作为 Windows 第一阶段门禁.
@@ -68,7 +69,7 @@ py -3 -m py_compile bin\onevoke bin\onevoke_config.py bin\onevoke_fs.py bin\onev
 
 Shell 脚本使用 2 空格缩进, `set -eu`, 引用所有变量展开, 错误信息写 stderr 并返回非零状态.
 
-PowerShell 脚本使用 `$ErrorActionPreference = "Stop"`, 字符串路径经 `-LiteralPath` 或 .NET 路径 API 传递, 用户可见错误写 stderr 并返回非零状态. `.cmd` 只作人工交互 shell 的 UTF-8 Python 启动包装, 不承载业务或安全门禁逻辑, 也不作为任意 argv 的程序调用边界; 自动化用显式 Python 解释器运行对应 Python 入口. 包装器在首个外部命令前禁用当前目录可执行文件搜索, 只用绝对 `where.exe` 从 `PATH` 找候选, 验证 Python 3 后再运行.
+PowerShell 脚本使用 `$ErrorActionPreference = "Stop"`, 字符串路径经 `-LiteralPath` 或 .NET 路径 API 传递, 用户可见错误写 stderr 并返回非零状态. `.cmd` 只作人工交互 shell 的 UTF-8 Python 启动包装, 不承载业务或安全门禁逻辑, 也不作为任意 argv 的程序调用边界; 含特殊字符的自动化必须用进程 API 的 argv 数组直接调用显式 Python 解释器和对应 Python 入口, 不得再经过 PowerShell/cmd 命令字符串. 包装器在首个外部命令前禁用当前目录可执行文件搜索, 只用绝对 `where.exe` 从 `PATH` 找候选, 验证 Python 3 后再运行.
 
 任务 ID 必须匹配 `YYYYMMDD-short-slug-task`; slug 仅使用小写 ASCII 字母、数字和连字符. 用户可见错误信息及规则文档沿用中文和 ASCII 标点. CLI、TUI、Web、`install.sh` 与 `install.ps1` 的用户可见输出默认中文; 语言优先级为 `--lang` > `config.json` 的 `language` > 环境变量 (`ONEVOKE_LANG`/`LC_ALL`/`LC_MESSAGES`/`LANG` 的 `en` 前缀选英文). `language` 可在 `onevoke welcome` 配置. Windows Python 和 `.cmd` 入口必须保持 UTF-8 输入输出, 不依赖活动代码页.
 
