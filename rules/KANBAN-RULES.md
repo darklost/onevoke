@@ -160,7 +160,8 @@ backlog -> todo -> working -> done -> archived
 3. 调整计划
 ```
 
-- 选 1 同时确认计划, 开发和看板流程, 不再确认开工. 单卡依次执行 `new`, 填卡, `pick`, `start`; 任务组一次创建, 填完并 `pick` 全部卡片, 再由编排 Agent 按依赖启动, 不逐卡确认.
+- 选 1 同时确认计划, 开发和看板流程, 不再确认开工. 讨论 Agent 必须把实现委派给新执行 Agent: 单卡依次执行 `new`, 填卡, `pick`, `start`; 任务组一次创建, 填完并 `pick` 全部卡片, 再由编排 Agent 按依赖执行 `start`, 不逐卡确认. 未经用户明确覆盖时, `start` 使用 Onevoke 配置的 launcher; 配置为 `tmux` 时在新 window 中启动执行 Agent.
+- 选 1 禁止改用 `kanban move <task-id> working` 领取, 也禁止讨论 Agent 在 `start` 启动成功后继续实现该任务; 单卡和任务组分别按「领取, 启动与协调」和「任务组编排」移交后续责任.
 - 选 2 按项目规则直接实施, 不建卡; 选 3 继续调整, 不建卡或启动.
 - 已由 `kanban start` 拉起, 已指定现有卡片, 纯问答, 只读排查, 纯文档或配置微调, 发布部署和合入操作, 不提供以上选项.
 - `kanban new` 只在 `backlog/` 创建模板; 执行它的 Agent 须立即用已确认内容填完契约, 不留 `<填写>`. 只有用户确认开发或明确授权的协调 Agent 才能移入 `todo/`; Agent 建议不得冒充用户决策.
@@ -174,11 +175,11 @@ backlog -> todo -> working -> done -> archived
 # 委派给新执行 Agent: start 原子领取并启动
 kanban start [--agent codex|claude|grok] [--launcher tmux|tmux-session|foreground] <task-id>
 
-# 当前 Agent 自己执行: 只迁移, 随后手工填写负责人和开始时间
+# 用户明确要求当前 Agent 执行既有任务卡: 只迁移, 随后手工填写负责人和开始时间
 kanban move <task-id> working
 ```
 
-- 不得先 `move ... working` 再 `start`; `start` 只接受 `todo` 卡. 同文件系统上的入口迁移就是领取原语, 只有迁移成功者取得任务; 失败后重查, 不建替代卡, 不另加 lock 服务, 数据库或 ID 分配器.
+- `kanban move <task-id> working` 仅适用于用户明确要求当前 Agent 执行既有任务卡; 选择「确认计划并走看板」时必须用 `start`. 不得先 `move ... working` 再 `start`; `start` 只接受 `todo` 卡. 同文件系统上的入口迁移就是领取原语, 只有迁移成功者取得任务; 失败后重查, 不建替代卡, 不另加 lock 服务, 数据库或 ID 分配器.
 - `start` 在启动前检查 Agent, launcher 和 TTY; `tmux` 要求已在 tmux session 内, `tmux-session` 只要求 tmux 可用并在此时选定项目专属 session 名, `foreground` 要求三个标准流都是 TTY. 前置检查失败不领取; 创建进程, tmux session 或 tmux window 失败时恢复文档并迁回 `todo/`. 进程创建成功后即算启动成功, 后续退出不自动回滚.
 - `start` 的 prompt 只传任务 ID 和固定要求. 执行 Agent 先读本规则, 卡片和项目规则, 再准备工作区并填写任务分支.
 - 领取后只有执行负责人可修改或迁移 `working/` 入口; 协调和编排 Agent 只读督办. 明确交接后由新负责人接管, 不得并发写.
