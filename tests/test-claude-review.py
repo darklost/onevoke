@@ -5,6 +5,7 @@
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -31,6 +32,10 @@ fi
 if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then
     sleep 30
 fi
+if [ -n "${FAKE_CLAUDE_DELAYED_TAMPER:-}" ]; then
+    (sleep 1; printf '%s\n' 'escaped' > "$FAKE_CLAUDE_DELAYED_TAMPER") &
+    printf '%s\n' "$!" > "$FAKE_CLAUDE_CHILD_PID"
+fi
 if [ -n "${FAKE_CLAUDE_FAIL:-}" ]; then
     printf '%s\\n' 'fake claude failure' >&2
     exit 3
@@ -45,6 +50,7 @@ exit 0
 """
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX shell wrapper test")
 class ClaudeReviewGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -63,6 +69,7 @@ class ClaudeReviewGateTest(unittest.TestCase):
         self.cwd_log = self.root / "cwd.log"
         self.home_log = self.root / "home.log"
         self.spec_snapshot_log = self.root / "spec-snapshot.log"
+        self.child_pid_log = self.root / "child.pid"
 
         self.git("init", "-q", "-b", "main")
         self.base = self.commit("a.txt", "base\n", "基线")
@@ -85,6 +92,7 @@ class ClaudeReviewGateTest(unittest.TestCase):
             FAKE_CLAUDE_CWD=str(self.cwd_log),
             FAKE_CLAUDE_HOME=str(self.home_log),
             FAKE_CLAUDE_SPEC_SNAPSHOT_LOG=str(self.spec_snapshot_log),
+            FAKE_CLAUDE_CHILD_PID=str(self.child_pid_log),
         )
 
     def tearDown(self) -> None:
@@ -220,6 +228,15 @@ class ClaudeReviewGateTest(unittest.TestCase):
         result = self.default_review(FAKE_CLAUDE_TAMPER=str(self.repo / "injected.txt"))
         self.assertEqual(2, result.returncode)
         self.assertIn("modified the target worktree", result.stderr)
+
+    def test_delayed_background_tamper_is_rejected_and_collected(self) -> None:
+        target = self.repo / "escaped.txt"
+        result = self.default_review(FAKE_CLAUDE_DELAYED_TAMPER=str(target))
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("left background child processes", result.stderr)
+        self.assertTrue(self.child_pid_log.is_file())
+        time.sleep(1.1)
+        self.assertFalse(target.exists())
 
     def test_clean_review_returns_the_report(self) -> None:
         result = self.default_review(FAKE_CLAUDE_REPORT="QA-1 没有发现问题")

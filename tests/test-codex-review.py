@@ -45,6 +45,7 @@ exit 0
 """
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX shell wrapper test")
 class CodexReviewGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -328,6 +329,19 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("spec path is not a readable file", result.stderr)
 
+    def test_windows_style_absolute_text_is_a_task_goal_on_posix(self) -> None:
+        task_goal = r"C:\release"
+
+        result = self.review(
+            str(self.repo), self.base, self.head, "PM", task_goal
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(
+            f"Authoritative task goal: {task_goal}",
+            self.stdin_log.read_text(encoding="utf-8"),
+        )
+
     def test_abbreviated_sha_is_rejected(self) -> None:
         result = self.review(
             str(self.repo), self.base[:8], self.head, "QA", "目标"
@@ -458,19 +472,11 @@ class CodexReviewGateTest(unittest.TestCase):
         argv = self.argv_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual("env-model", argv[argv.index("--model") + 1])
 
-    def test_malformed_review_model_output_falls_back_to_builtin_default(self) -> None:
-        """配置查询输出不是恰好两行时按读取失败处理, 回落内置默认."""
-        fake_bin = self.root / "fake-python-bin"
-        fake_bin.mkdir()
-        fake_python = fake_bin / "python3"
-        fake_python.write_text(
-            "#!/bin/sh\nprintf 'cfg-model\\nmedium\\n\\n'\n", encoding="utf-8"
-        )
-        fake_python.chmod(0o755)
+    def test_malformed_model_config_falls_back_to_builtin_default(self) -> None:
+        """Python 核心读取到损坏配置时回落内置默认, 不阻塞审核."""
+        Path(self.env["ONEVOKE_CONFIG"]).write_text("{invalid", encoding="utf-8")
 
-        result = self.default_review(
-            PATH=f"{fake_bin}{os.pathsep}{self.env['PATH']}"
-        )
+        result = self.default_review()
 
         self.assertEqual(0, result.returncode, result.stderr)
         argv = self.argv_log.read_text(encoding="utf-8").splitlines()

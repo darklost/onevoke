@@ -40,11 +40,14 @@ t = language_text
 argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 
 
+REVIEW_ENTRYPOINT = "onevoke-review.cmd" if os.name == "nt" else "onevoke-review.sh"
+REVIEW_IMPLEMENTATION = Path(__file__).resolve().with_name("onevoke_review.py")
+MERGE_ENTRYPOINT = "merge-worktree-memory.cmd" if os.name == "nt" else "merge-worktree-memory.py"
 COMMANDS = (
     "onevoke",
     "kanban",
-    "onevoke-review.sh",
-    "merge-worktree-memory.py",
+    REVIEW_ENTRYPOINT,
+    MERGE_ENTRYPOINT,
 )
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
@@ -102,13 +105,20 @@ def agent_usable(state: dict[str, str | bool | None]) -> bool:
     return bool(state.get("path")) and state.get("version") not in (None, VERSION_FAILED)
 
 
+def windows_native_executable(command: str) -> bool:
+    """Programmatic Windows Agent calls require a native argv boundary."""
+    return os.name != "nt" or Path(command).suffix.lower() == ".exe"
+
+
 def find_agents() -> dict[str, dict[str, str | bool | None]]:
     agents: dict[str, dict[str, str | bool | None]] = {}
     for name in EXECUTION_AGENTS:
         command = shutil.which(name)
+        native = bool(command and windows_native_executable(command))
         agents[name] = {
             "path": command,
-            "version": agent_version(command) if command else None,
+            "version": agent_version(command) if command and native else None,
+            "unsafe_batch": bool(command and not native),
             "execution": True,
             "review": name in REVIEW_AGENTS,
             "memsearch": name in ("codex", "claude"),
@@ -288,22 +298,25 @@ def print_doctor() -> bool:
         configured_launcher = effective_config(load_config())["launcher"]
     except ConfigError:
         configured_launcher = None
-    tmux = shutil.which("tmux")
-    if tmux:
-        success(f"tmux: {tmux}")
-        if not os.environ.get("TMUX") and configured_launcher != "tmux-session":
-            print(
-                t(
-                    f"[-] tmux: 已安装但当前不在 session. 启动: {TMUX_SESSION_HINT}",
-                    f"[-] tmux: installed, but not in a session. Start one with: {TMUX_SESSION_HINT}",
-                ),
-                file=sys.stderr,
-            )
+    if os.name == "nt":
+        success(t("Windows 独立控制台启动器: 可用", "Windows console launcher: available"))
     else:
-        print(t(
-            "[-] tmux: 未安装; 可在 welcome 中选择前台启动模式",
-            "[-] tmux: not installed; welcome can select foreground mode",
-        ), file=sys.stderr)
+        tmux = shutil.which("tmux")
+        if tmux:
+            success(f"tmux: {tmux}")
+            if not os.environ.get("TMUX") and configured_launcher != "tmux-session":
+                print(
+                    t(
+                        f"[-] tmux: 已安装但当前不在 session. 启动: {TMUX_SESSION_HINT}",
+                        f"[-] tmux: installed, but not in a session. Start one with: {TMUX_SESSION_HINT}",
+                    ),
+                    file=sys.stderr,
+                )
+        else:
+            print(t(
+                "[-] tmux: 未安装; 可在 welcome 中选择前台启动模式",
+                "[-] tmux: not installed; welcome can select foreground mode",
+            ), file=sys.stderr)
 
     agents = find_agents()
     print(t("\nAgent 能力:", "\nAgent capabilities:"), file=sys.stderr)
@@ -317,6 +330,14 @@ def print_doctor() -> bool:
             success(
                 f"{AGENT_LABELS[name]}: {state['version']} "
                 f"({', '.join(capabilities)}; {t('认证未验证', 'authentication not verified')})"
+            )
+        elif state.get("unsafe_batch"):
+            healthy = False
+            warning(
+                t(
+                    f"{AGENT_LABELS[name]}: {state['path']} 不是原生 .exe; Windows 不会执行会重解析参数的 .cmd/.bat Agent.",
+                    f"{AGENT_LABELS[name]}: {state['path']} is not a native .exe; Windows will not execute a .cmd/.bat Agent that reparses arguments.",
+                )
             )
         elif state["path"]:
             healthy = False
@@ -368,15 +389,24 @@ def validate_configured_resources(
             )
         )
 
-    review_command = shutil.which("onevoke-review.sh")
+    review_command = (
+        str(REVIEW_IMPLEMENTATION)
+        if os.name == "nt" and REVIEW_IMPLEMENTATION.is_file()
+        else shutil.which(REVIEW_ENTRYPOINT)
+    )
     if not review_command:
         healthy = False
-        warning(
-            t(
+        if os.name == "nt":
+            message = t(
+                f"审核实现不存在: {REVIEW_IMPLEMENTATION}; 请重新安装 Onevoke.",
+                f"Review implementation is missing: {REVIEW_IMPLEMENTATION}; reinstall Onevoke.",
+            )
+        else:
+            message = t(
                 "onevoke-review.sh 不在 PATH; 请把 ~/.local/bin 加入 PATH 或重新安装 Onevoke.",
                 "onevoke-review.sh is not in PATH; add ~/.local/bin to PATH or reinstall Onevoke.",
             )
-        )
+        warning(message)
 
     for role in REVIEW_ROLES:
         reviewer = effective["reviewers"][role]
@@ -392,7 +422,13 @@ def validate_configured_resources(
 
     launcher = effective["launcher"]
     if launcher in ("tmux", "tmux-session"):
-        if not shutil.which("tmux"):
+        if os.name == "nt":
+            healthy = False
+            warning(t(
+                f"配置的 launcher 是 {launcher}, 原生 Windows 不支持 tmux; 请运行 onevoke welcome --reset 改选 console 或 foreground.",
+                f"The configured launcher is {launcher}, but native Windows does not support tmux; run onevoke welcome --reset and select console or foreground.",
+            ))
+        elif not shutil.which("tmux"):
             healthy = False
             warning(
                 t(
@@ -419,13 +455,26 @@ def validate_configured_resources(
                 ),
                 file=sys.stderr,
             )
+    elif launcher == "console":
+        if os.name != "nt":
+            healthy = False
+            warning(t(
+                "配置的 launcher 是 console, 但该启动方式只支持 Windows; 请运行 onevoke welcome --reset.",
+                "The configured launcher is console, but it is available only on Windows; run onevoke welcome --reset.",
+            ))
+        elif config.get("welcome_complete"):
+            print(t(
+                "[-] launcher=console 会在独立 Windows 控制台启动 Agent 并返回 PID",
+                "[-] launcher=console starts the Agent in a separate Windows console and returns its PID",
+            ), file=sys.stderr)
     elif launcher == "foreground":
         # 仅在配置已完成时提示, 避免与通用 doctor 输出叠床架屋.
         if config.get("welcome_complete"):
+            launcher_hint = t("console", "console") if os.name == "nt" else "tmux"
             print(
                 t(
-                    "[-] launcher=foreground 需要交互终端 (stdin/stdout/stderr 均为 tty); 无 TTY 时改用 tmux 或在真实终端运行.",
-                    "[-] launcher=foreground requires an interactive terminal (stdin/stdout/stderr must be TTYs); use tmux without a TTY or run in a real terminal.",
+                    f"[-] launcher=foreground 需要交互终端 (stdin/stdout/stderr 均为 tty); 无 TTY 时改用 {launcher_hint} 或在真实终端运行.",
+                    f"[-] launcher=foreground requires an interactive terminal (stdin/stdout/stderr must be TTYs); use {launcher_hint} without a TTY or run in a real terminal.",
                 ),
                 file=sys.stderr,
             )
@@ -690,6 +739,17 @@ def tmux_launcher_choices() -> list[tuple[str, str]]:
 def edit_launcher(config: dict[str, Any]) -> None:
     prompt = t("kanban start 使用哪种启动方式?", "How should kanban start launch tasks?")
     foreground = ("foreground", t("当前终端前台运行", "foreground in this terminal"))
+    if os.name == "nt":
+        console = (
+            "console",
+            t("Windows 独立控制台窗口", "separate Windows console"),
+        )
+        config["launcher"] = ask_choice(
+            prompt,
+            [console, foreground],
+            config["launcher"],
+        )
+        return
     if shutil.which("tmux"):
         config["launcher"] = ask_choice(
             prompt,
@@ -826,7 +886,13 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         if not existing["welcome_complete"] and not agent_usable(agents.get(previous, {})):
             config["reviewers"][role] = review_choices[0][0]
     config["launcher"] = existing["launcher"]
-    if config["launcher"].startswith("tmux") and not shutil.which("tmux") and not existing["welcome_complete"]:
+    if os.name == "nt" and config["launcher"] not in ("console", "foreground") and not existing["welcome_complete"]:
+        config["launcher"] = "console"
+        warning(t(
+            "原生 Windows 不支持 tmux, 当前使用 console.",
+            "Native Windows does not support tmux; using console.",
+        ))
+    elif config["launcher"].startswith("tmux") and not shutil.which("tmux") and not existing["welcome_complete"]:
         config["launcher"] = "foreground"
         warning(
             t(
@@ -869,6 +935,12 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         elif action == "8":
             memory_agent = config["kanban_agent"] if config["kanban_agent"] in ("codex", "claude") else None
             enabled = ask_yes_no(t("使用 MemSearch?", "Use MemSearch?"), config["memsearch"]["enabled"])
+            if os.name == "nt" and enabled:
+                warning(t(
+                    "MemSearch 上游安装器当前需要 Bash, 原生 Windows 暂不启用该集成.",
+                    "The upstream MemSearch installer currently requires Bash; this integration is not enabled on native Windows yet.",
+                ))
+                continue
             if enabled and not config["memsearch"]["enabled"]:
                 if memory_agent is None:
                     warning(t("当前执行 Agent 不支持 MemSearch 集成.", "The current execution Agent does not support MemSearch integration."))
@@ -948,10 +1020,28 @@ def command_review(arguments: list[str]) -> NoReturn:
         raise OnevokeError(t(f"不支持的 Reviewer 角色: {role}", f"Unsupported Reviewer role: {role}"))
     config = effective_config(load_config())
     reviewer = config["reviewers"][normalized]
-    review_command = shutil.which("onevoke-review.sh")
-    if not review_command:
-        raise OnevokeError(t("onevoke-review.sh 不在 PATH", "onevoke-review.sh is not in PATH"))
     arguments[3] = normalized
+    if os.name == "nt":
+        if not REVIEW_IMPLEMENTATION.is_file():
+            raise OnevokeError(
+                t(
+                    f"审核实现不存在: {REVIEW_IMPLEMENTATION}",
+                    f"Review implementation is missing: {REVIEW_IMPLEMENTATION}",
+                )
+            )
+        # Batch files do not expose an argv boundary: cmd.exe reparses `%*`, so
+        # metacharacters such as &, |, %, ! and quotes can be altered or executed.
+        # Programmatic dispatch therefore enters the canonical Python gate directly.
+        raise SystemExit(
+            subprocess.call(
+                [sys.executable, "-B", "-X", "utf8", str(REVIEW_IMPLEMENTATION), reviewer, *arguments]
+            )
+        )
+    review_command = shutil.which(REVIEW_ENTRYPOINT)
+    if not review_command:
+        raise OnevokeError(
+            t(f"{REVIEW_ENTRYPOINT} 不在 PATH", f"{REVIEW_ENTRYPOINT} is not in PATH")
+        )
     os.execv(review_command, [review_command, reviewer, *arguments])
 
 

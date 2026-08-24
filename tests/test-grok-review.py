@@ -47,6 +47,7 @@ exit 0
 """
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX shell wrapper test")
 class GrokReviewGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
