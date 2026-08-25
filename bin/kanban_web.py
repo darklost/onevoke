@@ -44,22 +44,20 @@ def resolve_share_dir(explicit: Optional[Path] = None) -> Path:
         paths = install_paths(entry=Path(__file__))
     except ConfigError as error:
         raise KanbanWebError(str(error)) from error
-    candidates = []
-    env_share = os.environ.get("ONEVOKE_SHARE")
-    if env_share:
-        candidates.append(Path(env_share) / "kanban-web")
     if paths.mode == "project":
         project_share = paths.share_dir / "kanban-web"
-        candidates.append(project_share)
-        for candidate in candidates:
-            if _share_dir_ready(candidate):
-                return candidate
+        if _share_dir_ready(project_share):
+            return project_share
         raise KanbanWebError(
             t(
                 f"未找到项目 kanban web 资源: {project_share}",
                 f"project kanban web assets not found: {project_share}",
             )
         )
+    candidates = []
+    env_share = os.environ.get("ONEVOKE_SHARE")
+    if env_share:
+        candidates.append(Path(env_share) / "kanban-web")
     here = Path(__file__).resolve()
     candidates.extend(
         (

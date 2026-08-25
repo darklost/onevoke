@@ -4076,6 +4076,7 @@ class KanbanProjectInstallTest(unittest.TestCase):
     def test_project_web_uses_local_share_and_skips_global(self) -> None:
         project = self.init_git_repo(self.root / "app")
         entry = self.install_project_layout(project)
+        self.env["ONEVOKE_SHARE"] = str(self.home / ".local" / "share" / "onevoke")
         resolved = self.run_module(
             entry.parent,
             "import kanban_web; print(kanban_web.resolve_share_dir())",
@@ -4089,6 +4090,7 @@ class KanbanProjectInstallTest(unittest.TestCase):
     def test_project_web_missing_assets_do_not_use_global_share(self) -> None:
         project = self.init_git_repo(self.root / "app")
         entry = self.install_project_layout(project, with_share=False)
+        self.env["ONEVOKE_SHARE"] = str(self.home / ".local" / "share" / "onevoke")
         resolved = self.run_module(
             entry.parent,
             "import kanban_web\n"

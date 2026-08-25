@@ -218,8 +218,15 @@ def start_agent_prompt(task_id: str, paths: InstallPaths) -> str:
     的全局同名命令.
     """
     if paths.mode == "project":
+        if paths.project_root is None:
+            raise KanbanError(
+                t(
+                    "项目安装路径缺少主 worktree",
+                    "project install paths are missing the main worktree",
+                )
+            )
         kanban_cmd = str(paths.bin_dir / "kanban")
-        agents_md = str((paths.project_root or paths.bin_dir) / "AGENTS.md")
+        agents_md = str(paths.project_root / "AGENTS.md")
         return (
             f"执行 Kanban 任务 {task_id}. 先运行 {kanban_cmd} rules, 再运行 "
             f"{kanban_cmd} show {task_id}. 卡片已进入 working. 遵守 {agents_md}, "
@@ -1598,7 +1605,7 @@ def parser() -> argparse.ArgumentParser:
         help=t("项目根目录, 默认当前项目", "project root; defaults to the current project"),
     )
 
-    commands.add_parser("rules", help=t("输出全局看板规则", "print global kanban rules"))
+    commands.add_parser("rules", help=t("输出当前作用域看板规则", "print current-scope kanban rules"))
 
     list_parser = commands.add_parser("list", aliases=["ls"], help=t("列出任务", "list tasks"))
     list_parser.add_argument("state", nargs="?", choices=STATES)
