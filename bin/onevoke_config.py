@@ -278,6 +278,16 @@ def _reject_leaf_reparse(path: Path) -> None:
         raise _unsafe_path_error(path)
 
 
+_GIT_OVERRIDE_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+
+
+def _git_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in _GIT_OVERRIDE_VARS:
+        env.pop(name, None)
+    return env
+
+
 def _git_main_worktree(directory: Path) -> Path | None:
     target = _lexical_absolute(directory)
     if not os.path.isdir(os.fspath(target)):
@@ -288,6 +298,7 @@ def _git_main_worktree(directory: Path) -> Path | None:
             text=True,
             capture_output=True,
             check=False,
+            env=_git_subprocess_env(),
         )
     except OSError:
         return None
@@ -341,8 +352,14 @@ def install_paths(*, entry: Path | None = None) -> InstallPaths:
         _reject_leaf_reparse(bin_dir)
     parent = install_root.parent
     main = _git_main_worktree(parent)
-    project_root = main if main is not None else _lexical_absolute(parent)
-    paths = _project_install_paths(project_root)
+    if main is None:
+        raise ConfigError(
+            language_text(
+                f"项目不是 Git 仓库: {parent}",
+                f"project is not a Git repository: {parent}",
+            )
+        )
+    paths = _project_install_paths(main)
     if os.name == "nt":
         _ensure_windows_path_nofollow_safe(paths.bin_dir)
     else:
@@ -386,6 +403,7 @@ def _git_exclude_path(git_root: Path) -> Path:
             text=True,
             capture_output=True,
             check=False,
+            env=_git_subprocess_env(),
         )
     except OSError as error:
         raise ConfigError(

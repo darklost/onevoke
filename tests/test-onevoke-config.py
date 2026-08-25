@@ -26,11 +26,20 @@ class InstallContextTest(unittest.TestCase):
         self.home.mkdir()
         self.saved = {
             name: os.environ.get(name)
-            for name in ("HOME", "USERPROFILE", "ONEVOKE_CONFIG")
+            for name in (
+                "HOME",
+                "USERPROFILE",
+                "ONEVOKE_CONFIG",
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_COMMON_DIR",
+            )
         }
         os.environ["HOME"] = str(self.home)
         os.environ["USERPROFILE"] = str(self.home)
         os.environ.pop("ONEVOKE_CONFIG", None)
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+            os.environ.pop(name, None)
         sys.path.insert(0, str(BIN_DIR))
         import onevoke_config
 
@@ -145,6 +154,40 @@ class InstallContextTest(unittest.TestCase):
             self.home / ".config" / "onevoke" / "config.json",
             self.config.config_path(),
         )
+
+    def test_git_dir_env_does_not_divert_project_paths(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        other = self.init_git_repo(self.root / "other")
+        os.environ["GIT_DIR"] = str(other / ".git")
+        entry = project / ".onevoke" / "bin" / "onevoke"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+        paths = self.config.project_install_paths(project)
+        runtime = self.config.install_paths(entry=entry)
+        returned = self.config.ensure_project_git_exclude(project)
+
+        self.assertEqual("project", paths.mode)
+        assert paths.project_root is not None
+        self.assert_same_real_path(project, paths.project_root)
+        assert runtime.project_root is not None
+        self.assert_same_real_path(project, runtime.project_root)
+        exclude = project / ".git" / "info" / "exclude"
+        self.assert_same_real_path(exclude, returned)
+        self.assertIn(
+            "/.onevoke/",
+            exclude.read_text(encoding="utf-8").splitlines(),
+        )
+        other_exclude = (other / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertNotIn("/.onevoke/", other_exclude.splitlines())
+
+    def test_install_paths_rejects_project_entry_without_git(self) -> None:
+        project = self.root / "not-git"
+        entry = project / ".onevoke" / "bin" / "onevoke"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        with self.assertRaises(self.config.ConfigError):
+            self.config.install_paths(entry=entry)
 
     def test_project_install_paths_rejects_non_git(self) -> None:
         directory = self.root / "not-git"
