@@ -1377,12 +1377,25 @@ class OnevokeCommandTest(unittest.TestCase):
                 self.assertTrue(ok, detail)
                 self.assertEqual(str(claude), detail)
 
+                body = "# shared Onevoke entry\n"
+                entry.write_text(body, encoding="utf-8")
+                global_entry.write_text(body, encoding="utf-8")
                 codex = self.home / ".codex" / "AGENTS.md"
                 codex.parent.mkdir(parents=True)
+                if codex.exists() or codex.is_symlink():
+                    codex.unlink()
+                codex.symlink_to(global_entry)
+                ok, _ = onevoke.rules_integration("codex")
+                self.assertFalse(ok)
+                codex.unlink()
+                codex.symlink_to(entry)
+                ok, detail = onevoke.rules_integration("codex")
+                self.assertTrue(ok, detail)
+                codex.unlink()
                 codex.write_text("# global Onevoke entry\n\n## extra\n", encoding="utf-8")
                 ok, _ = onevoke.rules_integration("codex")
                 self.assertFalse(ok)
-                codex.write_text("# project Onevoke entry\n\n## extra\n", encoding="utf-8")
+                codex.write_text(body + "\n## extra\n", encoding="utf-8")
                 ok, detail = onevoke.rules_integration("codex")
                 self.assertTrue(ok, detail)
 

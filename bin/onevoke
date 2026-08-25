@@ -341,8 +341,18 @@ def rules_integration(agent: str) -> tuple[bool, str]:
     if not target.exists() and not target.is_symlink():
         return False, t(f"未发现 {target}", f"not found: {target}")
     try:
-        if target.is_symlink() and target.resolve() == entry.resolve():
-            return True, str(target)
+        if target.is_symlink():
+            linked = target.resolve()
+            expected = entry.expanduser().resolve()
+            if linked == expected:
+                return True, str(target)
+            # 项目与全局共用同一套规则正文. 若跟随指向全局入口的软链再做
+            # 全文包含检查, 会把全局接入误判为已接到项目入口.
+            if current_paths().mode == "project":
+                return False, t(
+                    f"{target} 未指向项目规则入口 {entry}",
+                    f"{target} does not point to the project rules entry {entry}",
+                )
         text = target.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return False, t(f"无法读取 {target}", f"cannot read: {target}")
