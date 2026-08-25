@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 
-"""Onevoke global configuration shared by its command-line tools."""
+"""Onevoke configuration and install-context paths shared by its tools."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from onevoke_fs import (
+    UnsafePathError,
     ensure_directory_path_nofollow,
+    ensure_inherited_directory_path_nofollow,
+    exclusive_file_lock,
+    is_reparse_point,
+    open_append_file_nofollow,
     open_private_regular_file_if_exists_nofollow,
     open_regular_file_if_exists_nofollow,
     tighten_private_file_permissions,
@@ -45,6 +52,9 @@ configure_stdio()
 
 
 SCHEMA_VERSION = 1
+PROJECT_INSTALL_DIRNAME = ".onevoke"
+PROJECT_GIT_EXCLUDE_PATTERN = "/.onevoke/"
+InstallMode = Literal["global", "project"]
 EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
@@ -213,11 +223,243 @@ class ConfigError(Exception):
     """Raised when the Onevoke configuration is unreadable or invalid."""
 
 
+@dataclass(frozen=True)
+class InstallPaths:
+    """当前安装作用域的公共路径.
+
+    ``global`` 映射到用户 HOME 下的既有布局; ``project`` 映射到 Git 主
+    worktree 的 ``.onevoke/``. 源码树直接运行属于 ``global``, 即使仓库
+    根同时含 ``bin/`` 与 ``rules/``.
+    """
+
+    mode: InstallMode
+    config_path: Path
+    rules_dir: Path
+    bin_dir: Path
+    share_dir: Path
+    project_root: Path | None = None
+    install_root: Path | None = None
+
+
+def _lexical_absolute(path: Path) -> Path:
+    """生成绝对路径; 不跟随符号链接或 Windows reparse point."""
+    return Path(os.path.abspath(os.fspath(path.expanduser())))
+
+
+def _unsafe_path_error(path: Path) -> ConfigError:
+    return ConfigError(
+        language_text(
+            f"路径分量不得是符号链接/重解析点: {path}",
+            f"path component must not be a symlink/reparse point: {path}",
+        )
+    )
+
+
+def _ensure_windows_path_nofollow_safe(path: Path) -> Path:
+    """Windows 上拒绝路径自身或任一已存在祖先中的 reparse point."""
+    absolute = _lexical_absolute(path)
+    parts = absolute.parts
+    if not parts:
+        raise ConfigError(
+            language_text(f"无效安装路径: {path}", f"invalid install path: {path}")
+        )
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current /= part
+        if not os.path.lexists(current):
+            break
+        if is_reparse_point(current):
+            raise _unsafe_path_error(current)
+    return absolute
+
+
+def _reject_leaf_reparse(path: Path) -> None:
+    if os.path.lexists(path) and is_reparse_point(path):
+        raise _unsafe_path_error(path)
+
+
+def _git_main_worktree(directory: Path) -> Path | None:
+    target = _lexical_absolute(directory)
+    if not os.path.isdir(os.fspath(target)):
+        return None
+    try:
+        git = subprocess.run(
+            ["git", "-C", str(target), "worktree", "list", "--porcelain"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if git.returncode != 0:
+        return None
+    for line in git.stdout.splitlines():
+        if line.startswith("worktree "):
+            return _lexical_absolute(Path(line.removeprefix("worktree ")))
+    return None
+
+
+def _global_install_paths() -> InstallPaths:
+    home = Path.home()
+    return InstallPaths(
+        mode="global",
+        config_path=home / ".config" / "onevoke" / "config.json",
+        rules_dir=home / ".agents",
+        bin_dir=home / ".local" / "bin",
+        share_dir=home / ".local" / "share" / "onevoke",
+    )
+
+
+def _project_install_paths(project_root: Path) -> InstallPaths:
+    install_root = project_root / PROJECT_INSTALL_DIRNAME
+    return InstallPaths(
+        mode="project",
+        config_path=install_root / "config.json",
+        rules_dir=install_root / "rules",
+        bin_dir=install_root / "bin",
+        share_dir=install_root / "share",
+        project_root=project_root,
+        install_root=install_root,
+    )
+
+
+def install_paths(*, entry: Path | None = None) -> InstallPaths:
+    """按当前入口解析全局或项目安装路径.
+
+    ``entry`` 默认为本模块文件. 仅当入口位于名为 ``.onevoke/bin/`` 的
+    目录时进入项目模式; 源码树的 ``bin/`` 不会被误判.
+    """
+    source = _lexical_absolute(entry if entry is not None else Path(__file__))
+    bin_dir = source.parent
+    install_root = bin_dir.parent
+    if bin_dir.name != "bin" or install_root.name != PROJECT_INSTALL_DIRNAME:
+        return _global_install_paths()
+    if os.name == "nt":
+        _ensure_windows_path_nofollow_safe(install_root)
+    else:
+        _reject_leaf_reparse(install_root)
+        _reject_leaf_reparse(bin_dir)
+    parent = install_root.parent
+    main = _git_main_worktree(parent)
+    project_root = main if main is not None else _lexical_absolute(parent)
+    if os.name == "nt":
+        _ensure_windows_path_nofollow_safe(project_root)
+    return _project_install_paths(project_root)
+
+
+def project_install_paths(project: Path) -> InstallPaths:
+    """把用户给出的项目目录归一到 Git 主 worktree 下的项目安装路径."""
+    candidate = _lexical_absolute(project)
+    if os.name == "nt":
+        _ensure_windows_path_nofollow_safe(candidate)
+    else:
+        _reject_leaf_reparse(candidate)
+    if not candidate.is_dir():
+        raise ConfigError(
+            language_text(
+                f"项目目录不存在: {candidate}",
+                f"project directory does not exist: {candidate}",
+            )
+        )
+    main = _git_main_worktree(candidate)
+    if main is None:
+        raise ConfigError(
+            language_text(
+                f"项目不是 Git 仓库: {candidate}",
+                f"project is not a Git repository: {candidate}",
+            )
+        )
+    if os.name == "nt":
+        _ensure_windows_path_nofollow_safe(main)
+    return _project_install_paths(main)
+
+
+def _git_exclude_path(git_root: Path) -> Path:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(git_root), "rev-parse", "--git-path", "info/exclude"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ConfigError(
+            language_text("无法定位 Git info/exclude", "Cannot locate Git info/exclude")
+        ) from error
+    if result.returncode != 0:
+        raise ConfigError(
+            language_text("无法定位 Git info/exclude", "Cannot locate Git info/exclude")
+        )
+    exclude = Path(result.stdout.strip())
+    if not exclude.is_absolute():
+        exclude = git_root / exclude
+    return _lexical_absolute(exclude)
+
+
+def _append_git_exclude_pattern(git_root: Path, pattern: str) -> Path:
+    exclude = _git_exclude_path(git_root)
+    if os.name == "nt":
+        _ensure_windows_path_nofollow_safe(exclude.parent)
+        _reject_leaf_reparse(exclude)
+        ensure_inherited_directory_path_nofollow(exclude.parent)
+        open_root = Path(exclude.anchor)
+    else:
+        _reject_leaf_reparse(git_root)
+        current = git_root
+        try:
+            relative_parent = exclude.parent.relative_to(git_root)
+        except ValueError as error:
+            raise ConfigError(
+                language_text(
+                    f"Git exclude 不在仓库内: {exclude}",
+                    f"git exclude is outside the repository: {exclude}",
+                )
+            ) from error
+        for part in relative_parent.parts:
+            current /= part
+            _reject_leaf_reparse(current)
+        _reject_leaf_reparse(exclude)
+        open_root = git_root
+    try:
+        with open_append_file_nofollow(open_root, exclude) as file:
+            with exclusive_file_lock(file):
+                file.seek(0)
+                existing = file.read().decode("utf-8")
+                if pattern not in existing.splitlines():
+                    addition = (
+                        ("\n" if existing and not existing.endswith("\n") else "")
+                        + pattern
+                        + "\n"
+                    )
+                    file.write(addition.encode("utf-8"))
+    except (UnsafePathError, OSError, UnicodeError) as error:
+        raise ConfigError(
+            language_text(
+                f"更新 Git exclude 失败: {exclude}: {error}",
+                f"failed to update git exclude: {exclude}: {error}",
+            )
+        ) from error
+    return exclude
+
+
+def ensure_project_git_exclude(project: Path) -> Path:
+    """幂等把 ``/.onevoke/`` 写入仓库本地 Git exclude, 并保持既有权限."""
+    paths = project_install_paths(project)
+    if paths.project_root is None:
+        raise ConfigError(
+            language_text(
+                "项目安装路径缺少主 worktree",
+                "project install paths are missing the main worktree",
+            )
+        )
+    return _append_git_exclude_pattern(paths.project_root, PROJECT_GIT_EXCLUDE_PATTERN)
+
+
 def config_path() -> Path:
     override = os.environ.get("ONEVOKE_CONFIG")
     if override:
         return Path(override).expanduser()
-    return Path.home() / ".config" / "onevoke" / "config.json"
+    return install_paths().config_path
 
 
 def default_models() -> dict[str, Any]:

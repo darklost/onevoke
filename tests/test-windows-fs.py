@@ -511,6 +511,71 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
         self.assertEqual(outside_acl, self.acl_text(outside_exclude))
         self.assertEqual([outside_exclude], list(self.outside.iterdir()))
 
+    def test_project_git_exclude_preserves_acl_and_deduplicates(self) -> None:
+        project = self.base / "project-git-exclude"
+        project.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(project)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        exclude = project / ".git" / "info" / "exclude"
+        original_acl = self.acl_text(exclude)
+
+        for _ in range(2):
+            returned = onevoke_config.ensure_project_git_exclude(project)
+            self.assertEqual(exclude, returned)
+
+        self.assertEqual(
+            1,
+            exclude.read_text(encoding="utf-8").splitlines().count("/.onevoke/"),
+        )
+        self.assertEqual(original_acl, self.acl_text(exclude))
+
+    def test_project_git_exclude_rejects_info_junction(self) -> None:
+        project = self.base / "project-exclude-junction"
+        project.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(project)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        info = project / ".git" / "info"
+        info.rename(project / ".git" / "info-original")
+        outside_exclude = self.outside / "exclude"
+        outside_bytes = b"outside exclude must stay unchanged\n"
+        outside_exclude.write_bytes(outside_bytes)
+        outside_acl = self.acl_text(outside_exclude)
+        self.make_junction(info, self.outside)
+
+        with self.assertRaises(onevoke_config.ConfigError):
+            onevoke_config.ensure_project_git_exclude(project)
+
+        self.assertEqual(outside_bytes, outside_exclude.read_bytes())
+        self.assertEqual(outside_acl, self.acl_text(outside_exclude))
+        self.assertEqual([outside_exclude], list(self.outside.iterdir()))
+
+    def test_install_paths_rejects_onevoke_junction(self) -> None:
+        project = self.base / "project-onevoke-junction"
+        project.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(project)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        payload = self.base / "payload"
+        (payload / "bin").mkdir(parents=True)
+        (payload / "bin" / "onevoke").write_text("entry\n", encoding="utf-8")
+        self.make_junction(project / ".onevoke", payload)
+
+        with self.assertRaises(onevoke_config.ConfigError):
+            onevoke_config.install_paths(
+                entry=project / ".onevoke" / "bin" / "onevoke"
+            )
+
     def test_neutral_append_rejects_static_info_junction(self) -> None:
         git_directory = self.base / "junction-project" / ".git"
         git_directory.mkdir(parents=True)
