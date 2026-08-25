@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-- 跨项目通用条款, 装在 `~/.agents/BASE-RULES.md`, 每个任务开始时读. 分册索引, 优先级和默认取值见入口 `~/.agents/ONEVOKE-AGENTS.md`: 改代码前读 `CODE-RULES.md`, 建分支, 提交, push, 审核或集成前读 `GIT-RULES.md`.
+- 跨项目通用条款, 位于规则根的 `BASE-RULES.md`, 每个任务开始时读. 分册索引, 优先级和默认取值见入口 `ONEVOKE-AGENTS.md`: 改代码前读 `CODE-RULES.md`, 建分支, 提交, push, 审核或集成前读 `GIT-RULES.md`.
 - 本文件与入口「默认取值」冲突时从入口; 与其他分册的领域条款冲突时从那份分册.
 
 ## 交流与格式
@@ -43,4 +43,4 @@
 ## 任务完成
 
 - 每个任务结束时, 一句话总结任务目标, 完成情况, commit 状态和所在分支; 非 Git 任务明确写 "无提交, 分支不适用".
-- 看板任务改用 `~/.agents/KANBAN-RULES.md`「完成报告」的模板汇报.
+- 看板任务改用 `KANBAN-RULES.md`「完成报告」的模板汇报.

@@ -1,6 +1,6 @@
 # 架构与代码质量规则
 
-本文件是 `~/.agents/BASE-RULES.md`「工作原则」的架构与代码质量契约, 装在 `~/.agents/CODE-RULES.md`. 优先级见 `~/.agents/ONEVOKE-AGENTS.md`「优先级」.
+本文件是 `BASE-RULES.md`「工作原则」的架构与代码质量契约, 位于规则根的 `CODE-RULES.md`. 优先级见 `ONEVOKE-AGENTS.md`「优先级」.
 
 ## 架构与边界
 

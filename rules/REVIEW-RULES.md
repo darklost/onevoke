@@ -1,10 +1,10 @@
 # 审核规则
 
-本文件是 `~/.agents/GIT-RULES.md`「审核」的完整契约, 装在 `~/.agents/REVIEW-RULES.md`. 优先级见 `~/.agents/ONEVOKE-AGENTS.md`「优先级」.
+本文件是 `GIT-RULES.md`「审核」的完整契约, 位于规则根的 `REVIEW-RULES.md`. 优先级见 `ONEVOKE-AGENTS.md`「优先级」.
 
 ## Reviewer 选择
 
-- 支持 Codex, Claude 与 Grok 三个 reviewer. POSIX 的平台公开审核入口是 `~/.local/bin/onevoke-review.sh`; 原生 Windows 的人工交互入口是 `~/.local/bin/onevoke-review.cmd`, `onevoke review` 的程序化分发直接进入同目录的 `onevoke_review.py`. 这些路径共享单一门禁实现. Windows Reviewer CLI 必须解析为原生 `.exe`, `.cmd`/`.bat` 一律视为不可用. 除下表的 CLI 与隔离参数外, 本文件全部规则对三者一致. 新增 reviewer 时扩展 Python 实现的 agent 适配层和配置枚举, 不新增按 agent 命名的脚本.
+- 支持 Codex, Claude 与 Grok 三个 reviewer. POSIX 的平台公开审核入口是命令根下的 `onevoke-review.sh`; 原生 Windows 的人工交互入口是命令根下的 `onevoke-review.cmd`, 命令根下的 `onevoke review` 的程序化分发直接进入同目录的 `onevoke_review.py`. 这些路径共享单一门禁实现. Windows Reviewer CLI 必须解析为原生 `.exe`, `.cmd`/`.bat` 一律视为不可用. 除下表的 CLI 与隔离参数外, 本文件全部规则对三者一致. 新增 reviewer 时扩展 Python 实现的 agent 适配层和配置枚举, 不新增按 agent 命名的脚本. 项目安装必须使用命令根绝对入口, 禁止改用 PATH 中的全局同名命令.
 
 | reviewer | agent 参数 | CLI | 入口的隔离参数 |
 |---|---|---|---|
@@ -13,7 +13,7 @@
 | Grok | `grok` | `grok` | `--sandbox read-only`, `--no-memory`, `--no-subagents` |
 
 - 三者都在只读隔离下运行: Codex 在目标 worktree 内跑只读 shell; Claude 与 Grok 在 worktree 外的 runtime 目录运行, 只读访问目标树并只开放读取, 搜索类工具. Claude 使用目标树外的任务 spec 时, 先把该文件快照到仅当前用户可访问的 runtime 目录, 不授权原文件父目录. runtime 目录在 POSIX 用 `0700`; Windows 必须相对固定临时根句柄以 `CREATE_NEW` 创建, 创建瞬间即使用关闭继承且只允许当前用户访问的受保护 DACL, 随机名碰撞安全重试, 不得先发布继承 ACL 的目录再收紧. Windows runtime 根句柄不得共享 WRITE/DELETE, 且必须持续持有到敏感文件写入、Reviewer 运行、进程树收集和 worktree 校验完成, 同时阻止改名与原地切换为 reparse point; 退出时从该固定句柄逐层 no-follow 且有界清理, reparse point、占用、预算耗尽或其他清理失败必须使审核失败, 禁静默遗留. 禁为了统一实现或适配 Windows 而交换或放宽三套隔离参数.
-- `PM`, `CSA`, `Hacker`, `QA` 分别选择 reviewer, 按优先级取该角色第一个明确指定的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则; (4) `~/.config/onevoke/config.json` 中该角色的取值. 前三档都未指定时运行 `onevoke review` 读取第 (4) 档, 配置不存在时回落到 Codex. 第 (3) 档只对本节的 reviewer 取值有效, 不改变入口的通用优先级链; 该档文件未载入且当前任务需要判定时读取它, 读不到按未指定处理.
+- `PM`, `CSA`, `Hacker`, `QA` 分别选择 reviewer, 按优先级取该角色第一个明确指定的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则; (4) 配置文件中该角色的取值. 前三档都未指定时运行命令根下的 `onevoke review` 读取第 (4) 档, 配置不存在时回落到 Codex. 第 (3) 档只对本节的 reviewer 取值有效, 不改变入口的通用优先级链; 该档文件未载入且当前任务需要判定时读取它, 读不到按未指定处理.
 - 不同角色可以使用不同 reviewer. 同一角色的修复重跑和结论确认必须继续使用该角色本轮选定的 reviewer; 中途更换时该角色已有结论作废并重跑该阶段, 已通过的其他角色不因此作废.
 - 下文的「reviewer」和「reviewer CLI」均指当前审核角色选定的那一个; 「审核入口」指当前平台的 `onevoke-review.sh` 或 `onevoke-review.cmd`, 两者共同进入 `onevoke_review.py`.
 
@@ -39,9 +39,9 @@
   9. 删除或重命名公共模块, 或跨模块重构.
 - 白名单按任务实际改动和用户表述判定, 不靠任务标题或标签; 禁把命中条目的任务改述成未命中类型以绕过审核.
 - 未命中白名单跳过审核时, 必须在集成前明确告知用户"本次未触发审核白名单, 未走审核闭环", 并写明改动范围 (改了哪些文件, 新增与删除行数). 禁静默跳过. 用户随后要求审核时照常执行完整流程.
-- 选定 reviewer 的 CLI 或当前平台审核入口在本机不可用时无法审核: 明确告知用户"本机未装 <reviewer> CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好该 CLI 后重试`, `2. 改用另一个 reviewer 重启审核`, `3. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`, `4. 停止集成`. 审核入口缺失时还须说明需重新安装 Onevoke; Windows 还要确认 `~/.local/bin` 已加入 `PATH`. 禁自行跳过, 禁未经用户明确指定就换 reviewer.
+- 选定 reviewer 的 CLI 或当前平台审核入口在本机不可用时无法审核: 明确告知用户"本机未装 <reviewer> CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好该 CLI 后重试`, `2. 改用另一个 reviewer 重启审核`, `3. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`, `4. 停止集成`. 审核入口缺失时还须说明需重新安装 Onevoke; 全局安装的 Windows 还要确认命令根已加入 `PATH`, 项目安装则使用命令根绝对入口, 不依赖 PATH. 禁自行跳过, 禁未经用户明确指定就换 reviewer.
 - 审核前, 把审核 base 以来全部任务改动按关注点提交, 保持 worktree 无未提交或未跟踪文件.
-- 审核 base: 专用任务分支为该分支最近一次基于 `develop` 创建或 rebase 时所基于的 `develop` commit 完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变; rebase 后 base 更新为新的所基于 commit, 是否重审按 `~/.agents/GIT-RULES.md`「集成与清理」的一次性门规则执行.
+- 审核 base: 专用任务分支为该分支最近一次基于 `develop` 创建或 rebase 时所基于的 `develop` commit 完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变; rebase 后 base 更新为新的所基于 commit, 是否重审按 `GIT-RULES.md`「集成与清理」的一次性门规则执行.
 
 标准审核三阶段串行; 各角色是否运行先按「审核环节」解析, 跳过的标 N/A. 实际运行的角色按下述顺序流转, `QA` 若运行则固定在最后; 审核重点仍按「审核档案」确定. 阶段流转以本图为准, 每次修复只重跑当前阶段:
 
@@ -78,19 +78,19 @@
 - 第二阶段只把实际运行的 `CSA` 或 `Hacker` 返回且经主代理核实成立的 `blocking`, `high`, `medium` finding 交用户决策. 每项列出问题, 影响, 修复方法及至少三个选项: `1. 修复并重审`, `2. 确认通过并接受风险`, `3. 停止集成`. 其余档位和纯 defense-in-depth advisory 直接进未处理项清单, 不触发决策.
 - 仅看板任务适用安全 finding 超时. 每项从完整信息和选项送达用户时独立计时; 同批共用发送时间, 部分回答不停止其余项. 15 分钟无明确决策即标记"超时忽略", 记录角色, 档位, 问题, 影响, 发送时间, 超时时间和理由, 再继续. "超时忽略"不等于 `PASS`, 用户确认或接受风险; 卡片完成前收到决策则按最新指令处理.
 - 非看板任务及 `PM`, `QA` finding, 无法核实项, 契约或负责人变更, 以及用户明确要求的验收, 集成确认不得超时跳过.
-- 调用方式: 未明确 reviewer 时用 `onevoke review <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 由 Onevoke 读配置进入单一门禁; 已明确 reviewer 时, POSIX 用 `~/.local/bin/onevoke-review.sh <reviewer> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, Windows 人工调用普通参数可在 PowerShell 用 `& "$env:USERPROFILE\.local\bin\onevoke-review.cmd" ...`. Windows 批处理和 Windows PowerShell 5 的原生命令行都不能保证任意 argv 无损; 含 `&|<>^%!`, 引号或边界反斜杠的数据不得由程序调用 `.cmd` 或拼进 shell 命令字符串. 自动化调用方必须用进程 API 的 argv 数组直接启动当前 Python, 并把 `Path.home() / ".local/bin/onevoke"`, `review` 及其参数作为独立数组成员; `onevoke` 再直接进入同目录 Python 门禁. 禁外部调用者绕过 Onevoke 入口直调 Python 实现或 reviewer CLI. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
+- 调用方式: 未明确 reviewer 时用命令根下的 `onevoke review <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 由 Onevoke 读当前作用域配置进入单一门禁; 已明确 reviewer 时, POSIX 用 `<命令根>/onevoke-review.sh <reviewer> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, Windows 人工调用普通参数可在 PowerShell 用 `& "$env:USERPROFILE\.local\bin\onevoke-review.cmd" ...`. 项目安装把该全局命令根换成当前作用域命令根. Windows 批处理和 Windows PowerShell 5 的原生命令行都不能保证任意 argv 无损; 含 `&|<>^%!`, 引号或边界反斜杠的数据不得由程序调用 `.cmd` 或拼进 shell 命令字符串. 自动化调用方必须用进程 API 的 argv 数组直接启动当前 Python, 并把命令根下的 `onevoke` (全局安装即 `Path.home() / ".local/bin/onevoke"`), `review` 及其参数作为独立数组成员; `onevoke` 再直接进入同目录 Python 门禁. 项目安装必须使用这些绝对入口, 禁止改用 PATH 中的全局同名命令. 禁外部调用者绕过 Onevoke 入口直调 Python 实现或 reviewer CLI. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
 - 一次完整审核中所有角色必须使用相同 `CWD`, base 与 task context, 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. base 改变则全部结论失效, 从第一阶段重启. task context 是权威需求契约: 短任务传单个字符串, 长任务传可读的绝对 spec 路径.
 - 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录 (POSIX `0700`, Windows 受保护的当前用户独占 DACL), 禁混入日志, spec 或其他文件; 本轮审核通过, 用户完成第二阶段决策或本轮终止后清理该目录, 需保留诊断先向用户说明. 审核入口按「Reviewer 选择」表的隔离参数跑 reviewer, 结束时校验 worktree 未被改动; 禁改其 sandbox, 权限或工具参数绕过门禁.
 
 ## 审核环节
 
-除「审核档案」和白名单触发条件外, 每个角色是否运行还受全局默认环节策略约束. `~/.config/onevoke/config.json` 的 `review_stages` 为四角色各指定 `auto`, `skip` 或 `required`, 缺省为 `auto`. 用 `onevoke config` 查看.
+除「审核档案」和白名单触发条件外, 每个角色是否运行还受默认环节策略约束. 配置文件的 `review_stages` 为四角色各指定 `auto`, `skip` 或 `required`, 缺省为 `auto`. 用命令根下的 `onevoke config` 查看.
 
 解析每个角色时, 按优先级取第一个明确指定的来源:
 
 1. 当前任务的用户指令.
 2. 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`.
-3. `~/.config/onevoke/config.json` 中该角色的 `review_stages` 取值.
+3. 配置文件中该角色的 `review_stages` 取值.
 4. 审核档案与安全角色触发条件 (仅当第 3 档为 `auto` 时生效).
 
 各档语义:

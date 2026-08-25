@@ -8,6 +8,10 @@
 
 需要 Python 3, Git, 以及 Codex, Claude 或 Grok 中至少一个. POSIX 系统还需要 POSIX shell; 原生 Windows 使用 PowerShell.
 
+Onevoke 有两种安装作用域, 共用同一套规则和程序, 不维护两套模板, 安装时也不改写 Markdown 正文. 当前读取的 `ONEVOKE-AGENTS.md` 入口位置决定作用域; 两种安装同时存在时, 项目入口和项目绝对命令优先.
+
+### 1.1 全局安装
+
 POSIX:
 
 ```sh
@@ -33,7 +37,40 @@ Windows 安装器把命令装到 `~/.local/bin`, 规则装到 `~/.agents`, 但�
 - Codex: 将 `~/.codex/AGENTS.md` 软链接到该入口, 或把入口内容合入现有文件.
 - Grok: 将 `~/.grok/AGENTS.md` 软链接到该入口, 或把入口内容合入现有文件.
 
+### 1.2 项目本地安装
+
+把载荷装到目标 Git 项目主 worktree 的 `.onevoke/`, 完全跳过 HOME 下的全局 Onevoke 路径.
+
+POSIX:
+
+```sh
+./install.sh --project <项目目录>
+```
+
+原生 Windows (PowerShell):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --project <项目目录>
+```
+
+目标从任一 worktree 指定时都归一到主 worktree. 布局:
+
+- 规则根: `<主 worktree>/.onevoke/rules`
+- 命令根: `<主 worktree>/.onevoke/bin`
+- 配置文件: `<主 worktree>/.onevoke/config.json`
+- 资源目录: `<主 worktree>/.onevoke/share`
+
+限制:
+
+- `.onevoke/` 写入该仓库本地 `.git/info/exclude`, 不进 Git, 也不改项目 `.gitignore`.
+- 任务 worktree 共享主 worktree 的 `.onevoke/`, 不建副本, 镜像或符号链接.
+- 零全局写入: 不创建, 修改或探测 `~/.agents`, `~/.local/bin`, `~/.config/onevoke` 等全局 Onevoke 路径, 也不迁移或卸载既有全局安装.
+- 项目模式必须用命令根下的绝对入口, 例如 `<主 worktree>/.onevoke/bin/kanban` 和 `<主 worktree>/.onevoke/bin/onevoke`; Windows 人工交互可用对应 `.cmd`. 禁止改用 PATH 中的全局同名命令, 也不要把项目命令根加入 PATH 以免与全局安装混淆.
+- Agent 规则接入指向项目入口 `<主 worktree>/.onevoke/rules/ONEVOKE-AGENTS.md`, 不要指向全局入口.
+
 ## 2. 使用
+
+下文 `kanban` 与 `onevoke` 指当前作用域命令根下的入口. 全局安装可使用已加入 PATH 的命令名; 项目安装必须使用绝对入口, 例如 `<主 worktree>/.onevoke/bin/kanban`, 禁止改用 PATH 中的全局同名命令.
 
 在项目目录首次使用时初始化看板:
 
@@ -105,7 +142,7 @@ kanban rules
 
 任务命中审核白名单后, 由平台审核入口按 PM -> 安全角色 -> QA 三阶段串行审核: POSIX 使用 `onevoke-review.sh`; Windows 的人工包装入口是 `onevoke-review.cmd`, `onevoke review` 的程序化分发则直接进入 `onevoke_review.py`. 两者使用同一门禁实现. Codex, Claude 与 Grok 的只读 sandbox, 权限和工具隔离参数在两个平台保持不变. 各角色是否运行由 `review_stages` 与项目规则决定, 实际运行的 QA 固定在最后. 每次修复只重跑当前阶段. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
 
-全局默认哪些环节运行可在 `~/.config/onevoke/config.json` 的 `review_stages` 配置 (`auto` / `skip` / `required`), 项目规则或当前任务指令可覆盖. 用 `onevoke config` 查看当前值.
+默认哪些环节运行可在配置文件的 `review_stages` 配置 (`auto` / `skip` / `required`), 项目规则或当前任务指令可覆盖. 全局安装的配置文件是 `~/.config/onevoke/config.json`, 项目安装是 `<主 worktree>/.onevoke/config.json`. 用命令根下的 `onevoke config` 查看当前值.
 
 ![Onevoke 审核流程](docs/review.svg)
 
