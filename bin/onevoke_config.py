@@ -335,16 +335,21 @@ def install_paths(*, entry: Path | None = None) -> InstallPaths:
     if bin_dir.name != "bin" or install_root.name != PROJECT_INSTALL_DIRNAME:
         return _global_install_paths()
     if os.name == "nt":
-        _ensure_windows_path_nofollow_safe(install_root)
+        _ensure_windows_path_nofollow_safe(bin_dir)
     else:
         _reject_leaf_reparse(install_root)
         _reject_leaf_reparse(bin_dir)
     parent = install_root.parent
     main = _git_main_worktree(parent)
     project_root = main if main is not None else _lexical_absolute(parent)
+    paths = _project_install_paths(project_root)
     if os.name == "nt":
-        _ensure_windows_path_nofollow_safe(project_root)
-    return _project_install_paths(project_root)
+        _ensure_windows_path_nofollow_safe(paths.bin_dir)
+    else:
+        if paths.install_root is not None:
+            _reject_leaf_reparse(paths.install_root)
+        _reject_leaf_reparse(paths.bin_dir)
+    return paths
 
 
 def project_install_paths(project: Path) -> InstallPaths:

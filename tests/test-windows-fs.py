@@ -576,6 +576,27 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
                 entry=project / ".onevoke" / "bin" / "onevoke"
             )
 
+    def test_install_paths_rejects_bin_junction(self) -> None:
+        project = self.base / "project-bin-junction"
+        project.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(project)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        onevoke_dir = project / ".onevoke"
+        onevoke_dir.mkdir()
+        payload = self.base / "bin-payload"
+        payload.mkdir()
+        (payload / "onevoke").write_text("entry\n", encoding="utf-8")
+        self.make_junction(onevoke_dir / "bin", payload)
+
+        with self.assertRaises(onevoke_config.ConfigError):
+            onevoke_config.install_paths(
+                entry=onevoke_dir / "bin" / "onevoke"
+            )
+
     def test_neutral_append_rejects_static_info_junction(self) -> None:
         git_directory = self.base / "junction-project" / ".git"
         git_directory.mkdir(parents=True)
