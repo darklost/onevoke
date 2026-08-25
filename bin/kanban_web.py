@@ -18,7 +18,7 @@ from string import Template
 from typing import Callable, Optional
 from urllib.parse import unquote, urlsplit
 
-from onevoke_config import language_text
+from onevoke_config import ConfigError, install_paths, language_text
 
 BoardPayload = Callable[[], dict]
 TaskPayload = Callable[[str], dict]
@@ -30,16 +30,36 @@ class KanbanWebError(Exception):
     pass
 
 
+def _share_dir_ready(path: Path) -> bool:
+    return path.is_dir() and (path / "board.html").is_file()
+
+
 def resolve_share_dir(explicit: Optional[Path] = None) -> Path:
     if explicit is not None:
         path = explicit.resolve()
         if not path.is_dir():
             raise KanbanWebError(t(f"Web 资源目录不存在: {path}", f"web assets directory not found: {path}"))
         return path
+    try:
+        paths = install_paths(entry=Path(__file__))
+    except ConfigError as error:
+        raise KanbanWebError(str(error)) from error
     candidates = []
     env_share = os.environ.get("ONEVOKE_SHARE")
     if env_share:
         candidates.append(Path(env_share) / "kanban-web")
+    if paths.mode == "project":
+        project_share = paths.share_dir / "kanban-web"
+        candidates.append(project_share)
+        for candidate in candidates:
+            if _share_dir_ready(candidate):
+                return candidate
+        raise KanbanWebError(
+            t(
+                f"未找到项目 kanban web 资源: {project_share}",
+                f"project kanban web assets not found: {project_share}",
+            )
+        )
     here = Path(__file__).resolve()
     candidates.extend(
         (
@@ -49,7 +69,7 @@ def resolve_share_dir(explicit: Optional[Path] = None) -> Path:
         )
     )
     for candidate in candidates:
-        if candidate.is_dir() and (candidate / "board.html").is_file():
+        if _share_dir_ready(candidate):
             return candidate
     if os.name == "nt":
         raise KanbanWebError(

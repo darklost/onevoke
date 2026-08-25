@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from onevoke_config import ConfigError, install_paths
 from onevoke_fs import tighten_private_file_permissions
 
 
@@ -242,7 +243,10 @@ def prefs_path() -> Path:
     override = os.environ.get("ONEVOKE_CONFIG")
     if override:
         return Path(override).expanduser().with_name("tui.json")
-    return Path.home() / ".config" / "onevoke" / "tui.json"
+    try:
+        return install_paths(entry=Path(__file__)).config_path.with_name("tui.json")
+    except ConfigError as error:
+        raise KanbanTuiError(str(error)) from error
 
 
 def load_column_width(default: int = DEFAULT_COLUMN_WIDTH) -> int:

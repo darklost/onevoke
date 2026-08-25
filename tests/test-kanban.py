@@ -507,6 +507,9 @@ printf '%s\\n' '@9'
         self.assertIn('model_reasoning_effort="medium"', tmux_args[-1])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", tmux_args[-1])
         self.assertIn(task_id, tmux_args[-1])
+        self.assertIn("先运行 kanban rules", tmux_args[-1])
+        self.assertIn("遵守目标项目 AGENTS.md", tmux_args[-1])
+        self.assertNotIn(".onevoke/bin/kanban", tmux_args[-1])
 
     def test_start_window_name_folds_title_and_truncates(self) -> None:
         task_id, task = self.make_todo("window-name")
@@ -3868,6 +3871,390 @@ N/A
                 )
         self.assertIn("终端初始化失败", str(caught.exception))
         self.assertNotIn("failed to initialize terminal", str(caught.exception))
+
+
+class KanbanProjectInstallTest(unittest.TestCase):
+    """项目安装入口必须使用主 worktree `.onevoke/`, 且不得回落全局资源."""
+
+    def setUp(self) -> None:
+        self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
+        self.language.start()
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.saved = {
+            name: os.environ.get(name)
+            for name in (
+                "HOME",
+                "USERPROFILE",
+                "ONEVOKE_CONFIG",
+                "ONEVOKE_SHARE",
+                "KANBAN_DIR",
+            )
+        }
+        os.environ["HOME"] = str(self.home)
+        os.environ["USERPROFILE"] = str(self.home)
+        for name in ("ONEVOKE_CONFIG", "ONEVOKE_SHARE", "KANBAN_DIR"):
+            os.environ.pop(name, None)
+        global_rules = self.home / ".agents"
+        global_rules.mkdir(parents=True)
+        (global_rules / "KANBAN-RULES.md").write_text(
+            "# 全局文件看板规则\nglobal-rules-marker\n",
+            encoding="utf-8",
+        )
+        global_share = self.home / ".local" / "share" / "onevoke" / "kanban-web"
+        global_share.mkdir(parents=True)
+        (global_share / "board.html").write_text("GLOBAL-ASSET\n", encoding="utf-8")
+        self.env = os.environ.copy()
+        self.env["HOME"] = str(self.home)
+        self.env["USERPROFILE"] = str(self.home)
+        self.env["ONEVOKE_LANG"] = "zh"
+        for name in ("ONEVOKE_CONFIG", "ONEVOKE_SHARE", "KANBAN_DIR", "TMUX", "TMUX_PANE"):
+            self.env.pop(name, None)
+
+    def tearDown(self) -> None:
+        for name, value in self.saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        self.temp.cleanup()
+        self.language.stop()
+
+    def init_git_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "-q", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.email", "onevoke@example.com"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.name", "Onevoke Test"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "init"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return path
+
+    def install_project_layout(self, project: Path, *, with_rules: bool = True, with_share: bool = True) -> Path:
+        bin_dir = project / ".onevoke" / "bin"
+        bin_dir.mkdir(parents=True)
+        for name in (
+            "kanban",
+            "onevoke_config.py",
+            "onevoke_fs.py",
+            "kanban_web.py",
+            "kanban_tui.py",
+        ):
+            shutil.copy2(PROJECT_ROOT / "bin" / name, bin_dir / name)
+        if with_rules:
+            rules_dir = project / ".onevoke" / "rules"
+            rules_dir.mkdir(parents=True, exist_ok=True)
+            (rules_dir / "KANBAN-RULES.md").write_text(
+                "# 项目看板规则\nproject-rules-marker\n",
+                encoding="utf-8",
+            )
+        if with_share:
+            share_dir = project / ".onevoke" / "share" / "kanban-web"
+            share_dir.mkdir(parents=True, exist_ok=True)
+            (share_dir / "board.html").write_text("PROJECT-ASSET\n", encoding="utf-8")
+        (project / "AGENTS.md").write_text("# 目标项目规则\n", encoding="utf-8")
+        return bin_dir / "kanban"
+
+    def run_entry(
+        self,
+        entry: Path,
+        *args: str,
+        cwd: Optional[Path] = None,
+        env: Optional[dict] = None,
+        succeeds: bool = True,
+    ) -> subprocess.CompletedProcess:
+        result = subprocess.run(
+            [sys.executable, str(entry), *args],
+            cwd=str(cwd or entry.parent),
+            env=env or self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if succeeds and result.returncode != 0:
+            self.fail(result.stderr)
+        if not succeeds and result.returncode == 0:
+            self.fail(f"command unexpectedly succeeded: {' '.join(args)}")
+        return result
+
+    def run_module(self, bin_dir: Path, script: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(bin_dir),
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_source_tree_rules_stay_global_even_if_project_layout_exists(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        self.install_project_layout(project)
+        result = subprocess.run(
+            [sys.executable, str(COMMAND), "rules"],
+            cwd=str(project),
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("global-rules-marker", result.stdout)
+        self.assertNotIn("project-rules-marker", result.stdout)
+
+    def test_project_rules_from_main_and_task_worktree(self) -> None:
+        main = self.init_git_repo(self.root / "app")
+        entry = self.install_project_layout(main)
+        linked = self.root / "app-work"
+        subprocess.run(
+            ["git", "-C", str(main), "worktree", "add", "-q", str(linked), "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        from_main = self.run_entry(entry, "rules", cwd=main)
+        from_work = self.run_entry(entry, "rules", cwd=linked)
+        self.assertIn("project-rules-marker", from_main.stdout)
+        self.assertIn("project-rules-marker", from_work.stdout)
+        self.assertNotIn("global-rules-marker", from_main.stdout)
+        self.assertNotIn("global-rules-marker", from_work.stdout)
+        init = self.run_entry(entry, "init", cwd=main)
+        init_text = init.stdout.replace("\\", "/")
+        self.assertIn("/.onevoke/rules/KANBAN-RULES.md", init_text)
+        self.assertNotIn("/.agents/KANBAN-RULES.md", init_text)
+
+    def test_project_rules_missing_does_not_fall_back_to_global(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        entry = self.install_project_layout(project, with_rules=False)
+        result = self.run_entry(entry, "rules", cwd=project, succeeds=False)
+        self.assertIn("项目规则不存在", result.stderr)
+        self.assertIn("/.onevoke/rules/KANBAN-RULES.md", result.stderr.replace("\\", "/"))
+        self.assertNotIn("全局规则不存在", result.stderr)
+        self.assertNotIn("global-rules-marker", result.stdout)
+        self.assertNotIn("project-rules-marker", result.stdout)
+
+    def test_project_entry_without_git_does_not_use_global_rules(self) -> None:
+        project = self.root / "not-git"
+        entry = self.install_project_layout(project)
+        result = self.run_entry(entry, "rules", cwd=project, succeeds=False)
+        self.assertIn("项目不是 Git 仓库", result.stderr)
+        self.assertNotIn("global-rules-marker", result.stdout)
+
+    @unittest.skipUnless(os.name == "posix", "symlink install-root rejection is POSIX-specific")
+    def test_project_rules_rejects_symlinked_install_root(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        real = self.root / "payload"
+        entry = self.install_project_layout(real)
+        (project / ".onevoke").symlink_to(real / ".onevoke")
+        linked_entry = project / ".onevoke" / "bin" / "kanban"
+        result = self.run_entry(linked_entry, "rules", cwd=project, succeeds=False)
+        self.assertIn("路径分量不得是符号链接", result.stderr)
+        self.assertNotIn("project-rules-marker", result.stdout)
+        self.assertNotIn("global-rules-marker", result.stdout)
+        self.assertTrue(entry.is_file())
+
+    def test_project_web_uses_local_share_and_skips_global(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        entry = self.install_project_layout(project)
+        resolved = self.run_module(
+            entry.parent,
+            "import kanban_web; print(kanban_web.resolve_share_dir())",
+        )
+        self.assertEqual(0, resolved.returncode, resolved.stderr)
+        share = Path(resolved.stdout.strip())
+        self.assertIn("/.onevoke/share/kanban-web", str(share).replace("\\", "/"))
+        self.assertNotIn("/.local/share/onevoke/kanban-web", str(share).replace("\\", "/"))
+        self.assertEqual("PROJECT-ASSET\n", (share / "board.html").read_text(encoding="utf-8"))
+
+    def test_project_web_missing_assets_do_not_use_global_share(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        entry = self.install_project_layout(project, with_share=False)
+        resolved = self.run_module(
+            entry.parent,
+            "import kanban_web\n"
+            "try:\n"
+            "    kanban_web.resolve_share_dir()\n"
+            "except kanban_web.KanbanWebError as error:\n"
+            "    raise SystemExit(str(error))\n",
+        )
+        self.assertNotEqual(0, resolved.returncode)
+        self.assertIn("未找到项目 kanban web 资源", resolved.stderr)
+        self.assertIn("/.onevoke/share/kanban-web", resolved.stderr.replace("\\", "/"))
+        self.assertNotIn("install.sh", resolved.stderr)
+        self.assertNotIn("GLOBAL-ASSET", resolved.stdout)
+
+    def test_project_tui_prefs_use_project_config_dir(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        entry = self.install_project_layout(project)
+        resolved = self.run_module(
+            entry.parent,
+            "import kanban_tui; print(kanban_tui.prefs_path())",
+        )
+        self.assertEqual(0, resolved.returncode, resolved.stderr)
+        self.assertIn("/.onevoke/tui.json", resolved.stdout.strip().replace("\\", "/"))
+        self.assertNotIn("/.config/onevoke/tui.json", resolved.stdout.replace("\\", "/"))
+        global_prefs = self.run_module(
+            COMMAND.parent,
+            "import kanban_tui; print(kanban_tui.prefs_path())",
+        )
+        self.assertEqual(0, global_prefs.returncode, global_prefs.stderr)
+        self.assertIn(
+            "/.config/onevoke/tui.json",
+            global_prefs.stdout.strip().replace("\\", "/"),
+        )
+        self.assertNotIn("/.onevoke/tui.json", global_prefs.stdout.replace("\\", "/"))
+
+    def test_start_prompt_uses_absolute_project_paths(self) -> None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            loader = SourceFileLoader("kanban_prompt_test", str(COMMAND))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            if spec is None:
+                self.fail(f"unable to load {COMMAND}")
+            kanban_mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(kanban_mod)
+            import onevoke_config
+        finally:
+            sys.path.pop(0)
+        global_paths = onevoke_config.install_paths(entry=COMMAND)
+        global_prompt = kanban_mod.start_agent_prompt("20260825-demo-task", global_paths)
+        self.assertIn("先运行 kanban rules", global_prompt)
+        self.assertIn("遵守目标项目 AGENTS.md", global_prompt)
+        self.assertNotIn(".onevoke/bin/kanban", global_prompt)
+
+        project = self.init_git_repo(self.root / "app")
+        entry = self.install_project_layout(project)
+        project_paths = onevoke_config.install_paths(entry=entry)
+        prompt = kanban_mod.start_agent_prompt("20260825-demo-task", project_paths)
+        self.assertEqual("project", project_paths.mode)
+        kanban_cmd = str(project_paths.bin_dir / "kanban")
+        agents_md = str((project_paths.project_root or project) / "AGENTS.md")
+        self.assertIn(f"先运行 {kanban_cmd} rules", prompt)
+        self.assertIn(f"{kanban_cmd} show 20260825-demo-task", prompt)
+        self.assertIn(f"遵守 {agents_md}", prompt)
+        self.assertNotIn("先运行 kanban rules", prompt)
+
+    @unittest.skipUnless(os.name == "posix", "tmux launcher coverage requires POSIX")
+    def test_project_start_from_task_worktree_uses_project_command_and_config(self) -> None:
+        main = self.init_git_repo(self.root / "app")
+        entry = self.install_project_layout(main)
+        linked = self.root / "app-work"
+        subprocess.run(
+            ["git", "-C", str(main), "worktree", "add", "-q", str(linked), "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        board = main / "kanban"
+        self.run_entry(entry, "init", cwd=linked)
+        today = datetime.now().strftime("%Y%m%d")
+        task_id = f"{today}-project-start-task"
+        self.run_entry(entry, "new", "chore", "project-start", "项目启动", cwd=linked)
+        task = board / "backlog" / f"{task_id}.md"
+        text = task.read_text(encoding="utf-8")
+        replacements = ("实现目标", "产生可验证结果", "满足验收", "无额外范围")
+        for replacement in replacements:
+            text = text.replace("<填写>", replacement, 1)
+        task.write_text(text, encoding="utf-8")
+        self.run_entry(entry, "move", task_id, "todo", cwd=linked)
+
+        global_config = self.home / ".config" / "onevoke" / "config.json"
+        global_config.parent.mkdir(parents=True)
+        global_config.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "claude",
+                    "launcher": "tmux",
+                    "reviewers": {
+                        "PM": "codex",
+                        "CSA": "codex",
+                        "Hacker": "codex",
+                        "QA": "codex",
+                    },
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (main / ".onevoke" / "config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "grok",
+                    "launcher": "tmux",
+                    "reviewers": {
+                        "PM": "codex",
+                        "CSA": "codex",
+                        "Hacker": "codex",
+                        "QA": "codex",
+                    },
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        tmux = fake_bin / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "display-message" ]; then
+    printf '%s\\n' '$42'
+    exit 0
+fi
+printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG"
+printf '%s\\n' '@9'
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+        for name in ("codex", "claude", "grok"):
+            agent = fake_bin / name
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            agent.chmod(0o755)
+        env = self.env.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env["TMUX"] = "/tmp/fake-tmux,1,0"
+        env["TMUX_PANE"] = "%7"
+        env["KANBAN_TMUX_LOG"] = str(self.root / "tmux.log")
+
+        result = self.run_entry(entry, "start", task_id, cwd=linked, env=env)
+        self.assertIn(f"已启动: {task_id}", result.stdout)
+        self.assertIn("Agent=grok", result.stdout)
+        self.assertTrue((board / "working" / f"{task_id}.md").is_file())
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn(str(fake_bin / "grok"), command)
+        self.assertIn(str(entry), command)
+        self.assertIn(str(main / "AGENTS.md"), command)
+        self.assertIn(str(main), (self.root / "tmux.log").read_text(encoding="utf-8"))
+        self.assertNotIn("先运行 kanban rules", command)
 
 
 if __name__ == "__main__":

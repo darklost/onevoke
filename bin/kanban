@@ -23,10 +23,12 @@ from onevoke_config import (
     LANGUAGES,
     LAUNCHERS,
     ConfigError,
+    InstallPaths,
     LocalizedArgumentParser,
     apply_language_argument,
     bind_effective_language,
     effective_config,
+    install_paths,
     language_text,
     load_config,
 )
@@ -183,15 +185,51 @@ def board_root() -> Path:
     ))
 
 
-def global_rules_path() -> Path:
-    return Path.home() / ".agents" / "KANBAN-RULES.md"
+def current_install_paths() -> InstallPaths:
+    try:
+        return install_paths(entry=Path(__file__))
+    except ConfigError as error:
+        raise KanbanError(str(error)) from error
+
+
+def rules_path(paths: Optional[InstallPaths] = None) -> Path:
+    return (paths or current_install_paths()).rules_dir / "KANBAN-RULES.md"
 
 
 def command_rules() -> None:
-    rules = global_rules_path()
+    paths = current_install_paths()
+    rules = rules_path(paths)
     if not rules.is_file():
-        raise KanbanError(t(f"全局规则不存在: {rules}", f"Global rules file does not exist: {rules}"))
+        if paths.mode == "project":
+            raise KanbanError(
+                t(f"项目规则不存在: {rules}", f"Project rules file does not exist: {rules}")
+            )
+        raise KanbanError(
+            t(f"全局规则不存在: {rules}", f"Global rules file does not exist: {rules}")
+        )
     sys.stdout.write(rules.read_text(encoding="utf-8"))
+
+
+def start_agent_prompt(task_id: str, paths: InstallPaths) -> str:
+    """生成 start 交给执行 Agent 的固定说明.
+
+    全局模式保持 PATH 中的 `kanban` 与相对的项目 AGENTS.md; 项目模式必须
+    给出命令根和主 worktree 规则入口的绝对路径, 避免 Agent 改走 PATH 里
+    的全局同名命令.
+    """
+    if paths.mode == "project":
+        kanban_cmd = str(paths.bin_dir / "kanban")
+        agents_md = str((paths.project_root or paths.bin_dir) / "AGENTS.md")
+        return (
+            f"执行 Kanban 任务 {task_id}. 先运行 {kanban_cmd} rules, 再运行 "
+            f"{kanban_cmd} show {task_id}. 卡片已进入 working. 遵守 {agents_md}, "
+            "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
+        )
+    return (
+        f"执行 Kanban 任务 {task_id}. 先运行 kanban rules, 再运行 "
+        f"kanban show {task_id}. 卡片已进入 working. 遵守目标项目 AGENTS.md, "
+        "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
+    )
 
 
 def add_git_exclude(root: Path) -> Optional[Path]:
@@ -312,7 +350,7 @@ def command_init(args: argparse.Namespace) -> None:
     print(t(f"已初始化: {root}", f"initialized: {root}"))
     if exclude:
         print(t(f"Git 排除文件: {exclude}", f"git exclude: {exclude}"))
-    print(t(f"规则: {global_rules_path()}", f"rules: {global_rules_path()}"))
+    print(t(f"规则: {rules_path()}", f"rules: {rules_path()}"))
 
 
 def ensure_layout(root: Path) -> None:
@@ -1214,12 +1252,8 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
 
     original = read_document(entry)
     updated = start_metadata(original, agent_name)
+    prompt = start_agent_prompt(entry.task_id, current_install_paths())
     moved = move_entry(entry, root, "working")
-    prompt = (
-        f"执行 Kanban 任务 {entry.task_id}. 先运行 kanban rules, 再运行 "
-        f"kanban show {entry.task_id}. 卡片已进入 working. 遵守目标项目 AGENTS.md, "
-        "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
-    )
     name = window_name(entry, original)
     model_entry = config["models"]["kanban"][agent_name]
     agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind), prompt]
