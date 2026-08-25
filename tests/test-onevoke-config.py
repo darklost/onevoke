@@ -225,7 +225,8 @@ class InstallContextTest(unittest.TestCase):
         lines = exclude.read_text(encoding="utf-8").splitlines()
         self.assertEqual(1, lines.count("/.onevoke/"))
         self.assertEqual("# local", lines[0])
-        self.assertEqual(0o644, exclude.stat().st_mode & 0o777)
+        if os.name != "nt":
+            self.assertEqual(0o644, exclude.stat().st_mode & 0o777)
 
     @unittest.skipUnless(os.name == "posix", "POSIX symlink rejection")
     def test_git_exclude_rejects_info_symlink(self) -> None:
