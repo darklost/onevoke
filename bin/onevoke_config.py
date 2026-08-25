@@ -278,6 +278,12 @@ def _reject_leaf_reparse(path: Path) -> None:
         raise _unsafe_path_error(path)
 
 
+def _same_dir_name(left: str, right: str) -> bool:
+    if os.name == "nt":
+        return os.path.normcase(left) == os.path.normcase(right)
+    return left == right
+
+
 _GIT_OVERRIDE_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 
 
@@ -343,7 +349,9 @@ def install_paths(*, entry: Path | None = None) -> InstallPaths:
     source = _lexical_absolute(entry if entry is not None else Path(__file__))
     bin_dir = source.parent
     install_root = bin_dir.parent
-    if bin_dir.name != "bin" or install_root.name != PROJECT_INSTALL_DIRNAME:
+    if not _same_dir_name(bin_dir.name, "bin") or not _same_dir_name(
+        install_root.name, PROJECT_INSTALL_DIRNAME
+    ):
         return _global_install_paths()
     if os.name == "nt":
         _ensure_windows_path_nofollow_safe(bin_dir)

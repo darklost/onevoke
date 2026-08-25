@@ -95,6 +95,16 @@ class InstallContextTest(unittest.TestCase):
         self.assertEqual(self.home / ".local" / "bin", paths.bin_dir)
         self.assertEqual(self.home / ".local" / "share" / "onevoke", paths.share_dir)
 
+    def test_posix_uppercase_onevoke_dir_is_not_project(self) -> None:
+        if os.name == "nt":
+            self.skipTest("Windows treats .ONEVOKE as the project directory")
+        source = self.root / "cased"
+        entry = source / ".ONEVOKE" / "bin" / "onevoke_config.py"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("# not a project layout on POSIX\n", encoding="utf-8")
+        paths = self.config.install_paths(entry=entry)
+        self.assertEqual("global", paths.mode)
+
     def test_source_layout_with_bin_and_rules_is_not_project(self) -> None:
         source = self.root / "onevoke-src"
         (source / "bin").mkdir(parents=True)

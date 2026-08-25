@@ -576,6 +576,25 @@ class WindowsSafeFileSystemTest(unittest.TestCase):
                 entry=project / ".onevoke" / "bin" / "onevoke"
             )
 
+    def test_install_paths_accepts_windows_case_of_onevoke_bin(self) -> None:
+        project = self.base / "project-case"
+        project.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(project)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        entry = project / ".onevoke" / "bin" / "onevoke"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("entry\n", encoding="utf-8")
+        cased = project / ".ONEVOKE" / "BIN" / "onevoke"
+
+        paths = onevoke_config.install_paths(entry=cased)
+
+        self.assertEqual("project", paths.mode)
+        self.assertEqual(paths.config_path, paths.project_root / ".onevoke" / "config.json")
+
     def test_install_paths_rejects_bin_junction(self) -> None:
         project = self.base / "project-bin-junction"
         project.mkdir()
