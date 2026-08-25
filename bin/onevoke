@@ -20,6 +20,7 @@ from onevoke_config import (
     REVIEW_ROLES,
     REVIEW_STAGE_MODES,
     ConfigError,
+    InstallPaths,
     LocalizedArgumentParser,
     apply_language_argument,
     bind_config_language,
@@ -28,6 +29,7 @@ from onevoke_config import (
     configured_language,
     default_config,
     effective_config,
+    install_paths,
     language_text,
     load_config,
     resolve_language,
@@ -63,6 +65,63 @@ class OnevokeError(Exception):
     pass
 
 
+def current_paths() -> InstallPaths:
+    """按当前 onevoke 入口解析安装作用域, 不跟随符号链接."""
+    return install_paths(entry=Path(__file__))
+
+
+def review_gate() -> str | None:
+    """当前入口应调用的审核门禁.
+
+    项目模式只使用本安装命令根中的入口, 缺失时不回落 PATH 或全局安装.
+    全局 POSIX 仍查 PATH, 以保持源码树测试和 ``~/.local/bin`` 行为.
+    Windows 程序化分发只进入同目录 ``onevoke_review.py``.
+    """
+    paths = current_paths()
+    if os.name == "nt":
+        if REVIEW_IMPLEMENTATION.is_file():
+            return str(REVIEW_IMPLEMENTATION)
+        return None
+    if paths.mode == "project":
+        command = paths.bin_dir / REVIEW_ENTRYPOINT
+        return str(command) if command.is_file() else None
+    return shutil.which(REVIEW_ENTRYPOINT)
+
+
+def review_gate_missing_message() -> str:
+    paths = current_paths()
+    if os.name == "nt":
+        return t(
+            f"审核实现不存在: {REVIEW_IMPLEMENTATION}",
+            f"Review implementation is missing: {REVIEW_IMPLEMENTATION}",
+        )
+    if paths.mode == "project":
+        expected = paths.bin_dir / REVIEW_ENTRYPOINT
+        return t(f"审核入口不存在: {expected}", f"review entrypoint is missing: {expected}")
+    return t(
+        f"{REVIEW_ENTRYPOINT} 不在 PATH",
+        f"{REVIEW_ENTRYPOINT} is not in PATH",
+    )
+
+
+def command_missing_message(name: str) -> str:
+    paths = current_paths()
+    if paths.mode == "project":
+        expected = paths.bin_dir / name
+        return t(
+            f"{name} 不在项目命令根: {expected}",
+            f"{name} is not in the project command root: {expected}",
+        )
+    return t(
+        f"{name} 不在 PATH. 请把 ~/.local/bin 加入 PATH 后重新打开 shell.",
+        f"{name} is not in PATH. Add ~/.local/bin to PATH and reopen your shell.",
+    )
+
+
+def rules_entry() -> Path:
+    return current_paths().rules_dir / "ONEVOKE-AGENTS.md"
+
+
 def color(code: str, text: str) -> str:
     if os.environ.get("NO_COLOR") or not sys.stderr.isatty():
         return text
@@ -78,6 +137,13 @@ def success(text: str) -> None:
 
 
 def find_commands() -> dict[str, str | None]:
+    paths = current_paths()
+    if paths.mode == "project":
+        found: dict[str, str | None] = {}
+        for name in COMMANDS:
+            command = paths.bin_dir / name
+            found[name] = str(command) if command.is_file() else None
+        return found
     return {name: shutil.which(name) for name in COMMANDS}
 
 
@@ -190,16 +256,27 @@ def _candidate_context(
     return "\n".join([section, *prior_lines, *following_lines])
 
 
+def _rule_entry_candidates(entry: Path) -> set[str]:
+    """当前作用域规则入口的可接受引用, 含 HOME 与 /tmp 解析别名."""
+    candidates: set[str] = {str(entry)}
+    try:
+        expanded = entry.expanduser()
+        resolved = expanded.resolve()
+        candidates.add(str(expanded))
+        candidates.add(str(resolved))
+        homes = {str(Path.home()), str(Path.home().resolve())}
+        for path in (str(expanded), str(resolved)):
+            for home in homes:
+                if path == home or path.startswith(home + os.sep):
+                    candidates.add("~" + path[len(home):])
+    except OSError:
+        pass
+    return candidates
+
+
 def _claude_rules_import_present(text: str, entry: Path) -> bool:
     """Claude 只认独立行的 @ 导入, 且所在段落不得是否定/废弃语境."""
-    candidates: set[str] = {"~/.agents/ONEVOKE-AGENTS.md"}
-    try:
-        resolved = entry.expanduser().resolve()
-        candidates.add(str(entry))
-        candidates.add(str(resolved))
-        candidates.add(str(resolved).replace(str(Path.home()), "~", 1))
-    except OSError:
-        candidates.add(str(entry))
+    candidates = _rule_entry_candidates(entry)
     body = _strip_comments_and_fences(text)
     offset = 0
     for raw in body.splitlines(keepends=True):
@@ -254,7 +331,7 @@ def _merged_rules_present(text: str, entry: Path) -> bool:
 
 
 def rules_integration(agent: str) -> tuple[bool, str]:
-    entry = Path.home() / ".agents" / "ONEVOKE-AGENTS.md"
+    entry = rules_entry()
     if agent == "codex":
         target = Path.home() / ".codex" / "AGENTS.md"
     elif agent == "claude":
@@ -284,15 +361,18 @@ def rules_integration(agent: str) -> tuple[bool, str]:
 def print_doctor() -> bool:
     healthy = True
     print(t("Onevoke 环境检查", "Onevoke environment check"), file=sys.stderr)
+    paths = current_paths()
+    if paths.mode == "project":
+        success(t(f"安装模式: 项目 ({paths.install_root})", f"install mode: project ({paths.install_root})"))
+        success(t(f"规则入口: {rules_entry()}", f"rules entry: {rules_entry()}"))
+    else:
+        success(t("安装模式: 全局", "install mode: global"))
     for name, path in find_commands().items():
         if path:
             success(f"{name}: {path}")
         else:
             healthy = False
-            warning(t(
-                f"{name} 不在 PATH. 请把 ~/.local/bin 加入 PATH 后重新打开 shell.",
-                f"{name} is not in PATH. Add ~/.local/bin to PATH and reopen your shell.",
-            ))
+            warning(command_missing_message(name))
     try:
         # 只用来决定要不要提示进入 session; 配置本身的错误留给下面的统一校验报告.
         configured_launcher = effective_config(load_config())["launcher"]
@@ -389,24 +469,27 @@ def validate_configured_resources(
             )
         )
 
-    review_command = (
-        str(REVIEW_IMPLEMENTATION)
-        if os.name == "nt" and REVIEW_IMPLEMENTATION.is_file()
-        else shutil.which(REVIEW_ENTRYPOINT)
-    )
+    review_command = review_gate()
+    if not review_command and os.name == "nt" and current_paths().mode != "project":
+        review_command = shutil.which(REVIEW_ENTRYPOINT)
     if not review_command:
         healthy = False
-        if os.name == "nt":
-            message = t(
-                f"审核实现不存在: {REVIEW_IMPLEMENTATION}; 请重新安装 Onevoke.",
-                f"Review implementation is missing: {REVIEW_IMPLEMENTATION}; reinstall Onevoke.",
+        if current_paths().mode == "project":
+            warning(review_gate_missing_message())
+        elif os.name == "nt":
+            warning(
+                t(
+                    f"审核实现不存在: {REVIEW_IMPLEMENTATION}; 请重新安装 Onevoke.",
+                    f"Review implementation is missing: {REVIEW_IMPLEMENTATION}; reinstall Onevoke.",
+                )
             )
         else:
-            message = t(
-                "onevoke-review.sh 不在 PATH; 请把 ~/.local/bin 加入 PATH 或重新安装 Onevoke.",
-                "onevoke-review.sh is not in PATH; add ~/.local/bin to PATH or reinstall Onevoke.",
+            warning(
+                t(
+                    "onevoke-review.sh 不在 PATH; 请把 ~/.local/bin 加入 PATH 或重新安装 Onevoke.",
+                    "onevoke-review.sh is not in PATH; add ~/.local/bin to PATH or reinstall Onevoke.",
+                )
             )
-        warning(message)
 
     for role in REVIEW_ROLES:
         reviewer = effective["reviewers"][role]
@@ -686,7 +769,7 @@ def install_memsearch_for(agent: str) -> None:
     source = Path(
         os.environ.get(
             "ONEVOKE_MEMSEARCH_SOURCE",
-            Path.home() / ".local" / "share" / "onevoke" / "memsearch",
+            str(current_paths().share_dir / "memsearch"),
         )
     ).expanduser()
     installer = source / "plugins" / "codex" / "scripts" / "install.sh"
@@ -953,14 +1036,15 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
             edit_language(config)
 
     selected_agent = config["kanban_agent"]
+    entry = rules_entry()
     integrated, detail = rules_integration(selected_agent)
     if integrated:
         success(t(f"{AGENT_LABELS[selected_agent]} 已接入 Onevoke 规则: {detail}", f"{AGENT_LABELS[selected_agent]} is connected to Onevoke rules: {detail}"))
     else:
         warning(t(f"{AGENT_LABELS[selected_agent]} 尚未接入 Onevoke 规则: {detail}", f"{AGENT_LABELS[selected_agent]} is not connected to Onevoke rules: {detail}"))
         print(t(
-            "请按 README 的接入章节配置, welcome 不会覆盖你的全局规则文件.",
-            "Follow the README integration section; welcome will not overwrite your global rules file.",
+            f"请按 README 的接入章节把规则入口接到 {entry}, welcome 不会覆盖 Agent 规则文件.",
+            f"Follow the README integration section and point the rules entry to {entry}; welcome will not overwrite Agent rules files.",
         ), file=sys.stderr)
     print(
         color("1;33", t(
@@ -1021,28 +1105,19 @@ def command_review(arguments: list[str]) -> NoReturn:
     config = effective_config(load_config())
     reviewer = config["reviewers"][normalized]
     arguments[3] = normalized
+    gate = review_gate()
+    if not gate:
+        raise OnevokeError(review_gate_missing_message())
     if os.name == "nt":
-        if not REVIEW_IMPLEMENTATION.is_file():
-            raise OnevokeError(
-                t(
-                    f"审核实现不存在: {REVIEW_IMPLEMENTATION}",
-                    f"Review implementation is missing: {REVIEW_IMPLEMENTATION}",
-                )
-            )
         # Batch files do not expose an argv boundary: cmd.exe reparses `%*`, so
         # metacharacters such as &, |, %, ! and quotes can be altered or executed.
         # Programmatic dispatch therefore enters the canonical Python gate directly.
         raise SystemExit(
             subprocess.call(
-                [sys.executable, "-B", "-X", "utf8", str(REVIEW_IMPLEMENTATION), reviewer, *arguments]
+                [sys.executable, "-B", "-X", "utf8", gate, reviewer, *arguments]
             )
         )
-    review_command = shutil.which(REVIEW_ENTRYPOINT)
-    if not review_command:
-        raise OnevokeError(
-            t(f"{REVIEW_ENTRYPOINT} 不在 PATH", f"{REVIEW_ENTRYPOINT} is not in PATH")
-        )
-    os.execv(review_command, [review_command, reviewer, *arguments])
+    os.execv(gate, [gate, reviewer, *arguments])
 
 
 def print_config(config: dict[str, Any]) -> None:

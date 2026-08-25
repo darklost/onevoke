@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -1344,6 +1345,354 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("用户取消, 配置未更改", decoded)
         self.assertNotIn("Traceback", decoded)
         self.assertFalse(self.config.exists())
+
+    def test_project_rules_integration_rejects_global_onevoke_entry(self) -> None:
+        onevoke = load_onevoke_module()
+        project = self.root / "app"
+        rules_dir = project / ".onevoke" / "rules"
+        rules_dir.mkdir(parents=True)
+        entry = rules_dir / "ONEVOKE-AGENTS.md"
+        entry.write_text("# project Onevoke entry\n", encoding="utf-8")
+        global_entry = self.home / ".agents" / "ONEVOKE-AGENTS.md"
+        global_entry.parent.mkdir(parents=True)
+        global_entry.write_text("# global Onevoke entry\n", encoding="utf-8")
+        paths = onevoke.InstallPaths(
+            mode="project",
+            config_path=project / ".onevoke" / "config.json",
+            rules_dir=rules_dir,
+            bin_dir=project / ".onevoke" / "bin",
+            share_dir=project / ".onevoke" / "share",
+            project_root=project,
+            install_root=project / ".onevoke",
+        )
+        claude = self.home / ".claude" / "CLAUDE.md"
+        claude.parent.mkdir(parents=True)
+        with mock.patch.object(onevoke, "install_paths", return_value=paths):
+            with mock.patch.object(Path, "home", return_value=self.home):
+                claude.write_text("@~/.agents/ONEVOKE-AGENTS.md\n", encoding="utf-8")
+                ok, _ = onevoke.rules_integration("claude")
+                self.assertFalse(ok)
+                claude.write_text(f"@{entry}\n", encoding="utf-8")
+                ok, detail = onevoke.rules_integration("claude")
+                self.assertTrue(ok, detail)
+                self.assertEqual(str(claude), detail)
+
+                codex = self.home / ".codex" / "AGENTS.md"
+                codex.parent.mkdir(parents=True)
+                codex.write_text("# global Onevoke entry\n\n## extra\n", encoding="utf-8")
+                ok, _ = onevoke.rules_integration("codex")
+                self.assertFalse(ok)
+                codex.write_text("# project Onevoke entry\n\n## extra\n", encoding="utf-8")
+                ok, detail = onevoke.rules_integration("codex")
+                self.assertTrue(ok, detail)
+
+
+class ProjectOnevokeRuntimeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
+        self.language.start()
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.global_config = self.home / ".config" / "onevoke" / "config.json"
+        self.fake_bin = self.root / "bin"
+        self.fake_bin.mkdir()
+        self.project = self.root / "app"
+        self.env = os.environ.copy()
+        self.env["HOME"] = str(self.home)
+        self.env["USERPROFILE"] = str(self.home)
+        self.env.pop("ONEVOKE_CONFIG", None)
+        self.env["PATH"] = str(self.fake_bin) + os.pathsep + os.environ.get("PATH", "")
+        self.env.pop("NO_COLOR", None)
+        self.env["ONEVOKE_LANG"] = "zh"
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+        self.language.stop()
+
+    def init_git_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "-q", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.email", "onevoke@example.com"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.name", "Onevoke Test"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "init"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return path
+
+    def fake_command(self, name: str, body: str | None = None) -> Path:
+        command = self.fake_bin / name
+        command.write_text(
+            body or f"#!/bin/sh\nprintf '%s\\n' '{name} test-version'\n",
+            encoding="utf-8",
+        )
+        command.chmod(0o755)
+        return command
+
+    def write_config(self, path: Path, **overrides: object) -> None:
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        payload.update(overrides)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def install_project_onevoke(self, *, review_body: str | None = None, commands: bool = True) -> Path:
+        project = self.init_git_repo(self.project)
+        bin_dir = project / ".onevoke" / "bin"
+        bin_dir.mkdir(parents=True)
+        rules_dir = project / ".onevoke" / "rules"
+        rules_dir.mkdir(parents=True)
+        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py"):
+            shutil.copy2(PROJECT_ROOT / "bin" / name, bin_dir / name)
+        (bin_dir / "onevoke").chmod(0o755)
+        (rules_dir / "ONEVOKE-AGENTS.md").write_text(
+            "# Onevoke 全局工作流规则\n\n项目规则入口\n",
+            encoding="utf-8",
+        )
+        if commands:
+            for name in ("kanban", "merge-worktree-memory.py"):
+                command = bin_dir / name
+                command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                command.chmod(0o755)
+            if os.name == "nt":
+                review_name = "onevoke-review.cmd"
+                body = review_body or "@echo off\r\nexit /b 0\r\n"
+            else:
+                review_name = "onevoke-review.sh"
+                body = review_body or "#!/bin/sh\nexit 0\n"
+            review = bin_dir / review_name
+            review.write_text(body, encoding="utf-8")
+            review.chmod(0o755)
+        return project
+
+    def run_project(self, *args: str) -> subprocess.CompletedProcess:
+        project_onevoke = self.project / ".onevoke" / "bin" / "onevoke"
+        return subprocess.run(
+            [sys.executable, str(project_onevoke), *args],
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_project_config_reads_and_writes_project_file_not_global(self) -> None:
+        self.install_project_onevoke()
+        self.write_config(self.global_config, kanban_agent="grok")
+
+        missing = self.run_project("config")
+        self.assertEqual(0, missing.returncode, missing.stderr)
+        self.assertIn("引导: 未完成", missing.stdout)
+        self.assertIn("看板 Agent: codex", missing.stdout)
+        self.assertEqual(
+            "grok",
+            json.loads(self.global_config.read_text(encoding="utf-8"))["kanban_agent"],
+        )
+
+        project_config = self.project / ".onevoke" / "config.json"
+        self.write_config(project_config, kanban_agent="claude")
+        present = self.run_project("config")
+        self.assertEqual(0, present.returncode, present.stderr)
+        self.assertIn("看板 Agent: claude", present.stdout)
+        self.assertEqual(
+            "grok",
+            json.loads(self.global_config.read_text(encoding="utf-8"))["kanban_agent"],
+        )
+        self.assertNotIn(str(self.global_config), present.stdout + present.stderr)
+
+    def test_project_doctor_uses_local_paths_and_ignores_global_commands(self) -> None:
+        self.install_project_onevoke()
+        self.write_config(self.project / ".onevoke" / "config.json")
+        for name in ("codex", "claude", "grok", "tmux"):
+            self.fake_command(name)
+        trap = self.fake_command("onevoke-review.sh")
+        trap_kanban = self.fake_command("kanban")
+
+        result = self.run_project("doctor")
+        install_root = (self.project / ".onevoke").resolve()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("安装模式: 项目", result.stderr)
+        self.assertIn(str(install_root), result.stderr)
+        self.assertIn(str(install_root / "rules" / "ONEVOKE-AGENTS.md"), result.stderr)
+        self.assertIn(str(install_root / "bin" / "kanban"), result.stderr)
+        self.assertIn(str(install_root / "config.json"), result.stderr)
+        self.assertNotIn(str(trap), result.stderr)
+        self.assertNotIn(str(trap_kanban), result.stderr)
+        self.assertNotIn("~/.local/bin", result.stderr)
+        self.assertNotIn(".agents", result.stderr)
+        self.assertNotIn(".config/onevoke", result.stderr)
+
+    def test_project_doctor_missing_command_does_not_point_to_global_path(self) -> None:
+        self.install_project_onevoke()
+        (self.project / ".onevoke" / "bin" / "kanban").unlink()
+        self.write_config(self.project / ".onevoke" / "config.json")
+        self.fake_command("codex")
+        self.fake_command("kanban")
+
+        result = self.run_project("doctor")
+
+        self.assertEqual(1, result.returncode)
+        expected = (self.project / ".onevoke" / "bin" / "kanban").resolve()
+        self.assertIn(f"kanban 不在项目命令根: {expected}", result.stderr)
+        self.assertNotIn("~/.local/bin", result.stderr)
+        self.assertNotIn("不在 PATH", result.stderr)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX review dispatch uses onevoke-review.sh")
+    def test_project_review_uses_local_gate_not_path(self) -> None:
+        log = self.root / "review.log"
+        self.env["REVIEW_LOG"] = str(log)
+        self.install_project_onevoke(
+            review_body="#!/bin/sh\nprintf 'PROJECT %s\\n' \"$*\" > \"$REVIEW_LOG\"\n"
+        )
+        self.write_config(
+            self.project / ".onevoke" / "config.json",
+            reviewers={role: "codex" for role in ROLES} | {"QA": "claude"},
+        )
+        self.write_config(self.global_config, reviewers={role: "grok" for role in ROLES})
+        self.fake_command(
+            "onevoke-review.sh",
+            "#!/bin/sh\nprintf 'GLOBAL %s\\n' \"$*\" > \"$REVIEW_LOG\"\n",
+        )
+
+        result = self.run_project(
+            "review", "/worktree", "base", "commit", "qa", "目标"
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            "PROJECT claude /worktree base commit QA 目标\n",
+            log.read_text(encoding="utf-8"),
+        )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX review dispatch uses onevoke-review.sh")
+    def test_project_review_missing_gate_does_not_fallback_to_path(self) -> None:
+        log = self.root / "review.log"
+        self.env["REVIEW_LOG"] = str(log)
+        self.install_project_onevoke()
+        (self.project / ".onevoke" / "bin" / "onevoke-review.sh").unlink()
+        self.write_config(self.project / ".onevoke" / "config.json")
+        self.fake_command(
+            "onevoke-review.sh",
+            "#!/bin/sh\nprintf 'GLOBAL %s\\n' \"$*\" > \"$REVIEW_LOG\"\n",
+        )
+
+        result = self.run_project(
+            "review", "/worktree", "base", "commit", "QA", "目标"
+        )
+
+        expected = (self.project / ".onevoke" / "bin" / "onevoke-review.sh").resolve()
+        self.assertEqual(1, result.returncode)
+        self.assertIn(f"审核入口不存在: {expected}", result.stderr)
+        self.assertNotIn("不在 PATH", result.stderr)
+        self.assertFalse(log.exists())
+
+    def test_project_entry_without_git_does_not_fallback(self) -> None:
+        project = self.root / "not-git"
+        bin_dir = project / ".onevoke" / "bin"
+        bin_dir.mkdir(parents=True)
+        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py"):
+            shutil.copy2(PROJECT_ROOT / "bin" / name, bin_dir / name)
+        self.write_config(self.global_config, kanban_agent="grok")
+
+        result = subprocess.run(
+            [sys.executable, str(bin_dir / "onevoke"), "config"],
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("项目不是 Git 仓库", result.stderr)
+        self.assertNotIn("grok", result.stdout)
+        self.assertNotIn("看板 Agent", result.stdout)
+
+    @unittest.skipUnless(os.name == "posix", "PTY welcome tests require POSIX")
+    def test_project_welcome_saves_project_config_and_points_to_project_rules(self) -> None:
+        self.install_project_onevoke()
+        self.write_config(self.global_config, kanban_agent="grok")
+        for name in ("codex", "claude", "grok"):
+            self.fake_command(name)
+        self.fake_command("tmux")
+        project_config = self.project / ".onevoke" / "config.json"
+        rules_entry = (self.project / ".onevoke" / "rules" / "ONEVOKE-AGENTS.md").resolve()
+
+        master, slave = pty.openpty()
+        process = subprocess.Popen(
+            [sys.executable, str(self.project / ".onevoke" / "bin" / "onevoke"), "welcome"],
+            env=self.env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+        seen: list[bytes] = []
+
+        def drain() -> None:
+            while True:
+                try:
+                    data = os.read(master, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                seen.append(data)
+
+        reader = threading.Thread(target=drain)
+        reader.start()
+        try:
+            os.write(master, b"\n")
+            returncode = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            os.close(master)
+            reader.join(timeout=5)
+        output = b"".join(seen).decode("utf-8", "replace")
+
+        self.assertEqual(0, returncode, output)
+        self.assertTrue(project_config.is_file())
+        saved = json.loads(project_config.read_text(encoding="utf-8"))
+        self.assertTrue(saved["welcome_complete"])
+        self.assertEqual("codex", saved["kanban_agent"])
+        self.assertEqual(
+            "grok",
+            json.loads(self.global_config.read_text(encoding="utf-8"))["kanban_agent"],
+        )
+        self.assertIn(str(rules_entry), output)
+        self.assertNotIn("全局规则文件", output)
+        self.assertNotIn("~/.local/bin", output)
+        self.assertNotIn(".agents/ONEVOKE-AGENTS.md", output)
 
 
 class LanguageTextTest(unittest.TestCase):
