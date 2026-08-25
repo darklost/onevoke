@@ -346,9 +346,10 @@ def rules_integration(agent: str) -> tuple[bool, str]:
             expected = entry.expanduser().resolve()
             if linked == expected:
                 return True, str(target)
-            # 项目与全局共用同一套规则正文. 若跟随指向全局入口的软链再做
-            # 全文包含检查, 会把全局接入误判为已接到项目入口.
-            if current_paths().mode == "project":
+            # Codex/Grok 用软链接入入口. 项目与全局共用同一套规则正文,
+            # 跟随指向全局入口的软链再做全文包含会误判. Claude 是 @ 导入,
+            # CLAUDE.md 本身常软链到 dotfiles, 不得套用这条短路.
+            if current_paths().mode == "project" and agent != "claude":
                 return False, t(
                     f"{target} 未指向项目规则入口 {entry}",
                     f"{target} does not point to the project rules entry {entry}",

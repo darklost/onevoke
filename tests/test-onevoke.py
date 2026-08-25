@@ -1376,6 +1376,17 @@ class OnevokeCommandTest(unittest.TestCase):
                 ok, detail = onevoke.rules_integration("claude")
                 self.assertTrue(ok, detail)
                 self.assertEqual(str(claude), detail)
+                source = self.root / "dotfiles" / "CLAUDE.md"
+                source.parent.mkdir(parents=True)
+                source.write_text(f"@{entry}\n", encoding="utf-8")
+                claude.unlink()
+                claude.symlink_to(source)
+                ok, detail = onevoke.rules_integration("claude")
+                self.assertTrue(ok, detail)
+                source.write_text("@~/.agents/ONEVOKE-AGENTS.md\n", encoding="utf-8")
+                ok, _ = onevoke.rules_integration("claude")
+                self.assertFalse(ok)
+                claude.unlink()
 
                 body = "# shared Onevoke entry\n"
                 entry.write_text(body, encoding="utf-8")
