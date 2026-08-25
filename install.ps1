@@ -129,13 +129,15 @@ function Show-Usage {
 
   if ($Chinese) {
     $lines = @(
-      "用法: install.ps1 [--lang {cn,en}]",
-      "把 Onevoke 命令装到 ~/.local/bin, 规则装到 ~/.agents."
+      "用法: install.ps1 [--lang {cn,en}] [--project <目录>]",
+      "无参数时把 Onevoke 命令装到 ~/.local/bin, 规则装到 ~/.agents.",
+      "--project 把载荷装到目标 Git 项目主 worktree 的 .onevoke/, 完全跳过全局安装."
     )
   } else {
     $lines = @(
-      "usage: install.ps1 [--lang {cn,en}]",
-      "Install Onevoke commands to ~/.local/bin and rules to ~/.agents."
+      "usage: install.ps1 [--lang {cn,en}] [--project <directory>]",
+      "With no arguments, install Onevoke commands to ~/.local/bin and rules to ~/.agents.",
+      "--project installs into the target Git main worktree .onevoke/ and skips global paths."
     )
   }
   foreach ($line in $lines) {
@@ -221,27 +223,164 @@ function Test-PathEntryExists {
   return $null -ne (Get-LexicalEntry $Path)
 }
 
+function Invoke-PythonConfigCommand {
+  param(
+    [string]$SourceRoot,
+    [string[]]$Arguments,
+    [bool]$Chinese
+  )
+
+  $configScript = Join-Path $SourceRoot "bin\onevoke_config.py"
+  if (-not [IO.File]::Exists($configScript)) {
+    if ($Chinese) {
+      Fail-Install "错误: 找不到配置脚本: $configScript"
+    } else {
+      Fail-Install "error: configuration script not found: $configScript"
+    }
+  }
+
+  $launchers = @(Get-PythonLaunchers)
+  if ($launchers.Count -eq 0) {
+    if ($Chinese) {
+      Fail-Install "错误: 未找到可用的 Python 3"
+    } else {
+      Fail-Install "error: no usable Python 3 was found"
+    }
+  }
+
+  $previousNoBytecode = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
+  $previousErrorAction = $ErrorActionPreference
+  try {
+    [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1", "Process")
+    foreach ($launcher in $launchers) {
+      $ErrorActionPreference = "Continue"
+      try {
+        $output = & $launcher.Path @($launcher.Arguments) $configScript @Arguments 2>&1
+        $code = $LASTEXITCODE
+      } catch {
+        continue
+      } finally {
+        $ErrorActionPreference = $previousErrorAction
+      }
+      $stdoutLines = @()
+      $stderrLines = @()
+      foreach ($item in @($output)) {
+        if ($item -is [System.Management.Automation.ErrorRecord]) {
+          $stderrLines += [string]$item
+        } else {
+          $stdoutLines += [string]$item
+        }
+      }
+      $stdout = [string]::Join("`n", $stdoutLines).Trim()
+      $stderr = [string]::Join("`n", $stderrLines).Trim()
+      if ($code -ne 0) {
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+          Fail-Install $stderr
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+          Fail-Install $stdout
+        }
+        if ($Chinese) {
+          Fail-Install "错误: 无法准备项目安装路径"
+        } else {
+          Fail-Install "error: failed to prepare project install paths"
+        }
+      }
+      return $stdout
+    }
+  } finally {
+    [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $previousNoBytecode, "Process")
+    $ErrorActionPreference = $previousErrorAction
+  }
+  if ($Chinese) {
+    Fail-Install "错误: 未找到可用的 Python 3"
+  } else {
+    Fail-Install "error: no usable Python 3 was found"
+  }
+}
+
+function Convert-InstallPathsJson {
+  param([string]$Json, [bool]$Chinese)
+
+  try {
+    $paths = $Json | ConvertFrom-Json
+  } catch {
+    if ($Chinese) {
+      Fail-Install "错误: 无法解析项目安装路径"
+    } else {
+      Fail-Install "error: failed to parse project install paths"
+    }
+  }
+  foreach ($name in @("project_root", "install_root", "bin_dir", "rules_dir", "share_dir")) {
+    $value = [string]$paths.$name
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      if ($Chinese) {
+        Fail-Install "错误: 项目安装路径缺少 $name"
+      } else {
+        Fail-Install "error: project install paths are missing $name"
+      }
+    }
+  }
+  return $paths
+}
+
 $installArgs = @($args)
 $languageSet = $false
 $requestedLanguage = ""
-$remainingIndex = 0
 $missingLanguageValue = $false
+$projectSet = $false
+$projectTarget = ""
+$missingProjectValue = $false
+$showHelp = $false
+$unknownArgs = @()
 
-if ($installArgs.Count -gt 0) {
-  if ($installArgs[0] -eq "--lang") {
+$argIndex = 0
+while ($argIndex -lt $installArgs.Count) {
+  $current = [string]$installArgs[$argIndex]
+  if ($current -eq "--lang") {
     $languageSet = $true
-    if ($installArgs.Count -ge 2) {
-      $requestedLanguage = [string]$installArgs[1]
-      $remainingIndex = 2
-    } else {
+    if (($argIndex + 1) -ge $installArgs.Count) {
       $missingLanguageValue = $true
-      $remainingIndex = 1
+      $argIndex += 1
+      continue
     }
-  } elseif ([string]$installArgs[0] -like "--lang=*") {
-    $languageSet = $true
-    $requestedLanguage = ([string]$installArgs[0]).Substring(7)
-    $remainingIndex = 1
+    $requestedLanguage = [string]$installArgs[$argIndex + 1]
+    $argIndex += 2
+    continue
   }
+  if ($current -like "--lang=*") {
+    $languageSet = $true
+    $requestedLanguage = $current.Substring(7)
+    $argIndex += 1
+    continue
+  }
+  if ($current -eq "--project") {
+    $projectSet = $true
+    if (($argIndex + 1) -ge $installArgs.Count) {
+      $missingProjectValue = $true
+      $argIndex += 1
+      continue
+    }
+    $projectTarget = [string]$installArgs[$argIndex + 1]
+    $argIndex += 2
+    continue
+  }
+  if ($current -like "--project=*") {
+    $projectSet = $true
+    $projectTarget = $current.Substring(10)
+    $argIndex += 1
+    continue
+  }
+  if ($current -in @("-h", "--help")) {
+    $showHelp = $true
+    $argIndex += 1
+    continue
+  }
+  $unknownArgs += $current
+  $argIndex += 1
+}
+if ($projectSet -and [string]::IsNullOrWhiteSpace($projectTarget)) {
+  $missingProjectValue = $true
 }
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -249,7 +388,8 @@ $locale = ""
 if ($requestedLanguage -in @("cn", "en")) {
   $locale = $requestedLanguage
 }
-if (-not $languageSet -or [string]::IsNullOrEmpty($locale)) {
+# 项目安装不得探测全局 USERPROFILE/HOME 下的 Onevoke 配置.
+if ((-not $languageSet -or [string]::IsNullOrEmpty($locale)) -and -not $projectSet) {
   $locale = Get-ConfiguredLanguage $projectDir
 }
 if ([string]::IsNullOrEmpty($locale)) {
@@ -263,7 +403,7 @@ if ([string]::IsNullOrEmpty($locale)) {
 }
 $chinese = -not ([string]$locale -match "^(?i:en)")
 
-if ($missingLanguageValue) {
+if ($missingLanguageValue -or $missingProjectValue -or $unknownArgs.Count -gt 0) {
   Show-Usage $chinese $true
   exit 2
 }
@@ -276,21 +416,129 @@ if ($languageSet -and $requestedLanguage -notin @("cn", "en")) {
   }
   exit 2
 }
-
-$remainingArgs = @()
-if ($remainingIndex -lt $installArgs.Count) {
-  $remainingArgs = @($installArgs[$remainingIndex..($installArgs.Count - 1)])
-}
-if ($remainingArgs.Count -eq 1 -and $remainingArgs[0] -in @("-h", "--help")) {
+if ($showHelp) {
   Show-Usage $chinese $false
   exit 0
 }
-if ($remainingArgs.Count -gt 0) {
-  Show-Usage $chinese $true
-  exit 2
-}
 
 try {
+  $shareSource = Join-Path $projectDir "share\kanban-web"
+  $binSource = Join-Path $projectDir "bin"
+  $rulesSource = Join-Path $projectDir "rules"
+
+  if ($projectSet) {
+    $preparedJson = Invoke-PythonConfigCommand `
+      $projectDir `
+      @("prepare-project-install", $projectTarget) `
+      $chinese
+    $installPaths = Convert-InstallPathsJson $preparedJson $chinese
+    $binDir = [string]$installPaths.bin_dir
+    $agentsDir = [string]$installPaths.rules_dir
+    $shareDir = Join-Path ([string]$installPaths.share_dir) "kanban-web"
+    $installRoot = [string]$installPaths.install_root
+
+    $binFiles = @(Get-SourceFiles $binSource "")
+    $ruleFiles = @(Get-SourceFiles $rulesSource ".md")
+    $shareFiles = @()
+    if ([IO.Directory]::Exists($shareSource)) {
+      $shareFiles = @(Get-SourceFiles $shareSource "")
+    }
+
+    $directoryTargets = @(
+      $installRoot,
+      $binDir,
+      $agentsDir
+    )
+    if ([IO.Directory]::Exists($shareSource)) {
+      $directoryTargets += @(([string]$installPaths.share_dir), $shareDir)
+    }
+    foreach ($directory in $directoryTargets | Select-Object -Unique) {
+      Assert-DirectoryTarget $directory $chinese
+    }
+    foreach ($source in $binFiles) {
+      Assert-FileTarget (Join-Path $binDir $source.Name) $chinese $false
+    }
+    foreach ($source in $ruleFiles) {
+      Assert-FileTarget (Join-Path $agentsDir $source.Name) $chinese $false
+    }
+    foreach ($source in $shareFiles) {
+      Assert-FileTarget (Join-Path $shareDir $source.Name) $chinese $false
+    }
+
+    foreach ($source in $binFiles) {
+      Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $binDir $source.Name) -Force
+    }
+    foreach ($source in $ruleFiles) {
+      Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $agentsDir $source.Name) -Force
+    }
+    if ([IO.Directory]::Exists($shareSource)) {
+      foreach ($source in $shareFiles) {
+        Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $shareDir $source.Name) -Force
+      }
+    }
+
+    $agentRules = Join-Path $agentsDir "AGENTS.md"
+    $entryRules = Join-Path $agentsDir "ONEVOKE-AGENTS.md"
+    if ([IO.File]::Exists($entryRules) -and -not (Test-PathEntryExists $agentRules)) {
+      $linked = $false
+      try {
+        New-Item -ItemType HardLink -Path $agentRules -Target $entryRules -ErrorAction Stop | Out-Null
+        $linked = $true
+      } catch {
+        try {
+          New-Item -ItemType SymbolicLink -Path $agentRules -Target $entryRules -ErrorAction Stop | Out-Null
+          $linked = $true
+        } catch {
+          $linked = $false
+        }
+      }
+      if (-not $linked) {
+        if ($chinese) {
+          Fail-Install "错误: 无法安全创建 $agentRules; 文件系统需支持硬链接或符号链接"
+        } else {
+          Fail-Install "error: could not safely create $agentRules; the file system must support hard links or symbolic links"
+        }
+      }
+    }
+
+    $onevokeCommand = Join-Path $binDir "onevoke.cmd"
+    $kanbanCommand = Join-Path $binDir "kanban.cmd"
+    if ($chinese) {
+      Write-Stderr "项目命令: $onevokeCommand"
+      Write-Stderr "看板命令: $kanbanCommand"
+      Write-Stderr "请使用上述绝对路径; 不要把项目命令根加入 PATH, 也不要使用全局同名命令."
+      [Console]::Out.WriteLine("Onevoke 已安装")
+    } else {
+      Write-Stderr "project command: $onevokeCommand"
+      Write-Stderr "kanban command: $kanbanCommand"
+      Write-Stderr "Use these absolute paths; do not add the project command root to PATH or use global commands of the same name."
+      [Console]::Out.WriteLine("Onevoke installed")
+    }
+
+    $welcomeEntry = Join-Path $binDir "onevoke.cmd"
+    $welcomeArgs = @()
+    if (-not [string]::IsNullOrEmpty($requestedLanguage)) {
+      $welcomeArgs = @("--lang", $requestedLanguage)
+    }
+    $welcomeSucceeded = $false
+    try {
+      & $welcomeEntry @welcomeArgs "welcome"
+      $welcomeSucceeded = $LASTEXITCODE -eq 0
+    } catch {
+      $welcomeSucceeded = $false
+    }
+    if (-not $welcomeSucceeded) {
+      if ($chinese) {
+        Write-Stderr "警告: Onevoke 文件已安装, 但 welcome 未完成; 请修复提示问题后重新运行 onevoke welcome."
+        Write-Stderr "说明: MemSearch 为可选项, 其安装失败不影响本工具包; 可稍后自行安装或再跑 welcome."
+      } else {
+        Write-Stderr "warning: Onevoke files were installed, but welcome did not complete; fix the reported issue and rerun onevoke welcome."
+        Write-Stderr "note: MemSearch is optional; installation failure does not affect this toolkit and can be retried later."
+      }
+    }
+    exit 0
+  }
+
   # Native Windows Python resolves Path.home() from USERPROFILE. Keep the
   # installer on the same boundary; HOME is commonly inherited from Git Bash
   # and may point somewhere else.
@@ -309,10 +557,7 @@ try {
 
   $binDir = Join-Path $userHome ".local\bin"
   $agentsDir = Join-Path $userHome ".agents"
-  $shareSource = Join-Path $projectDir "share\kanban-web"
   $shareDir = Join-Path $userHome ".local\share\onevoke\kanban-web"
-  $binSource = Join-Path $projectDir "bin"
-  $rulesSource = Join-Path $projectDir "rules"
 
   $binFiles = @(Get-SourceFiles $binSource "")
   $ruleFiles = @(Get-SourceFiles $rulesSource ".md")

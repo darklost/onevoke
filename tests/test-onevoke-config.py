@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import os
 import subprocess
 import sys
@@ -265,6 +266,94 @@ class InstallContextTest(unittest.TestCase):
         link.symlink_to(project)
         with self.assertRaises(self.config.ConfigError):
             self.config.project_install_paths(link)
+
+    def test_prepare_project_install_creates_layout_and_exclude(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        marker = self.home / ".config" / "onevoke" / "config.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("keep\n", encoding="utf-8")
+
+        paths = self.config.prepare_project_install(project)
+
+        self.assertEqual("project", paths.mode)
+        assert paths.install_root is not None
+        self.assertTrue((paths.install_root / "bin").is_dir())
+        self.assertTrue((paths.install_root / "rules").is_dir())
+        self.assertTrue((paths.install_root / "share" / "kanban-web").is_dir())
+        exclude = (project / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertIn("/.onevoke/", exclude.splitlines())
+        self.assertEqual("keep\n", marker.read_text(encoding="utf-8"))
+        self.assertFalse((self.home / ".local").exists())
+        self.assertFalse((self.home / ".agents").exists())
+
+    def test_prepare_project_install_is_idempotent(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        first = self.config.prepare_project_install(project)
+        assert first.install_root is not None
+        extra = first.install_root / "keep.txt"
+        extra.write_text("keep\n", encoding="utf-8")
+
+        second = self.config.prepare_project_install(project)
+
+        self.assertEqual(first.install_root, second.install_root)
+        self.assertEqual("keep\n", extra.read_text(encoding="utf-8"))
+        lines = (project / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(1, lines.count("/.onevoke/"))
+
+    def test_prepare_project_install_rejects_non_git(self) -> None:
+        directory = self.root / "not-git"
+        directory.mkdir()
+        with self.assertRaises(self.config.ConfigError):
+            self.config.prepare_project_install(directory)
+        self.assertFalse((directory / ".onevoke").exists())
+
+    def test_prepare_project_install_from_linked_worktree_uses_main(self) -> None:
+        main = self.init_git_repo(self.root / "app")
+        linked = self.root / "app-linked"
+        subprocess.run(
+            ["git", "-C", str(main), "worktree", "add", "-q", str(linked), "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        paths = self.config.prepare_project_install(linked)
+
+        assert paths.project_root is not None
+        assert paths.install_root is not None
+        self.assert_same_real_path(main, paths.project_root)
+        self.assertTrue(paths.install_root.is_dir())
+        self.assertFalse((linked / ".onevoke").exists())
+
+    def test_project_install_paths_cli_does_not_write(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-X",
+                "utf8",
+                str(BIN_DIR / "onevoke_config.py"),
+                "project-install-paths",
+                str(project),
+            ],
+            cwd=str(self.root),
+            env={
+                **os.environ,
+                "HOME": str(self.home),
+                "USERPROFILE": str(self.home),
+                "ONEVOKE_LANG": "en",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual("project", payload["mode"])
+        self.assertFalse((project / ".onevoke").exists())
+        self.assertFalse((self.home / ".local").exists())
+        self.assertFalse((self.home / ".agents").exists())
 
 
 if __name__ == "__main__":

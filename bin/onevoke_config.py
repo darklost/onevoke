@@ -16,8 +16,11 @@ from typing import Any, Literal
 
 from onevoke_fs import (
     UnsafePathError,
+    create_private_directory_nofollow,
+    directory_identity_nofollow,
     ensure_directory_path_nofollow,
     ensure_inherited_directory_path_nofollow,
+    ensure_private_directory_nofollow,
     exclusive_file_lock,
     is_reparse_point,
     open_append_file_nofollow,
@@ -486,6 +489,94 @@ def ensure_project_git_exclude(project: Path) -> Path:
     return _append_git_exclude_pattern(paths.project_root, PROJECT_GIT_EXCLUDE_PATTERN)
 
 
+def _config_error_from_path(error: Exception, path: Path) -> ConfigError:
+    if isinstance(error, ConfigError):
+        return error
+    return ConfigError(
+        language_text(
+            f"准备项目安装目录失败: {path}: {error}",
+            f"failed to prepare project install directory: {path}: {error}",
+        )
+    )
+
+
+def _ensure_exclusive_private_directory(parent: Path, path: Path) -> None:
+    """缺失时以 CREATE_NEW 发布私有目录; 已存在则只迁移叶 ACL; 创建竞态失败关闭."""
+    try:
+        ensure_inherited_directory_path_nofollow(parent)
+    except (UnsafePathError, OSError) as error:
+        raise _config_error_from_path(error, parent) from error
+    try:
+        directory_identity_nofollow(parent, path)
+    except FileNotFoundError:
+        try:
+            create_private_directory_nofollow(parent, path)
+        except FileExistsError as error:
+            raise ConfigError(
+                language_text(
+                    f"项目安装目录创建冲突: {path}",
+                    f"project install directory create collision: {path}",
+                )
+            ) from error
+        except (UnsafePathError, OSError) as error:
+            raise _config_error_from_path(error, path) from error
+    except (UnsafePathError, OSError) as error:
+        raise _config_error_from_path(error, path) from error
+    else:
+        try:
+            ensure_private_directory_nofollow(parent, path, create=False)
+        except (UnsafePathError, OSError) as error:
+            raise _config_error_from_path(error, path) from error
+
+
+def _install_paths_payload(paths: InstallPaths) -> dict[str, str]:
+    payload = {
+        "mode": paths.mode,
+        "config_path": str(paths.config_path),
+        "rules_dir": str(paths.rules_dir),
+        "bin_dir": str(paths.bin_dir),
+        "share_dir": str(paths.share_dir),
+    }
+    if paths.project_root is not None:
+        payload["project_root"] = str(paths.project_root)
+    if paths.install_root is not None:
+        payload["install_root"] = str(paths.install_root)
+    return payload
+
+
+def prepare_project_install(project: Path) -> InstallPaths:
+    """解析主 worktree, 发布私有 ``.onevoke/`` 并幂等写入 Git exclude."""
+    paths = project_install_paths(project)
+    if paths.project_root is None or paths.install_root is None:
+        raise ConfigError(
+            language_text(
+                "项目安装路径缺少主 worktree",
+                "project install paths are missing the main worktree",
+            )
+        )
+    if os.name == "nt":
+        _ensure_windows_path_nofollow_safe(paths.install_root)
+        _ensure_windows_path_nofollow_safe(paths.bin_dir)
+        _ensure_windows_path_nofollow_safe(paths.rules_dir)
+        _ensure_windows_path_nofollow_safe(paths.share_dir)
+    else:
+        _reject_leaf_reparse(paths.install_root)
+        _reject_leaf_reparse(paths.bin_dir)
+        _reject_leaf_reparse(paths.rules_dir)
+        _reject_leaf_reparse(paths.share_dir)
+    _ensure_exclusive_private_directory(paths.project_root, paths.install_root)
+    try:
+        ensure_private_directory_nofollow(paths.install_root, paths.bin_dir)
+        ensure_private_directory_nofollow(paths.install_root, paths.rules_dir)
+        ensure_private_directory_nofollow(
+            paths.install_root, paths.share_dir / "kanban-web"
+        )
+    except (UnsafePathError, OSError) as error:
+        raise _config_error_from_path(error, paths.install_root) from error
+    ensure_project_git_exclude(paths.project_root)
+    return paths
+
+
 def config_path() -> Path:
     override = os.environ.get("ONEVOKE_CONFIG")
     if override:
@@ -744,9 +835,8 @@ def save_config(config: dict[str, Any]) -> Path:
 
 
 def main(argv: list[str]) -> int:
-    """查询入口, 目前只供 onevoke-review.sh 读取 review 模型配置."""
+    """查询入口, 供审核脚本读取模型配置, 也供安装器解析项目安装路径."""
     apply_language_argument(argv)
-    bind_effective_language()
     import argparse
 
     argparse._ = lambda message: language_text(ARGPARSE_ZH.get(message, message), message)
@@ -757,7 +847,7 @@ def main(argv: list[str]) -> int:
         help=language_text("输出两行: <model> 与 <effort>", "print two lines: <model> and <effort>"),
     )
     review.add_argument("agent", choices=REVIEW_AGENTS)
-    stages = commands.add_parser(
+    commands.add_parser(
         "review-stages",
         help=language_text(
             "输出四行: PM/CSA/Hacker/QA 的 auto|skip|required",
@@ -771,7 +861,40 @@ def main(argv: list[str]) -> int:
             "print configured language (cn|en)",
         ),
     )
+    project_paths = commands.add_parser(
+        "project-install-paths",
+        help=language_text(
+            "输出项目安装路径 JSON, 不写入文件",
+            "print project install path JSON without writing files",
+        ),
+    )
+    project_paths.add_argument("project")
+    prepare_project = commands.add_parser(
+        "prepare-project-install",
+        help=language_text(
+            "发布项目 .onevoke/ 并输出安装路径 JSON",
+            "publish project .onevoke/ and print install path JSON",
+        ),
+    )
+    prepare_project.add_argument("project")
     args = parser.parse_args(argv)
+    if args.command == "project-install-paths":
+        print(
+            json.dumps(
+                _install_paths_payload(project_install_paths(Path(args.project))),
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    if args.command == "prepare-project-install":
+        print(
+            json.dumps(
+                _install_paths_payload(prepare_project_install(Path(args.project))),
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    bind_effective_language()
     if args.command == "review-model":
         entry = effective_config()["models"]["review"][args.agent]
         print(entry["model"])
