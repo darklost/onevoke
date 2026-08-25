@@ -3873,6 +3873,312 @@ N/A
         self.assertNotIn("failed to initialize terminal", str(caught.exception))
 
 
+def _same_real_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.realpath(left)) == os.path.normcase(
+        os.path.realpath(right)
+    )
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX project installer tests require a shell")
+class PosixProjectInstallerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def init_git_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "-q", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.email", "onevoke@example.com"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.name", "Onevoke Test"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "init"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return path
+
+    def run_installer(
+        self,
+        *args: str,
+        home: Optional[Path] = None,
+        extra_env: Optional[dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        env = install_env(home or self.home)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["sh", str(INSTALLER), *args],
+            stdin=subprocess.DEVNULL,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def assert_same_real_path(self, left: Path, right: Path) -> None:
+        self.assertTrue(_same_real_path(left, right), f"{left} != {right}")
+
+    def assert_home_has_no_onevoke(self, home: Path) -> None:
+        for relative in (
+            ".agents",
+            ".local/bin",
+            ".local/share/onevoke",
+            ".config/onevoke",
+        ):
+            self.assertFalse(
+                (home / relative).exists(),
+                f"global path was created: {relative}",
+            )
+
+    def assert_project_payload(self, project: Path) -> Path:
+        install_root = project / ".onevoke"
+        dest_bin = install_root / "bin"
+        dest_rules = install_root / "rules"
+        dest_share = install_root / "share" / "kanban-web"
+        for source in sorted((PROJECT_ROOT / "bin").iterdir()):
+            if source.is_file():
+                installed = dest_bin / source.name
+                self.assertEqual(source.read_bytes(), installed.read_bytes(), source.name)
+                self.assertTrue(os.access(installed, os.X_OK), source.name)
+        for source in sorted(RULES_DIR.glob("*.md")):
+            self.assertEqual(
+                source.read_bytes(),
+                (dest_rules / source.name).read_bytes(),
+                source.name,
+            )
+        for source in sorted((PROJECT_ROOT / "share" / "kanban-web").iterdir()):
+            if source.is_file():
+                self.assertEqual(
+                    source.read_bytes(),
+                    (dest_share / source.name).read_bytes(),
+                    source.name,
+                )
+        agent_rules = dest_rules / "AGENTS.md"
+        self.assertTrue(agent_rules.is_symlink())
+        self.assertEqual(Path("ONEVOKE-AGENTS.md"), agent_rules.readlink())
+        exclude = (project / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertEqual(1, exclude.splitlines().count("/.onevoke/"))
+        return dest_bin
+
+    def assert_command_paths(self, stdout: str, dest_bin: Path) -> None:
+        lines = stdout.splitlines()
+        self.assertGreaterEqual(len(lines), 3, stdout)
+        self.assertEqual(INSTALLED_ZH.strip(), lines[0])
+        printed = [Path(line) for line in lines[1:3]]
+        self.assertTrue(
+            any(_same_real_path(path, dest_bin / "onevoke") for path in printed),
+            stdout,
+        )
+        self.assertTrue(
+            any(_same_real_path(path, dest_bin / "kanban") for path in printed),
+            stdout,
+        )
+
+    def test_project_install_copies_payload_and_skips_global_and_welcome(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        canary = self.home / "keep"
+        canary.write_text("home-canary\n", encoding="utf-8")
+        result = self.run_installer("--project", str(project))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        dest_bin = self.assert_project_payload(project)
+        self.assert_command_paths(result.stdout, dest_bin)
+        self.assertIn("未修改 PATH", result.stderr)
+        self.assertNotIn("welcome 未完成", result.stderr)
+        self.assertNotIn("请在终端运行 onevoke welcome", result.stderr)
+        self.assertNotIn("检测到已退役的 Reviewer 脚本", result.stderr)
+        self.assert_home_has_no_onevoke(self.home)
+        self.assertEqual("home-canary\n", canary.read_text(encoding="utf-8"))
+        self.assertFalse((project / ".onevoke" / "config.json").exists())
+
+    def test_project_install_from_linked_worktree_uses_main(self) -> None:
+        main = self.init_git_repo(self.root / "app")
+        linked = self.root / "app-linked"
+        subprocess.run(
+            ["git", "-C", str(main), "worktree", "add", "-q", str(linked), "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        result = self.run_installer("--lang", "cn", "--project", str(linked))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        dest_bin = self.assert_project_payload(main)
+        self.assert_command_paths(result.stdout, dest_bin)
+        self.assertFalse((linked / ".onevoke").exists())
+        self.assert_home_has_no_onevoke(self.home)
+
+    def test_project_install_is_idempotent_and_keeps_foreign_files(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        first = self.run_installer("--project", str(project))
+        self.assertEqual(0, first.returncode, first.stderr)
+        notes = project / ".onevoke" / "user-notes.txt"
+        notes.write_text("keep-me\n", encoding="utf-8")
+        exclude = project / ".git" / "info" / "exclude"
+        original_mode = exclude.stat().st_mode & 0o777
+
+        second = self.run_installer("--project", str(project))
+
+        self.assertEqual(0, second.returncode, second.stderr)
+        dest_bin = self.assert_project_payload(project)
+        self.assert_command_paths(second.stdout, dest_bin)
+        self.assertEqual("keep-me\n", notes.read_text(encoding="utf-8"))
+        self.assertEqual(original_mode, exclude.stat().st_mode & 0o777)
+
+    def test_project_install_does_not_read_global_config_language(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        config_dir = self.home / ".config" / "onevoke"
+        config_dir.mkdir(parents=True)
+        config_dir.joinpath("config.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "codex",
+                    "launcher": "tmux",
+                    "language": "en",
+                    "reviewers": {
+                        role: "codex" for role in ("PM", "CSA", "Hacker", "QA")
+                    },
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        marker = self.home / ".local" / "bin" / "onevoke"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("GLOBAL-ONEVOKE\n", encoding="utf-8")
+        legacy = self.home / ".local" / "bin" / "codex-review.sh"
+        legacy.write_text("legacy\n", encoding="utf-8")
+
+        result = self.run_installer(
+            "--project",
+            str(project),
+            extra_env={"ONEVOKE_LANG": "zh"},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(result.stdout.startswith(INSTALLED_ZH))
+        self.assertNotIn(INSTALLED_EN.strip(), result.stdout)
+        self.assertEqual("GLOBAL-ONEVOKE\n", marker.read_text(encoding="utf-8"))
+        self.assertEqual("legacy\n", legacy.read_text(encoding="utf-8"))
+        self.assertNotIn("退役", result.stderr)
+
+    def test_project_install_rejects_non_git_and_does_not_fallback(self) -> None:
+        directory = self.root / "not-git"
+        directory.mkdir()
+        result = self.run_installer("--project", str(directory))
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("项目不是 Git 仓库", result.stderr)
+        self.assertFalse((directory / ".onevoke").exists())
+        self.assert_home_has_no_onevoke(self.home)
+        self.assertNotIn(INSTALLED_ZH.strip(), result.stdout)
+
+    def test_project_install_rejects_missing_directory(self) -> None:
+        missing = self.root / "missing"
+        result = self.run_installer("--project", str(missing))
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("项目目录不存在", result.stderr)
+        self.assert_home_has_no_onevoke(self.home)
+
+    def test_project_install_rejects_symlink_target(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        link = self.root / "app-link"
+        link.symlink_to(project)
+        result = self.run_installer("--project", str(link))
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertTrue(
+            "符号链接" in result.stderr or "symlink" in result.stderr,
+            result.stderr,
+        )
+        self.assertFalse((project / ".onevoke").exists())
+        self.assert_home_has_no_onevoke(self.home)
+
+    def test_project_install_rejects_onevoke_symlink(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        outside = self.root / "payload"
+        outside.mkdir()
+        marker = outside / "keep"
+        marker.write_text("outside\n", encoding="utf-8")
+        (project / ".onevoke").symlink_to(outside)
+
+        result = self.run_installer("--project", str(project))
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("符号链接", result.stderr)
+        self.assertTrue((project / ".onevoke").is_symlink())
+        self.assertEqual("outside\n", marker.read_text(encoding="utf-8"))
+        self.assertEqual(["keep"], [path.name for path in outside.iterdir()])
+        self.assert_home_has_no_onevoke(self.home)
+
+    def test_project_install_rejects_directory_file_target(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        blocked = project / ".onevoke" / "bin" / "kanban"
+        blocked.mkdir(parents=True)
+        result = self.run_installer("--project", str(project))
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("安装目标是目录", result.stderr)
+        self.assertTrue(blocked.is_dir())
+        self.assertFalse((project / ".onevoke" / "bin" / "onevoke").exists())
+        exclude = project / ".git" / "info" / "exclude"
+        self.assertNotIn(
+            "/.onevoke/",
+            exclude.read_text(encoding="utf-8").splitlines(),
+        )
+        self.assert_home_has_no_onevoke(self.home)
+
+    def test_project_install_rejects_invalid_arguments(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        missing = self.run_installer("--project")
+        self.assertEqual(2, missing.returncode)
+        self.assertIn("用法: install.sh", missing.stderr)
+        self.assertIn("--project 需要目录", missing.stderr)
+
+        extra = self.run_installer("--project", str(project), "--force")
+        self.assertEqual(2, extra.returncode)
+        self.assertIn("用法: install.sh", extra.stderr)
+        self.assertFalse((project / ".onevoke").exists())
+
+        duplicate = self.run_installer(
+            "--project",
+            str(project),
+            "--project",
+            str(project),
+        )
+        self.assertEqual(2, duplicate.returncode)
+        self.assertIn("--project 只能指定一次", duplicate.stderr)
+
+        help_text = self.run_installer("--help")
+        self.assertEqual(0, help_text.returncode, help_text.stderr)
+        self.assertIn("--project", help_text.stdout)
+        self.assert_home_has_no_onevoke(self.home)
+
+
 class KanbanProjectInstallTest(unittest.TestCase):
     """项目安装入口必须使用主 worktree `.onevoke/`, 且不得回落全局资源."""
 
