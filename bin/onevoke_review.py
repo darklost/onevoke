@@ -735,6 +735,11 @@ TIER_RULES = textwrap.dedent("""\
     recommend - not a defect, but project rules or established conventions call for the change
     suggest   - optional improvement; the owner decides whether it is worth it
 
+    Always classify the following as at least medium, no matter how rarely they trigger or how small the
+    consequence looks: documentation or code comments that disagree with the actual implementation; dead
+    code (unreachable, or never called or referenced); redundant tests (duplicating coverage of the same
+    behavior, or asserting nothing about the behavior under test).
+
     Blocking, high, and medium are gate findings and belong in the main findings section. After the gate
     findings, always emit a section headed NON-BLOCKING that lists every low, recommend, and suggest
     item, or the single line "NON-BLOCKING: none". Non-blocking items never gate the change and must
