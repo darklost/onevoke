@@ -27,7 +27,7 @@
 - 专用任务分支有可写 `origin` 且用户未要求仅本地集成时, 每个关注点提交后普通 push, 首次用 `git push -u origin <branch>`.
 - 用户要求 push 时, 检查全部未提交和未 push 状态, 但只提交当前任务明确授权的改动, 保留并报告其他用户改动.
 - 无 `origin` 或用户明确要求仅本地集成时, 保留本地提交, 跳过 push 并报告. 有 `origin` 但无法访问, 不可写或用户禁 push, 且用户未要求仅本地集成时, 保留任务分支和 worktree, 报告后停止集成.
-- push 因 non-fast-forward 被拒时, 先 fetch 查远端改动, rebase 后重新验证, 审核按「审核」确定的分册处理. 专用任务分支随后可用 `--force-with-lease`; Markdown 直改分支仍普通 push; `main` 和 `develop` 永不 force-push. 其他拒绝按项目 PR 流程处理, 无适用流程则停止并报告.
+- push 因 non-fast-forward 被拒时, 先 fetch 查远端改动, rebase 后重新验证. 集成流程内的重试按「集成与清理」的一次性门沿用已通过审核结论, 只重做 rebase 和验证, 不重审; 其余情形按「审核」确定的分册处理. 专用任务分支随后可用 `--force-with-lease`; Markdown 直改分支仍普通 push; `main` 和 `develop` 永不 force-push. 其他拒绝按项目 PR 流程处理, 无适用流程则停止并报告.
 - 多人共享分支用 `--force-with-lease` 前先通知协作者. 不改写已合并, 已发布或正式 tag 锚定的历史.
 
 ## 审核
@@ -37,7 +37,7 @@
 ## 集成与清理
 
 - 不做直接集成的情形: 项目要求 PR 或发布门禁; 用户要求暂停或不合回; 非看板任务的 Bug 修复未获用户验证确认. 看板任务的合回时机取 `ONEVOKE-AGENTS.md`「看板任务完成」, 默认审核通过即集成, 不等用户验收, Bug 卡同样适用.
-- 审核是集成前一次性门: 进集成流程前, 基于当时审核 base 完成验证, 并完成审核且通过, 或因未命中审核白名单而跳过审核且已告知用户. 集成流程 (rebase 到最新 `develop`, push, ff 同步) 一旦开始, `develop` 前进只重做 rebase 和验证, 沿用已通过审核结论, 不再审核. 例外: rebase 引入实质代码冲突并由本人手动解决, 或用户明确要求时重审.
+- 审核是集成前一次性门: 进集成流程前, 基于当时审核 base 完成验证, 并完成审核且通过, 或因未命中审核白名单而跳过审核且已告知用户. 集成流程 (rebase 到最新 `develop`, push, ff 同步) 一旦开始, `develop` 前进只重做 rebase 和验证, 沿用已通过审核结论, 不再审核. 审核进行期间同样不追 `develop`: base 冻结, 见 `REVIEW-RULES.md`「前置条件与执行」. 例外: rebase 引入实质代码冲突并由本人手动解决, 或用户明确要求时重审. 实质代码冲突指冲突落在代码文件且需手动解决; rebase 无冲突, 或冲突只出现在 `*.md` 与 `*.markdown` 时不重审.
 - 集成路径与审核 base: 远端路径在任务 worktree fetch 后 rebase 到最新 `origin/develop`, 该远端 commit 即审核 base; 无 `origin` 或用户明确要求仅本地集成时 rebase 到本地 `develop`, 其当前 commit 即审核 base. 验证和审核通过后进集成流程. 已 push 的任务分支审核通过后仅用 `git push --force-with-lease` 更新; lease 失败则停止, 不覆盖远端改动.
 - 集成流程内再查 `develop`; 若已前进, 按一次性门规则重复 rebase 和验证, 未前进才允许集成.
 - 远端直接集成用非 force 的 `git push origin <最终任务 commit>:refs/heads/develop`, push 成功后 fetch, 再在主树 `develop` 跑 `git merge --ff-only origin/develop`. 本地直接集成在主树 `develop` 跑 `git merge --ff-only <任务分支>`, 并报告未 push. 集成 push 被 non-fast-forward 拒绝或本地 ff 失败时, 保持主树不变, 回同步和验证流程; 其他拒绝按项目 PR 流程处理, 无适用流程则停止并报告. 任何路径都不得产生 merge commit.

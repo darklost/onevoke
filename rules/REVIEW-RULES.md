@@ -41,7 +41,7 @@
 - 未命中白名单跳过审核时, 必须在集成前明确告知用户"本次未触发审核白名单, 未走审核闭环", 并写明改动范围 (改了哪些文件, 新增与删除行数). 禁静默跳过. 用户随后要求审核时照常执行完整流程.
 - 选定 reviewer 的 CLI 或当前平台审核入口在本机不可用时无法审核: 明确告知用户"本机未装 <reviewer> CLI, 无法执行审核", 保留分支和 worktree, 并给编号选项 `1. 装好该 CLI 后重试`, `2. 改用另一个 reviewer 重启审核`, `3. 跳过本次审核直接集成 (风险由用户承担, 在交付说明记录未审核)`, `4. 停止集成`. 审核入口缺失时还须说明需重新安装 Onevoke; 全局安装的 Windows 还要确认命令根已加入 `PATH`, 项目安装则使用命令根绝对入口, 不依赖 PATH. 禁自行跳过, 禁未经用户明确指定就换 reviewer.
 - 审核前, 把审核 base 以来全部任务改动按关注点提交, 保持 worktree 无未提交或未跟踪文件.
-- 审核 base: 专用任务分支为该分支最近一次基于 `develop` 创建或 rebase 时所基于的 `develop` commit 完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变; rebase 后 base 更新为新的所基于 commit, 是否重审按 `GIT-RULES.md`「集成与清理」的一次性门规则执行.
+- 审核 base: 专用任务分支为该分支最近一次基于 `develop` 创建或 rebase 时所基于的 `develop` commit 完整 SHA; Markdown 直改路径为改前 `HEAD` 完整 SHA. 同一 base 下修复轮次保持 base 不变. 审核一旦开始 base 即冻结: 审核闭环结束前不因 `develop` 前进而 rebase, 也不更新 base, `develop` 的前进一律留到集成流程处理. 集成流程内 rebase 后 base 更新为新的所基于 commit, 是否重审按 `GIT-RULES.md`「集成与清理」的一次性门规则执行.
 
 标准审核三阶段串行; 各角色是否运行先按「审核环节」解析, 跳过的标 N/A. 实际运行的角色按下述顺序流转, `QA` 若运行则固定在最后; 审核重点仍按「审核档案」确定. 阶段流转以本图为准, 每次修复只重跑当前阶段:
 
@@ -80,7 +80,7 @@
 - 仅看板任务适用安全 finding 超时. 每项从完整信息和选项送达用户时独立计时; 同批共用发送时间, 部分回答不停止其余项. 15 分钟无明确决策即标记"超时忽略", 记录角色, 档位, 问题, 影响, 发送时间, 超时时间和理由, 再继续. "超时忽略"不等于 `PASS`, 用户确认或接受风险; 卡片完成前收到决策则按最新指令处理.
 - 非看板任务及 `PM`, `QA` finding, 无法核实项, 契约或负责人变更, 以及用户明确要求的验收, 集成确认不得超时跳过.
 - 调用方式: 未明确 reviewer 时用命令根下的 `onevoke review <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 由 Onevoke 读当前作用域配置进入单一门禁; 已明确 reviewer 时, POSIX 用 `<命令根>/onevoke-review.sh <reviewer> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, Windows 人工调用普通参数可在 PowerShell 用 `& "$env:USERPROFILE\.local\bin\onevoke-review.cmd" ...`. 项目安装把该全局命令根换成当前作用域命令根. Windows 批处理和 Windows PowerShell 5 的原生命令行都不能保证任意 argv 无损; 含 `&|<>^%!`, 引号或边界反斜杠的数据不得由程序调用 `.cmd` 或拼进 shell 命令字符串. 自动化调用方必须用进程 API 的 argv 数组直接启动当前 Python, 并把命令根下的 `onevoke` (全局安装即 `Path.home() / ".local/bin/onevoke"`), `review` 及其参数作为独立数组成员; `onevoke` 再直接进入同目录 Python 门禁. 项目安装必须使用这些绝对入口, 禁止改用 PATH 中的全局同名命令. 禁外部调用者绕过 Onevoke 入口直调 Python 实现或 reviewer CLI. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
-- 一次完整审核中所有角色必须使用相同 `CWD`, base 与 task context, 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. base 改变则全部结论失效, 从第一阶段重启. task context 是权威需求契约: 短任务传单个字符串, 长任务传可读的绝对 spec 路径.
+- 一次完整审核中所有角色必须使用相同 `CWD`, base 与 task context, 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. 非集成原因的 base 变更 (用户要求换 base, 分支重建, 或审核期被迫 rebase) 使全部结论失效, 从第一阶段重启; 集成流程内因 `develop` 前进而做的 rebase 不属此列, 按 `GIT-RULES.md`「集成与清理」的一次性门沿用已通过结论. task context 是权威需求契约: 短任务传单个字符串, 长任务传可读的绝对 spec 路径.
 - 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录 (POSIX `0700`, Windows 受保护的当前用户独占 DACL), 禁混入日志, spec 或其他文件; 本轮审核通过, 用户完成第二阶段决策或本轮终止后清理该目录, 需保留诊断先向用户说明. 审核入口按「Reviewer 选择」表的隔离参数跑 reviewer, 结束时校验 worktree 未被改动; 禁改其 sandbox, 权限或工具参数绕过门禁.
 
 ## 审核环节
