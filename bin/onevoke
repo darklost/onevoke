@@ -637,7 +637,7 @@ def validate_configured_resources(
                     "The configured launcher is auto, but neither herdr nor tmux is in PATH; install one of them or run onevoke welcome --reset and select another launcher.",
                 )
             )
-        elif config.get("welcome_complete"):
+        else:
             print(
                 t(
                     "[-] launcher=auto 在启动时按当前环境选择: 处于 herdr 则新建 tab, 否则处于 tmux 则新建 window",

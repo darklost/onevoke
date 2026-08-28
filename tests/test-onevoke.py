@@ -1487,6 +1487,15 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("launcher=auto 在启动时按当前环境选择", result.stderr)
         self.assertNotIn("需要先进入上述 tmux session", result.stderr)
 
+    def test_doctor_explains_auto_launcher_before_welcome_completes(self) -> None:
+        self.install_fake_environment(tmux=True)
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("launcher=auto 在启动时按当前环境选择", result.stderr)
+        self.assertIn("配置: 尚未完成", result.stderr)
+
     def test_doctor_accepts_auto_launcher_when_only_herdr_is_in_path(self) -> None:
         self.install_fake_environment(tmux=False)
         self.fake_command("herdr")
