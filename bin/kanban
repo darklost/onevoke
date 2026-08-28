@@ -1194,7 +1194,10 @@ def window_name(entry: Entry, text: str) -> str:
 
 
 def herdr_capture(herdr: str, *arguments: str) -> subprocess.CompletedProcess:
-    return subprocess.run([herdr, *arguments], text=True, capture_output=True, check=False)
+    try:
+        return subprocess.run([herdr, *arguments], text=True, capture_output=True, check=False)
+    except ValueError as error:
+        raise KanbanError(t(f"herdr 调用失败: {error}", f"herdr invocation failed: {error}")) from error
 
 
 def herdr_failure_detail(result: subprocess.CompletedProcess) -> str:
@@ -1216,10 +1219,16 @@ def herdr_json_result(result: subprocess.CompletedProcess, action: str) -> dict:
     return data
 
 
+def herdr_public_id(value: object) -> Optional[str]:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    return value
+
+
 def herdr_close_tab(herdr: str, tab_id: str) -> Optional[str]:
     try:
         result = herdr_capture(herdr, "tab", "close", tab_id)
-    except (OSError, UnicodeError) as error:
+    except (OSError, UnicodeError, ValueError, KanbanError) as error:
         return t(
             f"关闭 tab {tab_id} 失败: {error}",
             f"failed to close tab {tab_id}: {error}",
@@ -1248,10 +1257,10 @@ def herdr_create_tab(herdr: str, workspace: str, cwd: str, label: str) -> tuple[
     data = herdr_json_result(result, "tab create")
     tab = data.get("tab")
     pane = data.get("root_pane")
-    tab_id = tab.get("tab_id") if isinstance(tab, dict) else None
-    pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
-    if not isinstance(tab_id, str) or not tab_id or not isinstance(pane_id, str) or not pane_id:
-        if isinstance(tab_id, str) and tab_id:
+    tab_id = herdr_public_id(tab.get("tab_id") if isinstance(tab, dict) else None)
+    pane_id = herdr_public_id(pane.get("pane_id") if isinstance(pane, dict) else None)
+    if tab_id is None or pane_id is None:
+        if tab_id is not None:
             close_error = herdr_close_tab(herdr, tab_id)
             if close_error:
                 raise KanbanError(t(
@@ -1409,7 +1418,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             if create:
                 # 标记项目归属供后续复用校验; 写失败不影响本次启动, 未标记的 session 仍会被复用.
                 tmux_capture(tmux, "set-option", "-t", session, PROJECT_SESSION_OPTION, str(project))
-    except (KanbanError, OSError, UnicodeError) as error:
+    except (KanbanError, OSError, UnicodeError, ValueError) as error:
         close_error = herdr_close_tab(herdr_bin, created_tab) if created_tab is not None else None
         rollback_errors: list[str] = []
         try:
