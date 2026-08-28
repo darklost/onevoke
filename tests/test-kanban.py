@@ -179,6 +179,7 @@ printf '%s\\n' '@9'
             """#!/bin/sh
 if [ "$1" = "tab" ] && [ "$2" = "create" ]; then
     printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.create"
+    printf '%s\\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
     if [ "${KANBAN_HERDR_CREATE_FAIL:-}" = "1" ]; then
         printf '%s\\n' 'fake herdr tab create failure' >&2
         exit 1
@@ -190,8 +191,18 @@ if [ "$1" = "tab" ] && [ "$2" = "create" ]; then
     printf '%s\\n' '{"id":"cli:tab:create","result":{"type":"tab_created","tab":{"tab_id":"w1:t9","workspace_id":"w1","number":1,"label":"kb","focused":true,"pane_count":1,"agent_status":"idle"},"root_pane":{"pane_id":"w1:p9","terminal_id":"term1","workspace_id":"w1","tab_id":"w1:t9","focused":true,"agent_status":"idle","revision":1}}}'
     exit 0
 fi
+if [ "$1" = "pane" ] && [ "$2" = "wait-output" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.wait"
+    printf '%s\\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ "${KANBAN_HERDR_WAIT_FAIL:-}" = "1" ]; then
+        printf '%s\\n' 'fake herdr pane wait-output timeout' >&2
+        exit 1
+    fi
+    exit 0
+fi
 if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
     printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.run"
+    printf '%s\\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
     if [ "${KANBAN_HERDR_RUN_FAIL:-}" = "1" ]; then
         printf '%s\\n' 'fake herdr pane run failure' >&2
         if [ "${KANBAN_HERDR_CLOSE_CRASH:-}" = "1" ]; then
@@ -1047,6 +1058,16 @@ exit 1
         self.assertEqual(str(self.root.resolve().parent), create[create.index("--cwd") + 1])
         self.assertEqual("kb-任务-herdr-start", create[create.index("--label") + 1])
         self.assertIn("--focus", create)
+        wait = self.herdr_arguments("wait")
+        self.assertEqual(["pane", "wait-output", "w1:p9"], wait[:3])
+        self.assertEqual(r"\S", wait[wait.index("--regex") + 1])
+        self.assertEqual("visible", wait[wait.index("--source") + 1])
+        self.assertTrue(int(wait[wait.index("--timeout") + 1]) > 0)
+        # 先等 pane 就绪再送命令, 否则命令文本会被未就绪的终端丢弃.
+        self.assertEqual(
+            ["tab create", "pane wait-output", "pane run"],
+            self.herdr_arguments("order"),
+        )
         run = self.herdr_arguments("run")
         self.assertEqual(["pane", "run", "w1:p9"], run[:3])
         self.assertEqual(4, len(run))
@@ -1135,6 +1156,22 @@ exit 1
         )
 
         self.assertIn("herdr pane run 失败", result.stderr)
+        self.assertEqual(["tab", "close", "w1:t9"], self.herdr_arguments("close"))
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_herdr_pane_ready_failure_closes_tab_and_restores_todo(self) -> None:
+        task_id, task = self.make_todo("herdr-wait-fail")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_WAIT_FAIL"] = "1"
+
+        result = self.run_command(
+            "start", "--launcher", "herdr", task_id, succeeds=False
+        )
+
+        self.assertIn("herdr pane 未就绪", result.stderr)
+        self.assertFalse((self.root / "herdr.log.run").exists())
         self.assertEqual(["tab", "close", "w1:t9"], self.herdr_arguments("close"))
         self.assertEqual(original, task.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / task.name).exists())

@@ -1274,6 +1274,34 @@ def herdr_create_tab(herdr: str, workspace: str, cwd: str, label: str) -> tuple[
     return tab_id, pane_id
 
 
+HERDR_PANE_READY_TIMEOUT_MS = 15000
+
+
+def herdr_wait_pane_ready(herdr: str, pane_id: str) -> None:
+    """等新 tab 的 shell 渲染出提示符再送命令.
+
+    tab create 返回时 pane 里的 shell 往往还没接管终端, 此时 pane run 送入的
+    文本只会被回显后丢弃, Agent 不会启动. 首帧输出即提示符, 以它为就绪信号.
+    """
+    result = herdr_capture(
+        herdr,
+        "pane",
+        "wait-output",
+        pane_id,
+        "--regex",
+        r"\S",
+        "--source",
+        "visible",
+        "--timeout",
+        str(HERDR_PANE_READY_TIMEOUT_MS),
+    )
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"herdr pane 未就绪: {herdr_failure_detail(result)}",
+            f"herdr pane is not ready: {herdr_failure_detail(result)}",
+        ))
+
+
 def herdr_pane_run(herdr: str, pane_id: str, command: str) -> None:
     # herdr pane run 把 pane id 之后的参数用空格拼接后发给 shell; 不能插入字面量 --.
     result = herdr_capture(herdr, "pane", "run", pane_id, command)
@@ -1416,6 +1444,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             created_tab, pane_id = herdr_create_tab(
                 herdr_bin, herdr_workspace, str(root.parent), name
             )
+            herdr_wait_pane_ready(herdr_bin, pane_id)
             herdr_pane_run(herdr_bin, pane_id, command)
         else:
             command = shlex.join(agent_argv)
