@@ -183,6 +183,10 @@ if [ "$1" = "tab" ] && [ "$2" = "create" ]; then
         printf '%s\\n' 'fake herdr tab create failure' >&2
         exit 1
     fi
+    if [ -n "${KANBAN_HERDR_CREATE_JSON:-}" ]; then
+        printf '%s\\n' "$KANBAN_HERDR_CREATE_JSON"
+        exit 0
+    fi
     printf '%s\\n' '{"id":"cli:tab:create","result":{"type":"tab_created","tab":{"tab_id":"w1:t9","workspace_id":"w1","number":1,"label":"kb","focused":true,"pane_count":1,"agent_status":"idle"},"root_pane":{"pane_id":"w1:p9","terminal_id":"term1","workspace_id":"w1","tab_id":"w1:t9","focused":true,"agent_status":"idle","revision":1}}}'
     exit 0
 fi
@@ -190,6 +194,9 @@ if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
     printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.run"
     if [ "${KANBAN_HERDR_RUN_FAIL:-}" = "1" ]; then
         printf '%s\\n' 'fake herdr pane run failure' >&2
+        if [ "${KANBAN_HERDR_CLOSE_CRASH:-}" = "1" ]; then
+            /bin/rm -f "$0"
+        fi
         exit 1
     fi
     exit 0
@@ -949,9 +956,11 @@ exit 1
         self.assertEqual("kb-任务-herdr-start", create[create.index("--label") + 1])
         self.assertIn("--focus", create)
         run = self.herdr_arguments("run")
-        self.assertEqual(["pane", "run", "w1:p9", "--"], run[:4])
-        self.assertIn(str(fake_bin / "codex"), run[4])
-        self.assertIn(task_id, run[4])
+        self.assertEqual(["pane", "run", "w1:p9"], run[:3])
+        self.assertEqual(4, len(run))
+        self.assertFalse(run[3].startswith("--"))
+        self.assertIn(str(fake_bin / "codex"), run[3])
+        self.assertIn(task_id, run[3])
         self.assertFalse((self.root / "herdr.log.close").exists())
         self.assertTrue((self.root / "working" / task.name).exists())
 
@@ -1035,6 +1044,37 @@ exit 1
 
         self.assertIn("herdr pane run 失败", result.stderr)
         self.assertEqual(["tab", "close", "w1:t9"], self.herdr_arguments("close"))
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_herdr_non_object_create_json_restores_todo(self) -> None:
+        task_id, task = self.make_todo("herdr-bad-json")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_CREATE_JSON"] = "[]"
+
+        result = self.run_command(
+            "start", "--launcher", "herdr", task_id, succeeds=False
+        )
+
+        self.assertIn("herdr tab create 失败", result.stderr)
+        self.assertIn("JSON object", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_herdr_close_oserror_still_restores_todo(self) -> None:
+        task_id, task = self.make_todo("herdr-close-crash")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
+        self.env["KANBAN_HERDR_CLOSE_CRASH"] = "1"
+
+        result = self.run_command(
+            "start", "--launcher", "herdr", task_id, succeeds=False
+        )
+
+        self.assertIn("herdr pane run 失败", result.stderr)
+        self.assertIn("关闭 tab w1:t9 失败", result.stderr)
         self.assertEqual(original, task.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / task.name).exists())
 

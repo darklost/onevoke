@@ -1208,6 +1208,8 @@ def herdr_json_result(result: subprocess.CompletedProcess, action: str) -> dict:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as error:
         raise KanbanError(t(f"herdr {action} 失败: 响应不是 JSON: {error}", f"herdr {action} failed: response is not JSON: {error}")) from error
+    if not isinstance(payload, dict):
+        raise KanbanError(t(f"herdr {action} 失败: 响应不是 JSON object", f"herdr {action} failed: response is not a JSON object"))
     data = payload.get("result")
     if not isinstance(data, dict):
         raise KanbanError(t(f"herdr {action} 失败: 响应缺少 result", f"herdr {action} failed: response is missing result"))
@@ -1215,7 +1217,13 @@ def herdr_json_result(result: subprocess.CompletedProcess, action: str) -> dict:
 
 
 def herdr_close_tab(herdr: str, tab_id: str) -> Optional[str]:
-    result = herdr_capture(herdr, "tab", "close", tab_id)
+    try:
+        result = herdr_capture(herdr, "tab", "close", tab_id)
+    except (OSError, UnicodeError) as error:
+        return t(
+            f"关闭 tab {tab_id} 失败: {error}",
+            f"failed to close tab {tab_id}: {error}",
+        )
     if result.returncode == 0:
         return None
     return t(
@@ -1258,7 +1266,8 @@ def herdr_create_tab(herdr: str, workspace: str, cwd: str, label: str) -> tuple[
 
 
 def herdr_pane_run(herdr: str, pane_id: str, command: str) -> None:
-    result = herdr_capture(herdr, "pane", "run", pane_id, "--", command)
+    # herdr pane run 把 pane id 之后的参数用空格拼接后发给 shell; 不能插入字面量 --.
+    result = herdr_capture(herdr, "pane", "run", pane_id, command)
     if result.returncode != 0:
         raise KanbanError(t(
             f"herdr pane run 失败: {herdr_failure_detail(result)}",
