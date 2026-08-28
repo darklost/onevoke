@@ -51,8 +51,9 @@
 
 ### Launcher
 
-- launcher 有 `tmux`, `tmux-session`, `foreground`, `console` 四种. POSIX 默认 `tmux`; 原生 Windows 默认 `console`, 且 Windows 不使用 `tmux`/`tmux-session`.
+- launcher 有 `tmux`, `tmux-session`, `herdr`, `foreground`, `console` 五种. POSIX 默认 `tmux`; 原生 Windows 默认 `console`, 且 Windows 不使用 `tmux`/`tmux-session`/`herdr`.
 - `console` 仅支持 Windows: 它在独立控制台窗口启动 Agent 并返回 PID, 不创建或复用 tmux session, 不提供 attach 或输出抓取能力. 需要在当前终端等待执行结果时改用 `foreground`; 完整启动与协调契约见 `KANBAN-RULES.md`.
+- `herdr` 仅支持 POSIX, 且要求当前处于 herdr (`HERDR_ENV=1`): 在当前 workspace 新建 tab, 并在根 pane 启动与 tmux 路径相同的 Agent 命令. 完整启动与协调契约见 `KANBAN-RULES.md`.
 
 ### Reviewer
 

@@ -1193,6 +1193,79 @@ def window_name(entry: Entry, text: str) -> str:
     return f"kb-{label}"[:50]
 
 
+def herdr_capture(herdr: str, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run([herdr, *arguments], text=True, capture_output=True, check=False)
+
+
+def herdr_failure_detail(result: subprocess.CompletedProcess) -> str:
+    return result.stderr.strip() or f"exit {result.returncode}"
+
+
+def herdr_json_result(result: subprocess.CompletedProcess, action: str) -> dict:
+    if result.returncode != 0:
+        raise KanbanError(t(f"herdr {action} 失败: {herdr_failure_detail(result)}", f"herdr {action} failed: {herdr_failure_detail(result)}"))
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise KanbanError(t(f"herdr {action} 失败: 响应不是 JSON: {error}", f"herdr {action} failed: response is not JSON: {error}")) from error
+    data = payload.get("result")
+    if not isinstance(data, dict):
+        raise KanbanError(t(f"herdr {action} 失败: 响应缺少 result", f"herdr {action} failed: response is missing result"))
+    return data
+
+
+def herdr_close_tab(herdr: str, tab_id: str) -> Optional[str]:
+    result = herdr_capture(herdr, "tab", "close", tab_id)
+    if result.returncode == 0:
+        return None
+    return t(
+        f"关闭 tab {tab_id} 失败: {herdr_failure_detail(result)}",
+        f"failed to close tab {tab_id}: {herdr_failure_detail(result)}",
+    )
+
+
+def herdr_create_tab(herdr: str, workspace: str, cwd: str, label: str) -> tuple[str, str]:
+    result = herdr_capture(
+        herdr,
+        "tab",
+        "create",
+        "--workspace",
+        workspace,
+        "--cwd",
+        cwd,
+        "--label",
+        label,
+        "--focus",
+    )
+    data = herdr_json_result(result, "tab create")
+    tab = data.get("tab")
+    pane = data.get("root_pane")
+    tab_id = tab.get("tab_id") if isinstance(tab, dict) else None
+    pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
+    if not isinstance(tab_id, str) or not tab_id or not isinstance(pane_id, str) or not pane_id:
+        if isinstance(tab_id, str) and tab_id:
+            close_error = herdr_close_tab(herdr, tab_id)
+            if close_error:
+                raise KanbanError(t(
+                    f"herdr tab create 失败: 响应缺少 tab 或 pane id; {close_error}",
+                    f"herdr tab create failed: response is missing tab or pane id; {close_error}",
+                ))
+        raise KanbanError(t(
+            "herdr tab create 失败: 响应缺少 tab 或 pane id",
+            "herdr tab create failed: response is missing tab or pane id",
+        ))
+    return tab_id, pane_id
+
+
+def herdr_pane_run(herdr: str, pane_id: str, command: str) -> None:
+    result = herdr_capture(herdr, "pane", "run", pane_id, "--", command)
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"herdr pane run 失败: {herdr_failure_detail(result)}",
+            f"herdr pane run failed: {herdr_failure_detail(result)}",
+        ))
+
+
 def agent_command(agent: str, binary: str, model_entry: Dict[str, str], kind: str) -> list[str]:
     """按 Onevoke 配置的模型档位拼 Agent 的 YOLO 启动参数. model 为空时用 CLI 默认模型."""
     model = model_entry["model"]
@@ -1218,7 +1291,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     config = effective_config(load_config())
     agent_name = args.agent or config["kanban_agent"]
     launcher = args.launcher or config["launcher"]
-    if os.name == "nt" and launcher in ("tmux", "tmux-session"):
+    if os.name == "nt" and launcher in ("tmux", "tmux-session", "herdr"):
         raise KanbanError(t(
             f"Windows 不支持 {launcher} 启动方式; 请使用 console 或 foreground",
             f"Windows does not support the {launcher} launcher; use console or foreground",
@@ -1235,6 +1308,8 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     tmux = None
     session = None
     session_exists = False
+    herdr_bin = None
+    herdr_workspace = None
     if launcher in ("tmux", "tmux-session"):
         tmux = shutil.which("tmux")
         if not tmux:
@@ -1244,6 +1319,24 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         else:
             # 项目专属 session 自己建, 因此不要求 start 本身跑在 tmux 里.
             session, session_exists = resolve_project_session(tmux, project)
+    elif launcher == "herdr":
+        if os.environ.get("HERDR_ENV") != "1":
+            raise KanbanError(t(
+                "当前不在 herdr. herdr 启动方式要求 HERDR_ENV=1",
+                "Not currently in herdr. The herdr launcher requires HERDR_ENV=1",
+            ))
+        herdr_bin = shutil.which("herdr")
+        if not herdr_bin:
+            raise KanbanError(t(
+                "herdr 不在 PATH; 运行 onevoke welcome 选择其他启动方式",
+                "herdr is not in PATH; run onevoke welcome to select another launcher",
+            ))
+        herdr_workspace = os.environ.get("HERDR_WORKSPACE_ID", "").strip()
+        if not herdr_workspace:
+            raise KanbanError(t(
+                "缺少 HERDR_WORKSPACE_ID; 无法在当前 workspace 新建 tab",
+                "HERDR_WORKSPACE_ID is missing; cannot create a tab in the current workspace",
+            ))
     elif launcher == "console":
         if os.name != "nt":
             raise KanbanError(t(
@@ -1264,6 +1357,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     name = window_name(entry, original)
     model_entry = config["models"]["kanban"][agent_name]
     agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind), prompt]
+    created_tab = None
     try:
         write_text_atomic(moved.document, updated, entry=moved)
         if launcher == "foreground":
@@ -1284,6 +1378,12 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 )
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
+        elif launcher == "herdr":
+            command = shlex.join(agent_argv)
+            created_tab, pane_id = herdr_create_tab(
+                herdr_bin, herdr_workspace, str(root.parent), name
+            )
+            herdr_pane_run(herdr_bin, pane_id, command)
         else:
             command = shlex.join(agent_argv)
             create = launcher == "tmux-session" and not session_exists
@@ -1301,6 +1401,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 # 标记项目归属供后续复用校验; 写失败不影响本次启动, 未标记的 session 仍会被复用.
                 tmux_capture(tmux, "set-option", "-t", session, PROJECT_SESSION_OPTION, str(project))
     except (KanbanError, OSError, UnicodeError) as error:
+        close_error = herdr_close_tab(herdr_bin, created_tab) if created_tab is not None else None
         rollback_errors: list[str] = []
         try:
             write_text_atomic(moved.document, original, entry=moved)
@@ -1310,14 +1411,17 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             rename_entry_nofollow(root, moved, entry.state)
         except (OSError, UnicodeError, KanbanError) as move_error:
             rollback_errors.append(t(f"迁回 todo 失败: {move_error}", f"failed to move back to todo: {move_error}"))
+        extras = [item for item in (close_error, *rollback_errors) if item]
         if rollback_errors:
             raise KanbanError(
                 t(
                     f"启动失败且回滚失败; 卡片保留在 working: {error}; ",
                     f"Start and rollback both failed; task remains in working: {error}; ",
                 )
-                + "; ".join(rollback_errors)
+                + "; ".join(extras)
             ) from error
+        if close_error:
+            raise KanbanError(f"{error}; {close_error}") from error
         raise
     if launcher == "foreground":
         print(
@@ -1338,6 +1442,12 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         print(t(
             f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=console\tPID={process.pid}",
             f"started: {entry.task_id}\tagent={agent_name}\tlauncher=console\tPID={process.pid}",
+        ))
+        return
+    if launcher == "herdr":
+        print(t(
+            f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=herdr\ttab={created_tab}\tpane={pane_id}",
+            f"started: {entry.task_id}\tagent={agent_name}\tlauncher=herdr\ttab={created_tab}\tpane={pane_id}",
         ))
         return
     if launcher == "tmux-session":

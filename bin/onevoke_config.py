@@ -59,7 +59,7 @@ EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 REVIEW_STAGE_MODES = ("auto", "skip", "required")
-LAUNCHERS = ("tmux", "tmux-session", "foreground", "console")
+LAUNCHERS = ("tmux", "tmux-session", "herdr", "foreground", "console")
 LANGUAGES = ("cn", "en")
 # model 允许空字符串, 表示用对应 CLI 自己的默认模型.
 KANBAN_MODEL_DEFAULTS = {

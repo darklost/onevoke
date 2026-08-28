@@ -74,6 +74,13 @@ class KanbanCommandTest(unittest.TestCase):
         self.env["KANBAN_DIR"] = str(self.root)
         self.env.pop("TMUX", None)
         self.env.pop("TMUX_PANE", None)
+        for name in (
+            "HERDR_ENV",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_TAB_ID",
+            "HERDR_PANE_ID",
+        ):
+            self.env.pop(name, None)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -164,6 +171,48 @@ printf '%s\\n' '@9'
         self.env["TMUX_PANE"] = "%7"
         self.env["KANBAN_TMUX_LOG"] = str(self.root / "tmux.log")
         return fake_bin
+
+    def install_fake_herdr(self) -> Path:
+        fake_bin = self.install_fake_launchers()
+        herdr = fake_bin / "herdr"
+        herdr.write_text(
+            """#!/bin/sh
+if [ "$1" = "tab" ] && [ "$2" = "create" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.create"
+    if [ "${KANBAN_HERDR_CREATE_FAIL:-}" = "1" ]; then
+        printf '%s\\n' 'fake herdr tab create failure' >&2
+        exit 1
+    fi
+    printf '%s\\n' '{"id":"cli:tab:create","result":{"type":"tab_created","tab":{"tab_id":"w1:t9","workspace_id":"w1","number":1,"label":"kb","focused":true,"pane_count":1,"agent_status":"idle"},"root_pane":{"pane_id":"w1:p9","terminal_id":"term1","workspace_id":"w1","tab_id":"w1:t9","focused":true,"agent_status":"idle","revision":1}}}'
+    exit 0
+fi
+if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.run"
+    if [ "${KANBAN_HERDR_RUN_FAIL:-}" = "1" ]; then
+        printf '%s\\n' 'fake herdr pane run failure' >&2
+        exit 1
+    fi
+    exit 0
+fi
+if [ "$1" = "tab" ] && [ "$2" = "close" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.close"
+    exit 0
+fi
+printf '%s\\n' "unexpected herdr args: $*" >&2
+exit 1
+""",
+            encoding="utf-8",
+        )
+        herdr.chmod(0o755)
+        # 测试 PATH 只含假二进制, 避免本机 herdr 改变行为.
+        self.env["PATH"] = str(fake_bin)
+        self.env["HERDR_ENV"] = "1"
+        self.env["HERDR_WORKSPACE_ID"] = "w1"
+        self.env["KANBAN_HERDR_LOG"] = str(self.root / "herdr.log")
+        return fake_bin
+
+    def herdr_arguments(self, suffix: str) -> list[str]:
+        return (self.root / f"herdr.log.{suffix}").read_text(encoding="utf-8").splitlines()
 
     def test_locale_selects_chinese_or_english(self) -> None:
         chinese = self.run_command("--help")
@@ -877,6 +926,115 @@ printf '%s\\n' '@9'
         )
 
         self.assertIn("tmux new-session 失败", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_herdr_launcher_creates_a_tab_and_runs_the_agent(self) -> None:
+        task_id, task = self.make_todo("herdr-start")
+        fake_bin = self.install_fake_herdr()
+
+        result = self.run_command("start", "--launcher", "herdr", task_id)
+
+        self.assertIn("herdr", self.run_command("start", "--help").stdout)
+        self.assertIn(f"已启动: {task_id}", result.stdout)
+        self.assertIn("Agent=codex", result.stdout)
+        self.assertIn("启动方式=herdr", result.stdout)
+        self.assertIn("tab=w1:t9", result.stdout)
+        self.assertIn("pane=w1:p9", result.stdout)
+        create = self.herdr_arguments("create")
+        self.assertEqual("tab", create[0])
+        self.assertEqual("create", create[1])
+        self.assertEqual("w1", create[create.index("--workspace") + 1])
+        self.assertEqual(str(self.root.resolve().parent), create[create.index("--cwd") + 1])
+        self.assertEqual("kb-任务-herdr-start", create[create.index("--label") + 1])
+        self.assertIn("--focus", create)
+        run = self.herdr_arguments("run")
+        self.assertEqual(["pane", "run", "w1:p9", "--"], run[:4])
+        self.assertIn(str(fake_bin / "codex"), run[4])
+        self.assertIn(task_id, run[4])
+        self.assertFalse((self.root / "herdr.log.close").exists())
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_launcher_reads_the_machine_config(self) -> None:
+        task_id, _ = self.make_todo("herdr-config")
+        self.install_fake_herdr()
+        self.write_onevoke_config("codex", "herdr")
+
+        result = self.run_command("start", task_id)
+
+        self.assertIn("启动方式=herdr", result.stdout)
+        self.assertIn("tab=w1:t9", result.stdout)
+
+    def test_herdr_launcher_rejects_outside_herdr_before_claiming(self) -> None:
+        task_id, task = self.make_todo("herdr-no-env")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_herdr()
+        self.env.pop("HERDR_ENV")
+
+        result = self.run_command("start", "--launcher", "herdr", task_id, succeeds=False)
+
+        self.assertIn("当前不在 herdr", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertTrue(task.exists())
+        self.assertFalse((self.root / "working" / task.name).exists())
+        self.assertFalse((self.root / "herdr.log.create").exists())
+
+    def test_herdr_launcher_rejects_missing_binary_before_claiming(self) -> None:
+        task_id, task = self.make_todo("herdr-no-bin")
+        original = task.read_text(encoding="utf-8")
+        fake_bin = self.install_fake_launchers()
+        self.env["PATH"] = str(fake_bin)
+        self.env["HERDR_ENV"] = "1"
+        self.env["HERDR_WORKSPACE_ID"] = "w1"
+
+        result = self.run_command("start", "--launcher", "herdr", task_id, succeeds=False)
+
+        self.assertIn("herdr 不在 PATH", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertTrue(task.exists())
+        self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_herdr_launcher_rejects_missing_workspace_before_claiming(self) -> None:
+        task_id, task = self.make_todo("herdr-no-ws")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_herdr()
+        self.env.pop("HERDR_WORKSPACE_ID")
+
+        result = self.run_command("start", "--launcher", "herdr", task_id, succeeds=False)
+
+        self.assertIn("缺少 HERDR_WORKSPACE_ID", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertTrue(task.exists())
+        self.assertFalse((self.root / "working" / task.name).exists())
+        self.assertFalse((self.root / "herdr.log.create").exists())
+
+    def test_herdr_tab_create_failure_restores_todo(self) -> None:
+        task_id, task = self.make_todo("herdr-create-fail")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_CREATE_FAIL"] = "1"
+
+        result = self.run_command(
+            "start", "--launcher", "herdr", task_id, succeeds=False
+        )
+
+        self.assertIn("herdr tab create 失败", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_herdr_pane_run_failure_closes_tab_and_restores_todo(self) -> None:
+        task_id, task = self.make_todo("herdr-run-fail")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
+
+        result = self.run_command(
+            "start", "--launcher", "herdr", task_id, succeeds=False
+        )
+
+        self.assertIn("herdr pane run 失败", result.stderr)
+        self.assertEqual(["tab", "close", "w1:t9"], self.herdr_arguments("close"))
         self.assertEqual(original, task.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / task.name).exists())
 

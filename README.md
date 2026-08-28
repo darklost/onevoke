@@ -94,7 +94,7 @@ kanban pick 20260813-login-retry-task
 kanban start 20260813-login-retry-task
 ```
 
-`kanban start` 支持 `tmux`, `tmux-session`, `foreground`, `console` 四种 launcher. POSIX 默认 `tmux`, 原生 Windows 默认 `console`; `console` 仅支持 Windows, 会在独立控制台窗口启动 Agent 并立即返回 PID. 它不创建或复用 tmux session, 也不提供 attach 或输出抓取能力; 需要在当前终端等待 Agent 时使用 `foreground`.
+`kanban start` 支持 `tmux`, `tmux-session`, `herdr`, `foreground`, `console` 五种 launcher. POSIX 默认 `tmux`, 原生 Windows 默认 `console`; `console` 仅支持 Windows, 会在独立控制台窗口启动 Agent 并立即返回 PID. 它不创建或复用 tmux session, 也不提供 attach 或输出抓取能力; 需要在当前终端等待 Agent 时使用 `foreground`. `herdr` 仅支持 POSIX, 要求当前处于 herdr (`HERDR_ENV=1`), 会在当前 workspace 新建 tab 并启动 Agent.
 
 大型任务由 Agent 拆成多张可并行执行的任务卡, 再按依赖启动.
 

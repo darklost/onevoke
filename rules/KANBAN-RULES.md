@@ -29,7 +29,7 @@ kanban show <task-id>
 kanban new [--large] <feature|bug|chore|research> <slug> <title...>
 kanban move <task-id> <todo|working|done|archived|trash>
 kanban pick [task-id]
-kanban start [--agent codex|claude|grok] [--launcher tmux|tmux-session|foreground|console] [task-id]
+kanban start [--agent codex|claude|grok] [--launcher tmux|tmux-session|herdr|foreground|console] [task-id]
 kanban check
 kanban web [--host HOST] [--port PORT] [--refresh SECONDS] [--assets DIR] [--open]
 kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
@@ -37,7 +37,7 @@ kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
 
 - `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式. 原生 Windows 上 Agent CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` 无法提供无损 argv 边界, `welcome`, `doctor` 与 `start` 均不得把它们视为可用 Agent.
 - `init` 幂等创建看板及 6 个状态目录, Git 项目只更新本地 `info/exclude`. Windows 新目录必须相对固定父句柄以 `CREATE_NEW` 创建并在创建时应用当前用户独占的 protected DACL, 创建竞态失败关闭; 既有目录只迁移叶目录 ACL. Git exclude 的父链逐分量拒绝 reparse point, 既有 ACL 不变, 去重读取和追加在同一固定叶句柄及文件锁内完成.
-- 四种 launcher: `tmux` 在启动者当前 session 里建任务 window, 要求 `start` 本身跑在 tmux 内; `tmux-session` 按项目主树路径确定一个专属 session (`kb-<目录名>-<路径摘要>`), 不存在就新建, 已存在就复用, 同一项目的全部任务卡共用该 session, 每张卡一个 window, 不要求 `start` 跑在 tmux 内, 启动后不切换客户端, 只输出 session 名, window id 和 attach 提示; `foreground` 在当前终端前台运行并等待 Agent 退出; `console` 仅支持原生 Windows, 在独立控制台窗口启动 Agent 后立即返回 PID. `console` 没有 session/window 复用、attach 或输出抓取能力, 不是 tmux 或 `tmux-session` 的等价实现. POSIX 默认 `tmux`, Windows 默认 `console`.
+- 五种 launcher: `tmux` 在启动者当前 session 里建任务 window, 要求 `start` 本身跑在 tmux 内; `tmux-session` 按项目主树路径确定一个专属 session (`kb-<目录名>-<路径摘要>`), 不存在就新建, 已存在就复用, 同一项目的全部任务卡共用该 session, 每张卡一个 window, 不要求 `start` 跑在 tmux 内, 启动后不切换客户端, 只输出 session 名, window id 和 attach 提示; `herdr` 要求 `HERDR_ENV=1` 且 herdr 在 PATH, 在当前 workspace 新建 tab (`--focus`, 标签复用 `window_name()`) 后在根 pane 执行与 tmux 相同的 Agent 命令, 不使用 `herdr agent start`; `foreground` 在当前终端前台运行并等待 Agent 退出; `console` 仅支持原生 Windows, 在独立控制台窗口启动 Agent 后立即返回 PID. `console` 没有 session/window 复用、attach 或输出抓取能力, 不是 tmux 或 `tmux-session` 的等价实现. POSIX 默认 `tmux`, Windows 默认 `console`; Windows 拒绝 `herdr`.
 - `check` 列出全部无效入口并以非零退出. `web` 和 `tui` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
 - `web` 是原生 Windows 第一阶段保证的看板 UI. `tui` 默认按终端宽度显示尽可能多的栏目, 每栏默认最小 40 列 (可用 `-`/`=` 调节并记住), 宽度不足时少显示, 不足一栏最小宽度时按实际宽度显示单栏, 左右切换时始终保持选中栏可见. `--single` 即使终端足够宽也只显示一栏. `--theme` 指定初始配色主题 (默认 auto 跟随终端). 方向键或 `hjkl` 切换栏目和任务, 鼠标单击栏目或任务卡聚焦/选中, 双击打开详情, 在任务卡上拖选文本自动复制到系统剪贴板, 滚轮在看板翻卡、在详情滚动正文, PgUp/PgDn 按页翻动任务列表, `/` 搜索 (也可点工具栏搜索区), `y` 复制当前任务 ID, Enter 查看任务卡, `a` 切换存档栏目, `t` 循环切换 auto/light/dark 主题, `r` 刷新, `q` 退出; 搜索覆盖标题, 任务 ID, 任务组, 类型, 负责人和状态. 任务卡详情内可用 `hjkl`/方向键移动光标, 滚轮滚动正文, Ctrl-d/u 半页, Ctrl-f/b 或 PgUp/PgDn 整页, `gg`/`G` 到顶/底, `/` 搜索正文并用 `n`/`N` 跳转匹配, `v`/`V` 进入字符/行选择模式并用 `y` 复制, 拖选正文同样自动复制. 默认每 30 秒自动刷新, 按任务 ID 原位更新并尽量保留当前栏目的选中项和滚动位置. Windows TUI 仍要求当前 Python 提供可用 curses 后端, 不属于本阶段保证; 无法加载时使用 `kanban web`.
 - 命令只做结构和机械校验; 授权, 依赖和终止理由由 Agent 按本文件判断.
@@ -175,19 +175,19 @@ backlog -> todo -> working -> done -> archived
 
 ```sh
 # 委派给新执行 Agent: start 原子领取并启动
-kanban start [--agent codex|claude|grok] [--launcher tmux|tmux-session|foreground|console] <task-id>
+kanban start [--agent codex|claude|grok] [--launcher tmux|tmux-session|herdr|foreground|console] <task-id>
 
 # 用户明确要求当前 Agent 执行既有任务卡: 只迁移, 随后手工填写负责人和开始时间
 kanban move <task-id> working
 ```
 
 - `kanban move <task-id> working` 仅适用于用户明确要求当前 Agent 执行既有任务卡; 选择「确认计划并走看板」时必须用 `start`. 不得先 `move ... working` 再 `start`; `start` 只接受 `todo` 卡. 同文件系统上的入口迁移就是领取原语, 只有迁移成功者取得任务; 失败后重查, 不建替代卡, 不另加 lock 服务, 数据库或 ID 分配器.
-- `start` 在启动前检查 Agent, launcher 和 TTY; `tmux` 要求已在 tmux session 内, `tmux-session` 只要求 tmux 可用并在此时选定项目专属 session 名, `foreground` 要求三个标准流都是 TTY, `console` 要求原生 Windows. 前置检查失败不领取; 创建进程, tmux session 或 tmux window 失败时恢复文档并迁回 `todo/`. 进程创建成功后即算启动成功, 后续退出不自动回滚; `console` 成功时输出 PID 后立即返回.
+- `start` 在启动前检查 Agent, launcher 和 TTY; `tmux` 要求已在 tmux session 内, `tmux-session` 只要求 tmux 可用并在此时选定项目专属 session 名, `herdr` 要求 `HERDR_ENV=1`、herdr 在 PATH 且有 `HERDR_WORKSPACE_ID`, `foreground` 要求三个标准流都是 TTY, `console` 要求原生 Windows. 前置检查失败不领取; 创建进程, tmux session, tmux window, herdr tab 或 `pane run` 失败时恢复文档并迁回 `todo/`; `pane run` 失败还须关闭本次新建的 tab. 进程创建成功后即算启动成功, 后续退出不自动回滚; `console` 成功时输出 PID 后立即返回.
 - `start` 的 prompt 只传任务 ID 和固定要求. 执行 Agent 先读本规则, 卡片和项目规则, 再准备工作区并填写任务分支.
 - 领取后只有执行负责人可修改或迁移 `working/` 入口; 协调和编排 Agent 只读督办. 明确交接后由新负责人接管, 不得并发写.
 - 启动后的协调责任按启动方式分:
   - foreground 单卡: 启动者在 Agent 退出后检查结果, 直到任务完成或明确交接.
-  - tmux 或 tmux-session 单卡: 执行 Agent 在独立 window 直接向用户汇报, 启动者不巡检. 启动成功后立即告知用户本会话不跟踪该任务进度, 当前 session 可以结束, 下一个任务另开会话; `tmux-session` 还要一并给出 session 名和 attach 命令. 用户明确要求跟踪时改按 foreground 单卡协调.
+  - tmux、tmux-session 或 herdr 单卡: 执行 Agent 在独立 window 或 tab 直接向用户汇报, 启动者不巡检. 启动成功后立即告知用户本会话不跟踪该任务进度, 当前 session 可以结束, 下一个任务另开会话; `tmux-session` 还要一并给出 session 名和 attach 命令; `herdr` 还要给出 tab id 和 pane id. 用户明确要求跟踪时改按 foreground 单卡协调.
   - console 单卡: 执行 Agent 在独立 Windows 控制台直接向用户汇报, 启动者不抓取输出. 启动成功后告知用户 PID 及本会话不跟踪进度; 该 PID 只用于只读判断进程是否仍存在, 不能用于 attach 或恢复输出. 用户明确要求由启动者跟踪时改按 foreground 单卡协调.
   - 任务组: 按「任务组编排」巡检, 启动成功不解除该责任.
 
@@ -200,7 +200,7 @@ kanban move <task-id> working
 - 以首张卡启动成功的时间为基准设置固定检查点, 每隔 15 分钟执行一轮状态检查; 不得自行缩短周期. Agent 消息或用户输入可触发额外检查, 额外检查后继续等待原定检查点, 不重置或取消后续定时检查.
 - 只有检查中确认执行 Agent 明确失败或已停止才提前处置; 其余情况一律保持 15 分钟一轮, 不因输出无变化, 卡片无进展或等待时间长而缩短周期或提前介入.
 - 两个检查点之间使用当前 Agent 或 runtime 支持的最长单次阻塞等待. 支持连续等待至下一检查点时必须一次等满; 只有等待接口存在更短的硬上限时才可续接等待, 续接时不得运行命令, 读取卡片或输出无变化状态. 禁止用分钟级或其他短周期轮询计时.
-- 每轮状态检查只运行 `kanban check`, 读取全组卡片状态, 并在 launcher 提供只读输出通道时查看各执行 Agent 的输出, 核对前置任务是否已进入 `done`, 判断执行 Agent 是仍在运行, 明确失败还是已停止. tmux 启动的卡用 `kanban start` 返回的 window id 执行 `tmux capture-pane -p -t <window-id>`, 需要时配合 `tmux list-windows` 确认窗口是否还在; `tmux-session` 启动的卡同样用返回的 window id, 列窗口时加 `-t <session>`. `console` 不提供输出抓取, 只用返回 PID 只读判断进程是否存在并结合卡片状态判断; 不读取、控制或关闭独立控制台, 不把 PID 当作 tmux window id 或可恢复 session.
+- 每轮状态检查只运行 `kanban check`, 读取全组卡片状态, 并在 launcher 提供只读输出通道时查看各执行 Agent 的输出, 核对前置任务是否已进入 `done`, 判断执行 Agent 是仍在运行, 明确失败还是已停止. tmux 启动的卡用 `kanban start` 返回的 window id 执行 `tmux capture-pane -p -t <window-id>`, 需要时配合 `tmux list-windows` 确认窗口是否还在; `tmux-session` 启动的卡同样用返回的 window id, 列窗口时加 `-t <session>`. herdr 启动的卡用返回的 pane id 执行 `herdr pane read <pane-id>`. `console` 不提供输出抓取, 只用返回 PID 只读判断进程是否存在并结合卡片状态判断; 不读取、控制或关闭独立控制台, 不把 PID 当作 tmux window id 或可恢复 session.
 - 查看输出只读不交互: 不向执行 Agent 的窗口或会话发送按键, 消息, 催促或指令, 不中断, 恢复, 重启, 接管或改派子任务, 也不据此检查或修改子任务的代码, worktree, commit, 测试或审核内容.
 - 执行 Agent 明确失败或已停止 (输出报错终止, 进程退出, tmux window 消失) 而卡片未进 `done/`, 或卡片状态异常, 顺序冲突时, 只记录现状并向用户报告, 等用户决定交接, 改契约或终止; `working` 卡不得再次 `start`.
 - 执行 Agent 仍在运行时, 即使相邻两轮检查无进展也只在本轮记录现状, 继续按 15 分钟周期检查, 不提前介入或终止等待.

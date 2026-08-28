@@ -57,6 +57,13 @@ class OnevokeCommandTest(unittest.TestCase):
         self.env["ONEVOKE_CONFIG"] = str(self.config)
         self.env["PATH"] = str(self.fake_bin)
         self.env.pop("NO_COLOR", None)
+        for name in (
+            "HERDR_ENV",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_TAB_ID",
+            "HERDR_PANE_ID",
+        ):
+            self.env.pop(name, None)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -1310,6 +1317,111 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(1, result.returncode)
         self.assertIn("配置的 launcher 是 tmux-session", result.stderr)
+
+    def test_welcome_saves_the_herdr_launcher_after_tmux_session(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command("herdr")
+
+        # tmux 已装时菜单为 tmux, tmux-session, herdr, foreground.
+        returncode, output = self.run_on_tty("6\n3\n\n", "welcome")
+
+        self.assertEqual(0, returncode, output)
+        session_idx = output.index("tmux 项目专属 session 新窗口")
+        herdr_idx = output.index("herdr 当前 workspace 新标签")
+        foreground_idx = output.index("当前终端前台运行")
+        self.assertLess(session_idx, herdr_idx)
+        self.assertLess(herdr_idx, foreground_idx)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("herdr", config["launcher"])
+        self.assertEqual("herdr", self.run_command("config").stdout.splitlines()[2].split(": ")[1])
+
+    def test_welcome_lists_unavailable_herdr_when_currently_selected(self) -> None:
+        self.install_fake_environment(tmux=True)
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "herdr",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+        returncode, output = self.run_on_tty("6\n\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("herdr 当前 workspace 新标签 (当前未安装) (当前)", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("herdr", config["launcher"])
+
+    def test_welcome_omits_herdr_when_uninstalled_and_not_selected(self) -> None:
+        self.install_fake_environment(tmux=True)
+
+        returncode, output = self.run_on_tty("6\n\n\n", "welcome")
+
+        self.assertEqual(0, returncode, output)
+        self.assertNotIn("herdr 当前 workspace", output)
+        self.assertIn("当前终端前台运行", output)
+
+    def test_doctor_accepts_herdr_launcher_inside_herdr(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command("herdr")
+        self.env["HERDR_ENV"] = "1"
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "herdr",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("launcher=herdr 会在当前 workspace 新建 tab", result.stderr)
+        self.assertNotIn("需要当前处于 herdr", result.stderr)
+
+    def test_doctor_hints_herdr_launcher_requires_herdr_env(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command("herdr")
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "herdr",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("launcher=herdr 需要当前处于 herdr", result.stderr)
+
+    def test_doctor_rejects_herdr_launcher_when_herdr_missing(self) -> None:
+        self.install_fake_environment(tmux=True)
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "herdr",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("配置的 launcher 是 herdr", result.stderr)
+        self.assertIn("herdr 不在 PATH", result.stderr)
 
     def test_welcome_ctrl_c_exits_without_traceback_or_config(self) -> None:
         self.install_fake_environment(tmux=False)
