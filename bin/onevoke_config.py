@@ -59,7 +59,7 @@ EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 REVIEW_STAGE_MODES = ("auto", "skip", "required")
-LAUNCHERS = ("tmux", "tmux-session", "herdr", "foreground", "console")
+LAUNCHERS = ("auto", "tmux", "tmux-session", "herdr", "foreground", "console")
 LANGUAGES = ("cn", "en")
 # model 允许空字符串, 表示用对应 CLI 自己的默认模型.
 KANBAN_MODEL_DEFAULTS = {
@@ -509,7 +509,7 @@ def default_config() -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "welcome_complete": False,
         "kanban_agent": "codex",
-        "launcher": "console" if os.name == "nt" else "tmux",
+        "launcher": "console" if os.name == "nt" else "auto",
         "reviewers": {role: "codex" for role in REVIEW_ROLES},
         "review_stages": default_review_stages(),
         "models": default_models(),

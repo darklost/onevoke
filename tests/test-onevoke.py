@@ -248,7 +248,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("请在终端运行 onevoke welcome", result.stderr)
         self.assertFalse(self.config.exists())
 
-    def test_welcome_saves_per_role_reviewers_and_foreground_launcher(self) -> None:
+    def test_welcome_saves_per_role_reviewers_and_auto_launcher(self) -> None:
         self.install_fake_environment(tmux=False)
 
         # 只修改三个 Reviewer 和 MemSearch, 其余选项保留当前值.
@@ -257,10 +257,11 @@ class OnevokeCommandTest(unittest.TestCase):
         )
 
         self.assertEqual(0, returncode, output)
-        self.assertIn("\033[1;31m[!] 未安装 tmux", output)
+        self.assertIn("[-] tmux: 未安装", output)
+        self.assertIn("配置的 launcher 是 auto, 但 herdr 和 tmux 都不在 PATH", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("codex", config["kanban_agent"])
-        self.assertEqual("foreground", config["launcher"])
+        self.assertEqual("auto", config["launcher"])
         self.assertEqual(
             {"PM": "claude", "CSA": "grok", "Hacker": "codex", "QA": "claude"},
             config["reviewers"],
@@ -319,8 +320,8 @@ class OnevokeCommandTest(unittest.TestCase):
             "/bin/cp \"$TMUX_TEMPLATE\" \"$FAKE_BIN/tmux\"\n",
         )
 
-        # 进入启动方式菜单, 选择安装 tmux, 回车沿用当前 session 模式, 再回车保存.
-        returncode, output = self.run_on_tty("6\n2\n\n\n", "welcome")
+        # 进入启动方式菜单, auto 为第一项, 第三项是安装 tmux; 安装后回车沿用当前 session 模式, 再回车保存.
+        returncode, output = self.run_on_tty("6\n3\n\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertEqual("install tmux", brew_log.read_text(encoding="utf-8").strip())
@@ -660,8 +661,8 @@ class OnevokeCommandTest(unittest.TestCase):
         self.config.parent.mkdir(parents=True)
         self.config.write_text(json.dumps(existing), encoding="utf-8")
 
-        # 无包管理器时安装失败; 第三个 launcher 选项是安装 tmux.
-        returncode, output = self.run_on_tty("6\n3\n\n", "welcome", "--reset")
+        # 无包管理器时安装失败; auto 为第一项, 第四个 launcher 选项是安装 tmux.
+        returncode, output = self.run_on_tty("6\n4\n\n", "welcome", "--reset")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("没有找到受支持的包管理器", output)
@@ -688,8 +689,8 @@ class OnevokeCommandTest(unittest.TestCase):
         self.config.parent.mkdir(parents=True)
         self.config.write_text(json.dumps(existing), encoding="utf-8")
 
-        # 所有 Agent 暂不可用时仍可只把 launcher 改成 foreground.
-        returncode, output = self.run_on_tty("6\n3\n\n", "welcome", "--reset")
+        # 所有 Agent 暂不可用时仍可只把 launcher 改成 foreground. auto 为第一项, foreground 是第四项.
+        returncode, output = self.run_on_tty("6\n4\n\n", "welcome", "--reset")
 
         self.assertEqual(0, returncode, output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
@@ -1257,11 +1258,21 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("onevoke-review.sh 不在 PATH", result.stderr)
 
     def test_welcome_reports_single_tmux_session_hint(self) -> None:
-        """tmux 已装但当前不在 session 时, welcome/doctor 只给一次准确命令."""
+        """tmux launcher 已配置且当前不在 session 时, welcome/doctor 只给一次准确命令."""
         self.install_fake_environment(tmux=True)
         self.env.pop("TMUX", None)
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
 
-        returncode, output = self.run_on_tty("\n", "welcome")
+        returncode, output = self.run_on_tty("\n", "welcome", "--reset")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("已安装但当前不在 session", output)
@@ -1270,8 +1281,8 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_welcome_saves_the_per_project_tmux_session_launcher(self) -> None:
         self.install_fake_environment(tmux=True)
 
-        # 启动方式菜单的第二项是项目专属 session.
-        returncode, output = self.run_on_tty("6\n2\n\n", "welcome")
+        # 启动方式菜单的第三项是项目专属 session; auto 为第一项.
+        returncode, output = self.run_on_tty("6\n3\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("tmux 项目专属 session 新窗口", output)
@@ -1322,13 +1333,15 @@ class OnevokeCommandTest(unittest.TestCase):
         self.install_fake_environment(tmux=True)
         self.fake_command("herdr")
 
-        # tmux 已装时菜单为 tmux, tmux-session, herdr, foreground.
-        returncode, output = self.run_on_tty("6\n3\n\n", "welcome")
+        # tmux 已装时菜单为 auto, tmux, tmux-session, herdr, foreground.
+        returncode, output = self.run_on_tty("6\n4\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
+        auto_idx = output.index("按当前环境自动选择 herdr 或 tmux")
         session_idx = output.index("tmux 项目专属 session 新窗口")
         herdr_idx = output.index("herdr 当前 workspace 新标签")
         foreground_idx = output.index("当前终端前台运行")
+        self.assertLess(auto_idx, session_idx)
         self.assertLess(session_idx, herdr_idx)
         self.assertLess(herdr_idx, foreground_idx)
         config = json.loads(self.config.read_text(encoding="utf-8"))
@@ -1443,6 +1456,74 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("配置的 launcher 是 herdr", result.stderr)
         self.assertIn("herdr 不在 PATH", result.stderr)
+
+    def test_welcome_lists_auto_first_and_keeps_it_as_posix_default(self) -> None:
+        self.install_fake_environment(tmux=True)
+
+        returncode, output = self.run_on_tty("6\n\n\n", "welcome")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("  1. 按当前环境自动选择 herdr 或 tmux (当前)", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("auto", config["launcher"])
+        self.assertEqual("auto", self.run_command("config").stdout.splitlines()[2].split(": ")[1])
+
+    def test_doctor_accepts_auto_launcher_when_tmux_is_in_path(self) -> None:
+        self.install_fake_environment(tmux=True)
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "auto",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("launcher=auto 在启动时按当前环境选择", result.stderr)
+        self.assertNotIn("需要先进入上述 tmux session", result.stderr)
+
+    def test_doctor_accepts_auto_launcher_when_only_herdr_is_in_path(self) -> None:
+        self.install_fake_environment(tmux=False)
+        self.fake_command("herdr")
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "auto",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("launcher=auto 在启动时按当前环境选择", result.stderr)
+
+    def test_doctor_rejects_auto_launcher_when_herdr_and_tmux_are_missing(self) -> None:
+        self.install_fake_environment(tmux=False)
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "auto",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("配置的 launcher 是 auto", result.stderr)
+        self.assertIn("herdr 和 tmux 都不在 PATH", result.stderr)
 
     def test_welcome_ctrl_c_exits_without_traceback_or_config(self) -> None:
         self.install_fake_environment(tmux=False)

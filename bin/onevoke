@@ -395,7 +395,11 @@ def print_doctor() -> bool:
         tmux = shutil.which("tmux")
         if tmux:
             success(f"tmux: {tmux}")
-            if not os.environ.get("TMUX") and configured_launcher != "tmux-session":
+            if not os.environ.get("TMUX") and configured_launcher not in (
+                "tmux-session",
+                "auto",
+                "herdr",
+            ):
                 print(
                     t(
                         f"[-] tmux: 已安装但当前不在 session. 启动: {TMUX_SESSION_HINT}",
@@ -615,6 +619,29 @@ def validate_configured_resources(
                 t(
                     "[-] launcher=herdr 会在当前 workspace 新建 tab 并启动 Agent",
                     "[-] launcher=herdr creates a tab in the current workspace and starts the Agent",
+                ),
+                file=sys.stderr,
+            )
+    elif launcher == "auto":
+        if os.name == "nt":
+            healthy = False
+            warning(t(
+                "配置的 launcher 是 auto, 原生 Windows 不支持 auto; 请运行 onevoke welcome --reset 改选 console 或 foreground.",
+                "The configured launcher is auto, but native Windows does not support auto; run onevoke welcome --reset and select console or foreground.",
+            ))
+        elif not shutil.which("tmux") and not shutil.which("herdr"):
+            healthy = False
+            warning(
+                t(
+                    "配置的 launcher 是 auto, 但 herdr 和 tmux 都不在 PATH; 请安装其一或运行 onevoke welcome --reset 改选其他启动方式.",
+                    "The configured launcher is auto, but neither herdr nor tmux is in PATH; install one of them or run onevoke welcome --reset and select another launcher.",
+                )
+            )
+        elif config.get("welcome_complete"):
+            print(
+                t(
+                    "[-] launcher=auto 在启动时按当前环境选择: 处于 herdr 则新建 tab, 否则处于 tmux 则新建 window",
+                    "[-] launcher=auto chooses at start: a herdr tab if inside herdr, otherwise a tmux window if inside tmux",
                 ),
                 file=sys.stderr,
             )
@@ -880,6 +907,13 @@ def install_tmux() -> bool:
     return True
 
 
+def auto_launcher_choice() -> tuple[str, str]:
+    return (
+        "auto",
+        t("按当前环境自动选择 herdr 或 tmux", "choose herdr or tmux from the current environment"),
+    )
+
+
 def tmux_launcher_choices() -> list[tuple[str, str]]:
     return [
         ("tmux", t("tmux 当前 session 新窗口", "new window in the current tmux session")),
@@ -914,12 +948,12 @@ def edit_launcher(config: dict[str, Any]) -> None:
     if shutil.which("tmux"):
         config["launcher"] = ask_choice(
             prompt,
-            [*tmux_launcher_choices(), *herdr_launcher_choices(config), foreground],
+            [auto_launcher_choice(), *tmux_launcher_choices(), *herdr_launcher_choices(config), foreground],
             config["launcher"],
         )
         return
 
-    choices = []
+    choices = [auto_launcher_choice()]
     unavailable = t(" (当前未安装)", " (not currently installed)")
     for value, label in tmux_launcher_choices():
         if config["launcher"] == value:
@@ -1051,8 +1085,8 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
     if os.name == "nt" and config["launcher"] not in ("console", "foreground") and not existing["welcome_complete"]:
         config["launcher"] = "console"
         warning(t(
-            "原生 Windows 不支持 tmux 和 herdr, 当前使用 console.",
-            "Native Windows does not support tmux or herdr; using console.",
+            "原生 Windows 不支持 auto, tmux 和 herdr, 当前使用 console.",
+            "Native Windows does not support auto, tmux, or herdr; using console.",
         ))
     elif config["launcher"].startswith("tmux") and not shutil.which("tmux") and not existing["welcome_complete"]:
         config["launcher"] = "foreground"

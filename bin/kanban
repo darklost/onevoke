@@ -1284,6 +1284,20 @@ def herdr_pane_run(herdr: str, pane_id: str, command: str) -> None:
         ))
 
 
+def resolve_start_launcher(launcher: str) -> str:
+    """auto 只在启动当时解析, 不把结果写回配置."""
+    if launcher != "auto":
+        return launcher
+    if os.environ.get("HERDR_ENV") == "1":
+        return "herdr"
+    if os.environ.get("TMUX"):
+        return "tmux"
+    raise KanbanError(t(
+        "auto 无法解析: 当前既不在 herdr 也不在 tmux. 请改用 --launcher tmux, tmux-session, herdr 或 foreground",
+        "auto cannot be resolved: not currently in herdr or tmux. Use --launcher tmux, tmux-session, herdr, or foreground",
+    ))
+
+
 def agent_command(agent: str, binary: str, model_entry: Dict[str, str], kind: str) -> list[str]:
     """按 Onevoke 配置的模型档位拼 Agent 的 YOLO 启动参数. model 为空时用 CLI 默认模型."""
     model = model_entry["model"]
@@ -1309,11 +1323,12 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     config = effective_config(load_config())
     agent_name = args.agent or config["kanban_agent"]
     launcher = args.launcher or config["launcher"]
-    if os.name == "nt" and launcher in ("tmux", "tmux-session", "herdr"):
+    if os.name == "nt" and launcher in ("auto", "tmux", "tmux-session", "herdr"):
         raise KanbanError(t(
             f"Windows 不支持 {launcher} 启动方式; 请使用 console 或 foreground",
             f"Windows does not support the {launcher} launcher; use console or foreground",
         ))
+    launcher = resolve_start_launcher(launcher)
     agent = shutil.which(agent_name)
     if not agent:
         raise KanbanError(t(f"Agent 不在 PATH: {agent_name}", f"Agent is not in PATH: {agent_name}"))
@@ -1477,8 +1492,8 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         print(t(f"查看: {hint}", f"view: {hint}"))
         return
     print(t(
-        f"已启动: {entry.task_id}\tAgent={agent_name}\t窗口={window}",
-        f"started: {entry.task_id}\tagent={agent_name}\twindow={window}",
+        f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=tmux\t窗口={window}",
+        f"started: {entry.task_id}\tagent={agent_name}\tlauncher=tmux\twindow={window}",
     ))
 
 

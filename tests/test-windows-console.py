@@ -176,6 +176,13 @@ class WindowsConsoleLauncherTest(unittest.TestCase):
         self.config["launcher"] = "herdr"
         self.assert_tmux_launcher_rejected(None)
 
+    def test_windows_rejects_explicit_auto_before_claiming_task(self) -> None:
+        self.assert_tmux_launcher_rejected("auto")
+
+    def test_windows_rejects_configured_auto_before_claiming_task(self) -> None:
+        self.config["launcher"] = "auto"
+        self.assert_tmux_launcher_rejected(None)
+
 
 if __name__ == "__main__":
     unittest.main()

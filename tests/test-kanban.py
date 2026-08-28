@@ -825,7 +825,7 @@ exit 1
         self.env.pop("TMUX")
         self.env.pop("TMUX_PANE")
 
-        result = self.run_command("start", task_id, succeeds=False)
+        result = self.run_command("start", "--launcher", "tmux", task_id, succeeds=False)
 
         self.assertIn("当前不在 tmux session", result.stderr)
         self.assertIn("tmux new -A -s onevoke", result.stderr)
@@ -935,6 +935,98 @@ exit 1
         self.assertIn("tmux new-session 失败", result.stderr)
         self.assertEqual(original, task.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_start_help_lists_auto_launcher(self) -> None:
+        self.assertIn("auto", self.run_command("start", "--help").stdout)
+
+    def test_default_auto_launcher_uses_tmux_inside_tmux(self) -> None:
+        task_id, task = self.make_todo("default-auto-tmux")
+        self.install_fake_launchers()
+
+        result = self.run_command("start", task_id)
+
+        self.assertIn("启动方式=tmux", result.stdout)
+        self.assertNotIn("启动方式=auto", result.stdout)
+        self.assertEqual("new-window", self.tmux_arguments()[0])
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_default_auto_launcher_prefers_herdr_inside_herdr(self) -> None:
+        task_id, task = self.make_todo("default-auto-herdr")
+        self.install_fake_herdr()
+
+        result = self.run_command("start", task_id)
+
+        self.assertIn("启动方式=herdr", result.stdout)
+        self.assertNotIn("启动方式=auto", result.stdout)
+        self.assertIn("tab=w1:t9", result.stdout)
+        self.assertTrue((self.root / "herdr.log.create").exists())
+        self.assertFalse((self.root / "tmux.log").exists())
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_auto_launcher_prefers_herdr_even_inside_tmux(self) -> None:
+        task_id, task = self.make_todo("auto-herdr-first")
+        self.install_fake_herdr()
+
+        result = self.run_command("start", "--launcher", "auto", task_id)
+
+        self.assertIn("启动方式=herdr", result.stdout)
+        self.assertIn("tab=w1:t9", result.stdout)
+        self.assertTrue((self.root / "herdr.log.create").exists())
+        self.assertFalse((self.root / "tmux.log").exists())
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_auto_launcher_uses_tmux_when_not_in_herdr(self) -> None:
+        task_id, task = self.make_todo("auto-tmux")
+        self.install_fake_launchers()
+
+        result = self.run_command("start", "--launcher", "auto", task_id)
+
+        self.assertIn("启动方式=tmux", result.stdout)
+        self.assertNotIn("启动方式=auto", result.stdout)
+        self.assertEqual("new-window", self.tmux_arguments()[0])
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_auto_launcher_without_herdr_or_tmux_does_not_claim(self) -> None:
+        task_id, task = self.make_todo("auto-none")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_launchers()
+        self.env.pop("TMUX")
+        self.env.pop("TMUX_PANE")
+        self.env.pop("HERDR_ENV", None)
+
+        result = self.run_command("start", task_id, succeeds=False)
+
+        self.assertIn("auto 无法解析", result.stderr)
+        self.assertIn("--launcher tmux", result.stderr)
+        self.assertIn("tmux-session", result.stderr)
+        self.assertIn("herdr", result.stderr)
+        self.assertIn("foreground", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertTrue(task.exists())
+        self.assertFalse((self.root / "working" / task.name).exists())
+        self.assertFalse((self.root / "tmux.log").exists())
+
+    def test_existing_tmux_config_is_kept_and_not_rewritten_to_auto(self) -> None:
+        task_id, _ = self.make_todo("keep-tmux-config")
+        self.install_fake_launchers()
+        self.write_onevoke_config("codex", "tmux")
+
+        result = self.run_command("start", task_id)
+
+        self.assertIn("启动方式=tmux", result.stdout)
+        config = json.loads(
+            (self.home / ".config" / "onevoke" / "config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("tmux", config["launcher"])
+
+    def test_posix_default_config_launcher_is_auto(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            import onevoke_config
+        finally:
+            sys.path.pop(0)
+        self.assertEqual("auto", onevoke_config.default_config()["launcher"])
+        self.assertIn("auto", onevoke_config.LAUNCHERS)
 
     def test_herdr_launcher_creates_a_tab_and_runs_the_agent(self) -> None:
         task_id, task = self.make_todo("herdr-start")
