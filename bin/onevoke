@@ -602,6 +602,14 @@ def validate_configured_resources(
                 ),
                 file=sys.stderr,
             )
+        elif not os.environ.get("HERDR_WORKSPACE_ID", "").strip():
+            healthy = False
+            warning(
+                t(
+                    "配置的 launcher 是 herdr, 但缺少 HERDR_WORKSPACE_ID; 无法在当前 workspace 新建 tab.",
+                    "The configured launcher is herdr, but HERDR_WORKSPACE_ID is missing; cannot create a tab in the current workspace.",
+                )
+            )
         else:
             print(
                 t(

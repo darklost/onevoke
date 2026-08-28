@@ -1368,6 +1368,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.install_fake_environment(tmux=True)
         self.fake_command("herdr")
         self.env["HERDR_ENV"] = "1"
+        self.env["HERDR_WORKSPACE_ID"] = "w1"
         config = {
             "schema_version": 1,
             "welcome_complete": True,
@@ -1403,6 +1404,26 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("launcher=herdr 需要当前处于 herdr", result.stderr)
+
+    def test_doctor_rejects_herdr_launcher_without_workspace_id(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command("herdr")
+        self.env["HERDR_ENV"] = "1"
+        config = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "herdr",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("缺少 HERDR_WORKSPACE_ID", result.stderr)
 
     def test_doctor_rejects_herdr_launcher_when_herdr_missing(self) -> None:
         self.install_fake_environment(tmux=True)
