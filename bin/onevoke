@@ -22,6 +22,7 @@ from onevoke_config import (
     ConfigError,
     InstallPaths,
     LocalizedArgumentParser,
+    agent_executable_name,
     apply_language_argument,
     bind_config_language,
     bind_effective_language,
@@ -51,7 +52,7 @@ COMMANDS = (
     REVIEW_ENTRYPOINT,
     MERGE_ENTRYPOINT,
 )
-AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
+AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok", "cursor": "Cursor"}
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
 REVIEW_STAGE_LABELS = {
     "auto": ("按档案自动", "follow audit profile"),
@@ -179,7 +180,7 @@ def windows_native_executable(command: str) -> bool:
 def find_agents() -> dict[str, dict[str, str | bool | None]]:
     agents: dict[str, dict[str, str | bool | None]] = {}
     for name in EXECUTION_AGENTS:
-        command = shutil.which(name)
+        command = shutil.which(agent_executable_name(name))
         native = bool(command and windows_native_executable(command))
         agents[name] = {
             "path": command,
@@ -336,6 +337,8 @@ def rules_integration(agent: str) -> tuple[bool, str]:
         target = Path.home() / ".codex" / "AGENTS.md"
     elif agent == "claude":
         target = Path.home() / ".claude" / "CLAUDE.md"
+    elif agent == "cursor":
+        target = Path.home() / ".cursor" / "AGENTS.md"
     else:
         target = Path.home() / ".grok" / "AGENTS.md"
     if not target.exists() and not target.is_symlink():
@@ -767,6 +770,25 @@ def edit_review_stages(config: dict[str, Any]) -> None:
     )
 
 
+def format_kanban_model_summary(agent: str, entry: dict[str, str]) -> str:
+    if agent == "cursor":
+        large = entry["large_model"] or t("(CLI 默认)", "(CLI default)")
+        small = entry["small_model"] or t("(CLI 默认)", "(CLI default)")
+        return f"{t('大', 'large')} {large} / {t('小', 'small')} {small}"
+    model = entry["model"] or t("(CLI 默认)", "(CLI default)")
+    return (
+        f"{model} ({t('大', 'large')} {entry['large_effort']} / "
+        f"{t('小', 'small')} {entry['small_effort']})"
+    )
+
+
+def format_review_model_summary(entry: dict[str, str]) -> str:
+    model = entry["model"] or t("(CLI 默认)", "(CLI default)")
+    if "effort" not in entry:
+        return model
+    return f"{model} ({entry['effort']})"
+
+
 def ask_text(prompt: str, default: str) -> str:
     shown = default if default else t("(空, 用 CLI 默认)", "(empty; CLI default)")
     print(f"\n{color('1;36', prompt)} [{shown}]: ", end="", file=sys.stderr, flush=True)
@@ -781,45 +803,70 @@ def edit_models(config: dict[str, Any]) -> None:
     """只列出当前配置实际用到的 Agent, 并允许精确修改一个字段."""
     kanban_agent = config["kanban_agent"]
     kanban_entry = config["models"]["kanban"][kanban_agent]
-    fields: list[tuple[str, dict[str, str], str, str]] = [
-        (
-            t(f"kanban {AGENT_LABELS[kanban_agent]} 模型", f"kanban {AGENT_LABELS[kanban_agent]} model"),
-            kanban_entry,
-            "model",
-            t("任务模型?", "Task model?"),
-        ),
-        (
-            t("kanban 大任务推理档位", "kanban large-task reasoning effort"),
-            kanban_entry,
-            "large_effort",
-            t("大任务推理档位?", "Reasoning effort for large tasks?"),
-        ),
-        (
-            t("kanban 小任务推理档位", "kanban small-task reasoning effort"),
-            kanban_entry,
-            "small_effort",
-            t("小任务推理档位?", "Reasoning effort for small tasks?"),
-        ),
-    ]
-    for reviewer in dict.fromkeys(config["reviewers"].values()):
-        entry = config["models"]["review"][reviewer]
-        label = AGENT_LABELS[reviewer]
+    fields: list[tuple[str, dict[str, str], str, str]] = []
+    if kanban_agent == "cursor":
         fields.extend(
             (
                 (
-                    t(f"审核 {label} 模型", f"Review {label} model"),
-                    entry,
-                    "model",
-                    t(f"审核 {label} 用什么模型?", f"Which model should {label} use for reviews?"),
+                    t("kanban Cursor 大任务模型", "kanban Cursor large-task model"),
+                    kanban_entry,
+                    "large_model",
+                    t("大任务完整模型 id?", "Full model id for large tasks?"),
                 ),
+                (
+                    t("kanban Cursor 小任务模型", "kanban Cursor small-task model"),
+                    kanban_entry,
+                    "small_model",
+                    t("小任务完整模型 id?", "Full model id for small tasks?"),
+                ),
+            )
+        )
+    else:
+        fields.extend(
+            (
+                (
+                    t(
+                        f"kanban {AGENT_LABELS[kanban_agent]} 模型",
+                        f"kanban {AGENT_LABELS[kanban_agent]} model",
+                    ),
+                    kanban_entry,
+                    "model",
+                    t("任务模型?", "Task model?"),
+                ),
+                (
+                    t("kanban 大任务推理档位", "kanban large-task reasoning effort"),
+                    kanban_entry,
+                    "large_effort",
+                    t("大任务推理档位?", "Reasoning effort for large tasks?"),
+                ),
+                (
+                    t("kanban 小任务推理档位", "kanban small-task reasoning effort"),
+                    kanban_entry,
+                    "small_effort",
+                    t("小任务推理档位?", "Reasoning effort for small tasks?"),
+                ),
+            )
+        )
+    for reviewer in dict.fromkeys(config["reviewers"].values()):
+        entry = config["models"]["review"][reviewer]
+        label = AGENT_LABELS[reviewer]
+        fields.append(
+            (
+                t(f"审核 {label} 模型", f"Review {label} model"),
+                entry,
+                "model",
+                t(f"审核 {label} 用什么模型?", f"Which model should {label} use for reviews?"),
+            )
+        )
+        if reviewer != "cursor":
+            fields.append(
                 (
                     t(f"审核 {label} 推理档位", f"Review {label} reasoning effort"),
                     entry,
                     "effort",
                     t(f"审核 {label} 的推理档位?", f"Reasoning effort for {label} reviews?"),
-                ),
+                )
             )
-        )
 
     while True:
         print(f"\n{color('1;36', t('模型与推理档位', 'Models and reasoning efforts'))}", file=sys.stderr)
@@ -990,16 +1037,16 @@ def print_welcome_menu(config: dict[str, Any]) -> None:
     print(f"  7. {t('模型与推理档位', 'Models and reasoning efforts')}", file=sys.stderr)
     kanban_agent = config["kanban_agent"]
     kanban_entry = config["models"]["kanban"][kanban_agent]
-    kanban_model = kanban_entry["model"] or t("(CLI 默认)", "(CLI default)")
     print(
-        f"     kanban {kanban_agent}: {kanban_model}"
-        f" ({t('大', 'large')} {kanban_entry['large_effort']} / {t('小', 'small')} {kanban_entry['small_effort']})",
+        f"     kanban {kanban_agent}: {format_kanban_model_summary(kanban_agent, kanban_entry)}",
         file=sys.stderr,
     )
     for reviewer in dict.fromkeys(config["reviewers"].values()):
         entry = config["models"]["review"][reviewer]
-        model = entry["model"] or t("(CLI 默认)", "(CLI default)")
-        print(f"     review {reviewer}: {model} ({entry['effort']})", file=sys.stderr)
+        print(
+            f"     review {reviewer}: {format_review_model_summary(entry)}",
+            file=sys.stderr,
+        )
     memory = t("启用", "enabled") if config["memsearch"]["enabled"] else t("未启用", "disabled")
     print(f"  8. MemSearch: {memory}", file=sys.stderr)
     print(
@@ -1056,8 +1103,8 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
     if not execution_choices and not existing["welcome_complete"]:
         raise OnevokeError(
             t(
-                "没有发现可用的 Agent (--version 须成功). 请先安装 Codex、Claude 或 Grok.",
-                "No usable Agent found (--version must succeed). Install Codex, Claude, or Grok first.",
+                "没有发现可用的 Agent (--version 须成功). 请先安装 Codex、Claude、Grok 或 Cursor.",
+                "No usable Agent found (--version must succeed). Install Codex, Claude, Grok, or Cursor first.",
             )
         )
     review_choices = [
@@ -1066,7 +1113,10 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         if agent_usable(agents[name])
     ]
     if not review_choices and not existing["welcome_complete"]:
-        raise OnevokeError(t("没有发现可用 Reviewer. 请安装 Codex、Claude 或 Grok.", "No usable Reviewer found. Install Codex, Claude, or Grok."))
+        raise OnevokeError(t(
+            "没有发现可用 Reviewer. 请安装 Codex、Claude、Grok 或 Cursor.",
+            "No usable Reviewer found. Install Codex, Claude, Grok, or Cursor.",
+        ))
 
     config = default_config()
     config["models"] = {
@@ -1247,17 +1297,16 @@ def print_config(config: dict[str, Any]) -> None:
     print(f"{t('引导', 'welcome')}: {status}")
     print(f"{t('看板 Agent', 'kanban agent')}: {effective['kanban_agent']}")
     print(f"{t('启动方式', 'launcher')}: {effective['launcher']}")
-    kanban_entry = effective["models"]["kanban"][effective["kanban_agent"]]
-    kanban_model = kanban_entry["model"] or t("(CLI 默认)", "(CLI default)")
+    kanban_agent = effective["kanban_agent"]
+    kanban_entry = effective["models"]["kanban"][kanban_agent]
     print(
-        f"{t('看板模型', 'kanban model')}: {kanban_model}"
-        f" ({t('大', 'large')} {kanban_entry['large_effort']} / {t('小', 'small')} {kanban_entry['small_effort']})"
+        f"{t('看板模型', 'kanban model')}: "
+        f"{format_kanban_model_summary(kanban_agent, kanban_entry)}"
     )
     for role in REVIEW_ROLES:
         reviewer = effective["reviewers"][role]
         review_entry = effective["models"]["review"][reviewer]
-        model = review_entry["model"] or t("(CLI 默认)", "(CLI default)")
-        print(f"{role}: {reviewer} {model} ({review_entry['effort']})")
+        print(f"{role}: {reviewer} {format_review_model_summary(review_entry)}")
     stages = " ".join(f"{role}={effective['review_stages'][role]}" for role in REVIEW_ROLES)
     print(f"{t('审核环节', 'review stages')}: {stages}")
     stored_language = configured_language()

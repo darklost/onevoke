@@ -162,7 +162,7 @@ printf '%s\\n' '@9'
             encoding="utf-8",
         )
         tmux.chmod(0o755)
-        for name in ("codex", "claude", "grok"):
+        for name in ("codex", "claude", "grok", "cursor-agent"):
             agent = fake_bin / name
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             agent.chmod(0o755)
@@ -798,6 +798,65 @@ exit 1
         self.assertEqual("", output.getvalue())
         self.assertEqual(original, task.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_start_with_cursor_launches_force_session(self) -> None:
+        task_id, task = self.make_todo("start-cursor")
+        fake_bin = self.install_fake_launchers()
+
+        result = self.run_command("start", "--agent", "cursor", task_id)
+
+        self.assertIn("Agent=cursor", result.stdout)
+        started = self.root / "working" / task.name
+        self.assertIn("- 负责人: cursor\n", started.read_text(encoding="utf-8"))
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn(str(fake_bin / "cursor-agent"), command)
+        self.assertIn("--model cursor-grok-4.6-high", command)
+        self.assertIn("--force", command)
+        self.assertNotIn("--effort", command)
+        self.assertIn(task_id, command)
+
+    def test_start_uses_cursor_large_model_for_large_tasks(self) -> None:
+        self.install_fake_launchers()
+        slug = "large-cursor"
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-{slug}-task"
+        self.run_command("new", "--large", "chore", slug, "大型任务 cursor")
+        spec = self.root / "backlog" / task_id / "spec.md"
+        self.make_ready(spec)
+        self.run_command("pick", task_id)
+
+        self.run_command("start", "--agent", "cursor", task_id)
+
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn("--model cursor-grok-4.6-xhigh", command)
+        self.assertNotIn("cursor-grok-4.6-high", command)
+        self.assertIn("--force", command)
+
+    def test_start_reports_cursor_agent_when_executable_missing(self) -> None:
+        task_id, task = self.make_todo("missing-cursor")
+        fake_bin = self.install_fake_launchers()
+        (fake_bin / "cursor-agent").unlink()
+        self.env["PATH"] = str(fake_bin)
+
+        result = self.run_command("start", "--agent", "cursor", task_id, succeeds=False)
+
+        self.assertIn("cursor-agent", result.stderr)
+        self.assertTrue(task.exists())
+        self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_start_omits_cursor_model_when_config_model_is_empty(self) -> None:
+        task_id, _ = self.make_todo("empty-cursor-model")
+        self.install_fake_launchers()
+        self.write_onevoke_config(
+            "cursor",
+            "tmux",
+            models={"kanban": {"cursor": {"small_model": ""}}},
+        )
+
+        self.run_command("start", task_id)
+
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertNotIn("--model", command)
+        self.assertIn("--force", command)
 
     def test_start_uses_high_effort_for_large_tasks(self) -> None:
         self.install_fake_launchers()
@@ -4910,7 +4969,7 @@ printf '%s\\n' '@9'
             encoding="utf-8",
         )
         tmux.chmod(0o755)
-        for name in ("codex", "claude", "grok"):
+        for name in ("codex", "claude", "grok", "cursor-agent"):
             agent = fake_bin / name
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             agent.chmod(0o755)

@@ -20,11 +20,13 @@ from typing import Dict, Iterable, Optional
 
 from onevoke_config import (
     ARGPARSE_ZH,
+    EXECUTION_AGENTS,
     LANGUAGES,
     LAUNCHERS,
     ConfigError,
     InstallPaths,
     LocalizedArgumentParser,
+    agent_executable_name,
     apply_language_argument,
     bind_effective_language,
     effective_config,
@@ -73,7 +75,7 @@ TYPE_NAMES = {
 }
 READY_SECTIONS = ("任务目标", "预期成果", "验收条件", "不在本轮范围")
 ARCHIVE_RESULTS = {"completed", "cancelled", "duplicate", "wontfix"}
-AGENT_NAMES = ("codex", "claude", "grok")
+AGENT_NAMES = EXECUTION_AGENTS
 NO_TITLE = t("(无标题)", "(untitled)")
 
 
@@ -1328,6 +1330,10 @@ def resolve_start_launcher(launcher: str) -> str:
 
 def agent_command(agent: str, binary: str, model_entry: Dict[str, str], kind: str) -> list[str]:
     """按 Onevoke 配置的模型档位拼 Agent 的 YOLO 启动参数. model 为空时用 CLI 默认模型."""
+    if agent == "cursor":
+        model = model_entry["large_model" if kind == "large" else "small_model"]
+        model_args = ["--model", model] if model else []
+        return [binary, *model_args, "--force"]
     model = model_entry["model"]
     effort = model_entry["large_effort" if kind == "large" else "small_effort"]
     model_args = ["--model", model] if model else []
@@ -1357,9 +1363,13 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             f"Windows does not support the {launcher} launcher; use console or foreground",
         ))
     launcher = resolve_start_launcher(launcher)
-    agent = shutil.which(agent_name)
+    executable_name = agent_executable_name(agent_name)
+    agent = shutil.which(executable_name)
     if not agent:
-        raise KanbanError(t(f"Agent 不在 PATH: {agent_name}", f"Agent is not in PATH: {agent_name}"))
+        raise KanbanError(t(
+            f"Agent 不在 PATH: {executable_name}",
+            f"Agent is not in PATH: {executable_name}",
+        ))
     if os.name == "nt" and Path(agent).suffix.lower() != ".exe":
         raise KanbanError(t(
             f"Windows Agent 必须是原生 .exe, 不会执行可能重解析参数的入口: {agent}",

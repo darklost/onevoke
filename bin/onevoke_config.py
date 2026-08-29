@@ -55,22 +55,35 @@ SCHEMA_VERSION = 1
 PROJECT_INSTALL_DIRNAME = ".onevoke"
 PROJECT_GIT_EXCLUDE_PATTERN = "/.onevoke/"
 InstallMode = Literal["global", "project"]
-EXECUTION_AGENTS = ("codex", "claude", "grok")
-REVIEW_AGENTS = ("codex", "claude", "grok")
+EXECUTION_AGENTS = ("codex", "claude", "grok", "cursor")
+REVIEW_AGENTS = ("codex", "claude", "grok", "cursor")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 REVIEW_STAGE_MODES = ("auto", "skip", "required")
 LAUNCHERS = ("auto", "tmux", "tmux-session", "herdr", "foreground", "console")
 LANGUAGES = ("cn", "en")
-# model 允许空字符串, 表示用对应 CLI 自己的默认模型.
+# cursor 的 CLI 名为 cursor-agent, 与配置/命令里的 agent 名不同.
+AGENT_EXECUTABLES = {
+    "codex": "codex",
+    "claude": "claude",
+    "grok": "grok",
+    "cursor": "cursor-agent",
+}
+# 模型 id 字段允许空字符串, 表示用对应 CLI 自己的默认模型.
+MODEL_ID_FIELDS = frozenset({"model", "large_model", "small_model"})
 KANBAN_MODEL_DEFAULTS = {
     "codex": {"model": "gpt-5.6-sol", "large_effort": "high", "small_effort": "medium"},
     "claude": {"model": "opus", "large_effort": "high", "small_effort": "medium"},
     "grok": {"model": "", "large_effort": "xhigh", "small_effort": "high"},
+    "cursor": {
+        "large_model": "cursor-grok-4.6-xhigh",
+        "small_model": "cursor-grok-4.6-high",
+    },
 }
 REVIEW_MODEL_DEFAULTS = {
     "codex": {"model": "gpt-5.6-sol", "effort": "high"},
     "claude": {"model": "opus", "effort": "high"},
     "grok": {"model": "", "effort": "high"},
+    "cursor": {"model": "cursor-grok-4.6-xhigh"},
 }
 ARGPARSE_ZH = {
     "usage: ": "用法: ",
@@ -493,6 +506,11 @@ def config_path() -> Path:
     return install_paths().config_path
 
 
+def agent_executable_name(agent: str) -> str:
+    """配置/命令里的 agent 名到 PATH 可执行文件名."""
+    return AGENT_EXECUTABLES.get(agent, agent)
+
+
 def default_models() -> dict[str, Any]:
     return {
         "kanban": {agent: dict(entry) for agent, entry in KANBAN_MODEL_DEFAULTS.items()},
@@ -589,11 +607,12 @@ def _validate_models(raw: object) -> dict[str, Any]:
                     f"models.{section}.{agent} has unknown fields: {', '.join(sorted(unknown))}",
                 ))
             for field, value in entry.items():
-                if not isinstance(value, str) or (field != "model" and not value.strip()):
+                model_id = field in MODEL_ID_FIELDS
+                if not isinstance(value, str) or (not model_id and not value.strip()):
                     raise ConfigError(language_text(
-                        f"models.{section}.{agent}.{field} 必须是{'字符串' if field == 'model' else '非空字符串'}",
+                        f"models.{section}.{agent}.{field} 必须是{'字符串' if model_id else '非空字符串'}",
                         f"models.{section}.{agent}.{field} must be a "
-                        f"{'string' if field == 'model' else 'non-empty string'}",
+                        f"{'string' if model_id else 'non-empty string'}",
                     ))
                 # 值会拼进命令行并经 review-model 按行输出: 换行破坏两行协议,
                 # NUL 使 subprocess 参数直接抛 ValueError.
@@ -774,8 +793,8 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if args.command == "review-model":
         entry = effective_config()["models"]["review"][args.agent]
-        print(entry["model"])
-        print(entry["effort"])
+        print(entry.get("model", ""))
+        print(entry.get("effort", ""))
         return 0
     if args.command == "configured-language":
         language = configured_language()

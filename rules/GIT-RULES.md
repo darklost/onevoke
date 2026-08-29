@@ -32,7 +32,7 @@
 
 ## 审核
 
-- 完整规则见 `REVIEW-RULES.md`; 触发审核前先读取该文件并遵循. reviewer 有 Codex, Claude 与 Grok 三个, 每个角色按该文件「Reviewer 选择」独立确定; 未指定时由命令根下的 `onevoke review` 读取当前作用域配置并分发.
+- 完整规则见 `REVIEW-RULES.md`; 触发审核前先读取该文件并遵循. reviewer 有 Codex, Claude, Grok 与 Cursor 四个, 每个角色按该文件「Reviewer 选择」独立确定; 未指定时由命令根下的 `onevoke review` 读取当前作用域配置并分发.
 
 ## 集成与清理
 

@@ -760,6 +760,7 @@ class OnevokeCommandTest(unittest.TestCase):
         # 空 model 输出空首行; 未覆盖的 agent 仍用默认.
         self.assertEqual("\nhigh", query("grok").stdout.rstrip("\n"))
         self.assertEqual("opus\nhigh", query("claude").stdout.strip("\n"))
+        self.assertEqual("cursor-grok-4.6-xhigh\n\n", query("cursor").stdout)
         config["welcome_complete"] = False
         self.config.write_text(json.dumps(config), encoding="utf-8")
         self.assertEqual("gpt-5.6-sol\nhigh", query("codex").stdout.strip("\n"))
@@ -895,6 +896,8 @@ class OnevokeCommandTest(unittest.TestCase):
             ({"review": {"codex": {"effort": "hi\rgh"}}}, "models.review.codex.effort"),
             ({"review": {"codex": {"model": "a\x00b"}}}, "models.review.codex.model"),
             ({"kanban": {"codex": {"large_effort": "hi\x00gh"}}}, "models.kanban.codex.large_effort"),
+            ({"kanban": {"cursor": {"large_effort": "high"}}}, "models.kanban.cursor 含未知字段"),
+            ({"review": {"cursor": {"effort": "high"}}}, "models.review.cursor 含未知字段"),
             (None, "models 必须是 JSON object"),
             ({"review": None}, "models.review 必须是 JSON object"),
             ({"review": {"other": {}}}, "models.review 含未知 agent"),
@@ -908,6 +911,93 @@ class OnevokeCommandTest(unittest.TestCase):
                 result = self.run_command("config")
                 self.assertEqual(1, result.returncode)
                 self.assertIn(expected, result.stderr)
+
+    def test_config_accepts_empty_cursor_model_ids(self) -> None:
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "welcome_complete": True,
+                    "kanban_agent": "cursor",
+                    "launcher": "tmux",
+                    "reviewers": {role: "cursor" for role in ROLES},
+                    "models": {
+                        "kanban": {
+                            "cursor": {"large_model": "", "small_model": ""},
+                        },
+                        "review": {"cursor": {"model": ""}},
+                    },
+                    "memsearch": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_command("config")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("看板 Agent: cursor", result.stdout)
+        self.assertNotIn("large_effort", result.stdout)
+        self.assertNotIn("small_effort", result.stdout)
+        self.assertIn("(CLI 默认)", result.stdout)
+
+    def test_welcome_and_config_use_cursor_full_model_ids(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command("cursor-agent")
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "cursor",
+            "launcher": "tmux",
+            "reviewers": {role: "cursor" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+        returncode, output = self.run_on_tty(
+            "7\n1\ncursor-grok-4.6-high\n7\n2\ncursor-composer-1.5\n\n",
+            "welcome",
+            "--reset",
+        )
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("kanban Cursor 大任务模型", output)
+        self.assertIn("kanban Cursor 小任务模型", output)
+        self.assertNotIn("大任务推理档位", output)
+        self.assertNotIn("小任务推理档位", output)
+        self.assertNotIn("large_effort", output)
+        self.assertNotIn("small_effort", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {
+                "large_model": "cursor-grok-4.6-high",
+                "small_model": "cursor-composer-1.5",
+            },
+            config["models"]["kanban"]["cursor"],
+        )
+        self.assertEqual(
+            {"model": "cursor-grok-4.6-xhigh"},
+            config["models"]["review"]["cursor"],
+        )
+
+        status = self.run_command("config")
+        self.assertEqual(0, status.returncode, status.stderr)
+        self.assertIn("看板 Agent: cursor", status.stdout)
+        self.assertIn("cursor-grok-4.6-high", status.stdout)
+        self.assertIn("cursor-composer-1.5", status.stdout)
+        self.assertNotIn("large_effort", status.stdout)
+        self.assertNotIn("small_effort", status.stdout)
+
+    def test_doctor_detects_cursor_agent_executable(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command("cursor-agent")
+
+        result = self.run_command("doctor")
+
+        self.assertIn("Cursor: cursor-agent test-version", result.stderr)
+        self.assertNotIn("[-] Cursor: 未安装", result.stderr)
 
     def test_review_dispatches_role_and_agent_to_shared_entrypoint(self) -> None:
         log = self.root / "review.log"

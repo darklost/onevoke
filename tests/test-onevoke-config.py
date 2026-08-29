@@ -267,5 +267,78 @@ class InstallContextTest(unittest.TestCase):
             self.config.project_install_paths(link)
 
 
+class CursorAgentConfigTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.saved_lang = os.environ.get("ONEVOKE_LANG")
+        os.environ["ONEVOKE_LANG"] = "cn"
+        sys.path.insert(0, str(BIN_DIR))
+        import onevoke_config
+
+        self.config = onevoke_config
+
+    def tearDown(self) -> None:
+        sys.path.pop(0)
+        if self.saved_lang is None:
+            os.environ.pop("ONEVOKE_LANG", None)
+        else:
+            os.environ["ONEVOKE_LANG"] = self.saved_lang
+
+    def test_cursor_is_an_execution_and_review_agent(self) -> None:
+        self.assertIn("cursor", self.config.EXECUTION_AGENTS)
+        self.assertIn("cursor", self.config.REVIEW_AGENTS)
+        self.assertEqual("cursor-agent", self.config.agent_executable_name("cursor"))
+        self.assertEqual("codex", self.config.agent_executable_name("codex"))
+
+    def test_cursor_model_defaults_use_full_ids(self) -> None:
+        models = self.config.default_models()
+        self.assertEqual(
+            {
+                "large_model": "cursor-grok-4.6-xhigh",
+                "small_model": "cursor-grok-4.6-high",
+            },
+            models["kanban"]["cursor"],
+        )
+        self.assertEqual({"model": "cursor-grok-4.6-xhigh"}, models["review"]["cursor"])
+        self.assertNotIn("large_effort", models["kanban"]["cursor"])
+        self.assertNotIn("effort", models["review"]["cursor"])
+
+    def _payload(self, models: dict) -> dict:
+        return {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "cursor",
+            "launcher": "tmux",
+            "reviewers": {role: "cursor" for role in self.config.REVIEW_ROLES},
+            "models": models,
+            "memsearch": {"enabled": False},
+        }
+
+    def test_cursor_model_ids_accept_empty_strings(self) -> None:
+        validated = self.config.validate_config(
+            self._payload(
+                {
+                    "kanban": {"cursor": {"large_model": "", "small_model": ""}},
+                    "review": {"cursor": {"model": ""}},
+                }
+            )
+        )
+        self.assertEqual("", validated["models"]["kanban"]["cursor"]["large_model"])
+        self.assertEqual("", validated["models"]["kanban"]["cursor"]["small_model"])
+        self.assertEqual("", validated["models"]["review"]["cursor"]["model"])
+
+    def test_cursor_rejects_unknown_model_fields(self) -> None:
+        with self.assertRaises(self.config.ConfigError) as error:
+            self.config.validate_config(
+                self._payload({"kanban": {"cursor": {"large_effort": "high"}}})
+            )
+        self.assertIn("models.kanban.cursor 含未知字段", str(error.exception))
+
+        with self.assertRaises(self.config.ConfigError) as error:
+            self.config.validate_config(
+                self._payload({"review": {"cursor": {"effort": "xhigh"}}})
+            )
+        self.assertIn("models.review.cursor 含未知字段", str(error.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

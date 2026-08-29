@@ -342,7 +342,7 @@ def usage() -> None:
             "<role> <task-goal|绝对 spec 路径> [review-context]",
             file=sys.stderr,
         )
-        print("Agent: codex, claude, grok", file=sys.stderr)
+        print("Agent: codex, claude, grok, cursor", file=sys.stderr)
         print("角色: PM, QA, CSA, CodeSecurityAnalyst, Hacker", file=sys.stderr)
     else:
         print(
@@ -350,7 +350,7 @@ def usage() -> None:
             "<role> <task-goal|absolute-spec-path> [review-context]",
             file=sys.stderr,
         )
-        print("Agents: codex, claude, grok", file=sys.stderr)
+        print("Agents: codex, claude, grok, cursor", file=sys.stderr)
         print("Roles: PM, QA, CSA, CodeSecurityAnalyst, Hacker", file=sys.stderr)
 
 
@@ -365,8 +365,12 @@ def configured_model(agent: str) -> tuple[str, str] | None:
     try:
         entry = effective_config()["models"]["review"][agent]
         model = entry["model"]
+        if not isinstance(model, str):
+            return None
+        if "effort" not in entry:
+            return model, ""
         effort = entry["effort"]
-        if not isinstance(model, str) or not isinstance(effort, str) or not effort:
+        if not isinstance(effort, str) or not effort:
             return None
         return model, effort
     except Exception:
@@ -407,6 +411,21 @@ def agent_settings(agent: str) -> AgentSettings:
             "home_error_name": "GROK_REVIEW_HOME",
             "output_name": "output.json",
             "inspection": "Use only read_file, grep, and list_dir to inspect code.",
+        },
+        "cursor": {
+            "name": "Cursor",
+            "prefix": "CURSOR",
+            "executable": "cursor-agent",
+            "default_model": "cursor-grok-4.6-xhigh",
+            "review_home": os.environ.get(
+                "CURSOR_CONFIG_DIR", str(Path(home) / ".cursor")
+            ),
+            "home_error_name": "CURSOR_CONFIG_DIR",
+            "output_name": "output.json",
+            "inspection": (
+                "Prefer read-only inspection. Do not modify the target worktree; "
+                "the review gate fails if HEAD moves or the worktree is dirty."
+            ),
         },
     }
     definition = definitions.get(agent)
@@ -1076,6 +1095,25 @@ def reviewer_arguments(
             settings.effort,
         ]
         return arguments, runtime, environment
+    if context.agent == "cursor":
+        environment["CURSOR_CONFIG_DIR"] = str(runtime)
+        environment["CURSOR_DATA_DIR"] = str(runtime)
+        arguments = [
+            context.executable,
+            "--print",
+            "--output-format",
+            "json",
+            "--trust",
+            *model,
+        ]
+        return arguments, runtime, environment
+    if context.agent != "grok":
+        raise GateError(
+            t(
+                f"不支持的 reviewer agent: {context.agent}",
+                f"unsupported reviewer agent: {context.agent}",
+            )
+        )
     environment["GROK_HOME"] = str(settings.review_home.resolve())
     arguments = [
         context.executable,
@@ -1168,7 +1206,7 @@ def parse_review_output(context: ReviewContext, output_file: Path, stdout_file: 
         text = result.get("text") if isinstance(result, dict) else None
         valid = isinstance(result, dict) and result.get("stopReason") == "end_turn" and isinstance(text, str) and bool(text)
         message = t("Grok 审核未完成, 缺少 review 文本", "Grok review did not complete with review text")
-    else:
+    elif context.agent in ("claude", "cursor"):
         text = result.get("result") if isinstance(result, dict) else None
         valid = (
             isinstance(result, dict)
@@ -1178,7 +1216,19 @@ def parse_review_output(context: ReviewContext, output_file: Path, stdout_file: 
             and isinstance(text, str)
             and bool(text)
         )
-        message = t("Claude 审核未完成, 缺少 review 文本", "Claude review did not complete with review text")
+        message = t(
+            f"{context.settings.name} 审核未完成, 缺少 review 文本",
+            f"{context.settings.name} review did not complete with review text",
+        )
+    else:
+        print_file(output_file, sys.stdout)
+        raise GateError(
+            t(
+                f"不支持的 reviewer agent: {context.agent}",
+                f"unsupported reviewer agent: {context.agent}",
+            ),
+            1,
+        )
     if not valid:
         print_file(output_file, sys.stdout)
         raise GateError(message, 1)

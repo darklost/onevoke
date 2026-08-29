@@ -6,7 +6,7 @@
 
 ## 1. 安装
 
-需要 Python 3, Git, 以及 Codex, Claude 或 Grok 中至少一个. POSIX 系统还需要 POSIX shell; 原生 Windows 使用 PowerShell.
+需要 Python 3, Git, 以及 Codex, Claude, Grok 或 Cursor 中至少一个. POSIX 系统还需要 POSIX shell; 原生 Windows 使用 PowerShell.
 
 Onevoke 有两种安装作用域, 共用同一套规则和程序, 不维护两套模板, 安装时也不改写 Markdown 正文. 当前读取的 `ONEVOKE-AGENTS.md` 入口位置决定作用域; 两种安装同时存在时, 项目入口和项目绝对命令优先.
 
@@ -27,7 +27,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 Windows 安装器把命令装到 `~/.local/bin`, 规则装到 `~/.agents`, 但不会修改用户 `PATH`. 请把 `~/.local/bin` (通常是 `%USERPROFILE%\.local\bin`) 加入 `PATH` 并重新打开终端; `onevoke`, `kanban`, 审核和记忆合并分别提供对应的 `.cmd` 交互入口. 安装器和这些入口都会实际验证 Python 3: `py -3` 存在但不可用时继续尝试 `python.exe`. Windows 批处理无法为任意参数提供无损 argv 边界: 自动化若要传 `&|<>^%!`, 引号或结尾反斜杠等数据, 必须用进程 API 的 argv 数组直接调用当前 Python 和安装目录里的 Python 入口, 例如 Python 调用方使用 `subprocess.run([sys.executable, str(Path.home() / ".local/bin/onevoke"), ...])`; 不得再经过 `.cmd` 或 PowerShell/cmd 命令字符串.
 
 安装过程会显示当前配置菜单, 可按需修改默认 Agent、各角色 Reviewer、启动方式、模型与推理档位、MemSearch 或审核环节; 直接回车保存当前值, 输入 `q` 退出且不保存.
-审核在 POSIX 通过 `onevoke-review.sh`, Windows 人工显式调用可通过 `onevoke-review.cmd`; `onevoke review` 在 Windows 内部直接进入同目录的 `onevoke_review.py`, 避免批处理重解析任务文本. 这些路径共享唯一门禁实现; 新增 Reviewer 时扩展该实现, 不新增按 Agent 命名的脚本. 原生 Windows 上 Codex, Claude 与 Grok CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` Agent 不会被 welcome、doctor、看板启动或审核执行.
+审核在 POSIX 通过 `onevoke-review.sh`, Windows 人工显式调用可通过 `onevoke-review.cmd`; `onevoke review` 在 Windows 内部直接进入同目录的 `onevoke_review.py`, 避免批处理重解析任务文本. 这些路径共享唯一门禁实现; 新增 Reviewer 时扩展该实现, 不新增按 Agent 命名的脚本. 原生 Windows 上 Codex, Claude, Grok 与 Cursor CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` Agent 不会被 welcome、doctor、看板启动或审核执行.
 
 如果 `~/.agents/AGENTS.md` 不存在, 安装器会将其链接到 `ONEVOKE-AGENTS.md`; 已有文件不会修改.
 
@@ -36,6 +36,7 @@ Windows 安装器把命令装到 `~/.local/bin`, 规则装到 `~/.agents`, 但�
 - Claude: 在 `~/.claude/CLAUDE.md` 加 `@~/.agents/ONEVOKE-AGENTS.md`.
 - Codex: 将 `~/.codex/AGENTS.md` 软链接到该入口, 或把入口内容合入现有文件.
 - Grok: 将 `~/.grok/AGENTS.md` 软链接到该入口, 或把入口内容合入现有文件.
+- Cursor: 将 `~/.cursor/AGENTS.md` 软链接到该入口, 或把入口内容合入现有文件.
 
 ### 1.2 项目本地安装
 
@@ -140,7 +141,7 @@ kanban rules
 
 ## 3. 审核
 
-任务命中审核白名单后, 由平台审核入口按 PM -> 安全角色 -> QA 三阶段串行审核: POSIX 使用 `onevoke-review.sh`; Windows 的人工包装入口是 `onevoke-review.cmd`, `onevoke review` 的程序化分发则直接进入 `onevoke_review.py`. 两者使用同一门禁实现. Codex, Claude 与 Grok 的只读 sandbox, 权限和工具隔离参数在两个平台保持不变. 各角色是否运行由 `review_stages` 与项目规则决定, 实际运行的 QA 固定在最后. 每次修复只重跑当前阶段. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
+任务命中审核白名单后, 由平台审核入口按 PM -> 安全角色 -> QA 三阶段串行审核: POSIX 使用 `onevoke-review.sh`; Windows 的人工包装入口是 `onevoke-review.cmd`, `onevoke review` 的程序化分发则直接进入 `onevoke_review.py`. 两者使用同一门禁实现. Codex, Claude 与 Grok 的只读 sandbox, 权限和工具隔离参数在两个平台保持不变; Cursor 用 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR` 隔离会话, 不做 `--sandbox` 事前阻断. 各角色是否运行由 `review_stages` 与项目规则决定, 实际运行的 QA 固定在最后. 每次修复只重跑当前阶段. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
 
 默认哪些环节运行可在配置文件的 `review_stages` 配置 (`auto` / `skip` / `required`), 项目规则或当前任务指令可覆盖. 全局安装的配置文件是 `~/.config/onevoke/config.json`, 项目安装是 `<主 worktree>/.onevoke/config.json`. 用命令根下的 `onevoke config` 查看当前值.
 

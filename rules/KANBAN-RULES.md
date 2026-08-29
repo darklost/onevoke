@@ -29,7 +29,7 @@ kanban show <task-id>
 kanban new [--large] <feature|bug|chore|research> <slug> <title...>
 kanban move <task-id> <todo|working|done|archived|trash>
 kanban pick [task-id]
-kanban start [--agent codex|claude|grok] [--launcher auto|tmux|tmux-session|herdr|foreground|console] [task-id]
+kanban start [--agent codex|claude|grok|cursor] [--launcher auto|tmux|tmux-session|herdr|foreground|console] [task-id]
 kanban check
 kanban web [--host HOST] [--port PORT] [--refresh SECONDS] [--assets DIR] [--open]
 kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
@@ -175,7 +175,7 @@ backlog -> todo -> working -> done -> archived
 
 ```sh
 # 委派给新执行 Agent: start 原子领取并启动
-kanban start [--agent codex|claude|grok] [--launcher auto|tmux|tmux-session|herdr|foreground|console] <task-id>
+kanban start [--agent codex|claude|grok|cursor] [--launcher auto|tmux|tmux-session|herdr|foreground|console] <task-id>
 
 # 用户明确要求当前 Agent 执行既有任务卡: 只迁移, 随后手工填写负责人和开始时间
 kanban move <task-id> working
