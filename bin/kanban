@@ -1333,7 +1333,7 @@ def agent_command(agent: str, binary: str, model_entry: Dict[str, str], kind: st
     if agent == "cursor":
         model = model_entry["large_model" if kind == "large" else "small_model"]
         model_args = ["--model", model] if model else []
-        return [binary, *model_args, "--force"]
+        return [binary, *model_args, "--trust", "--force"]
     model = model_entry["model"]
     effort = model_entry["large_effort" if kind == "large" else "small_effort"]
     model_args = ["--model", model] if model else []

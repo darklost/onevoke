@@ -811,6 +811,7 @@ exit 1
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn(str(fake_bin / "cursor-agent"), command)
         self.assertIn("--model cursor-grok-4.6-high", command)
+        self.assertIn("--trust", command)
         self.assertIn("--force", command)
         self.assertNotIn("--effort", command)
         self.assertIn(task_id, command)
@@ -829,6 +830,7 @@ exit 1
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn("--model cursor-grok-4.6-xhigh", command)
         self.assertNotIn("cursor-grok-4.6-high", command)
+        self.assertIn("--trust", command)
         self.assertIn("--force", command)
 
     def test_start_reports_cursor_agent_when_executable_missing(self) -> None:
@@ -856,6 +858,7 @@ exit 1
 
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertNotIn("--model", command)
+        self.assertIn("--trust", command)
         self.assertIn("--force", command)
 
     def test_start_uses_high_effort_for_large_tasks(self) -> None:
