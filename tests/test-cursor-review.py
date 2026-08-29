@@ -233,6 +233,8 @@ class CursorReviewGateTest(unittest.TestCase):
         self.assertIn("--output-format", argv)
         self.assertEqual("json", argv[argv.index("--output-format") + 1])
         self.assertIn("--trust", argv)
+        self.assertIn("--add-dir", argv)
+        self.assertEqual(str(self.repo_real), argv[argv.index("--add-dir") + 1])
         self.assertIn("--model", argv)
         self.assertEqual("cursor-grok-4.6-xhigh", argv[argv.index("--model") + 1])
         self.assertNotIn("--sandbox", argv)
@@ -264,14 +266,24 @@ class CursorReviewGateTest(unittest.TestCase):
         self.assertIn(f"{self.base}..{self.head}", prompt)
         self.assertIn(str(self.repo_real), prompt)
 
-    def test_spec_file_is_passed_as_authoritative_context(self) -> None:
+    def test_spec_file_is_snapshotted_into_runtime(self) -> None:
         spec = self.root / "spec.md"
         spec.write_text("# 任务契约\n", encoding="utf-8")
 
         result = self.review(str(self.repo), self.base, self.head, "PM", str(spec))
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn(f"Authoritative spec file: {spec}", self.prompt_log.read_text())
+        prompt = self.prompt_log.read_text(encoding="utf-8")
+        self.assertIn("Authoritative spec file:", prompt)
+        self.assertNotIn(str(spec), prompt)
+        self.assertIn("task-spec.md", prompt)
+
+    def test_missing_cursor_home_does_not_block_review(self) -> None:
+        missing = self.root / "absent-cursor-home"
+        result = self.default_review(CURSOR_CONFIG_DIR=str(missing))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(missing.exists())
 
 
 if __name__ == "__main__":

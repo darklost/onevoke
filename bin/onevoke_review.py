@@ -598,15 +598,22 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
 
     temp_root = review_temp_root()
     home = settings.review_home
-    if not home.is_dir() or not os.access(home, os.R_OK | os.W_OK):
-        raise GateError(
-            t(
-                f"{settings.name} 审核目录不可读写: {home}",
-                f"{settings.name} review home is not readable and writable: {home}",
+    # Cursor 把配置/会话隔离到 runtime, 不要求用户预先创建 ~/.cursor;
+    # API key 登录路径可以没有该目录.
+    if agent == "cursor" and not home.exists():
+        state_root = None
+    else:
+        if not home.is_dir() or not os.access(home, os.R_OK | os.W_OK):
+            raise GateError(
+                t(
+                    f"{settings.name} 审核目录不可读写: {home}",
+                    f"{settings.name} review home is not readable and writable: {home}",
+                )
             )
-        )
-    state_root = home.resolve()
-    if paths_overlap(root, temp_root) or paths_overlap(root, state_root):
+        state_root = home.resolve()
+    if paths_overlap(root, temp_root) or (
+        state_root is not None and paths_overlap(root, state_root)
+    ):
         raise GateError(
             t(
                 f"worktree 与 {settings.name} 可写目录重叠: {root}",
@@ -1104,6 +1111,8 @@ def reviewer_arguments(
             "--output-format",
             "json",
             "--trust",
+            "--add-dir",
+            str(context.root),
             *model,
         ]
         return arguments, runtime, environment
@@ -1249,7 +1258,7 @@ def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
     failure: GateError | None = None
     try:
         task_context = context.task_context
-        if context.agent == "claude" and context.task_spec is not None:
+        if context.agent in ("claude", "cursor") and context.task_spec is not None:
             snapshot = runtime / "task-spec.md"
             try:
                 shutil.copyfile(context.task_spec, snapshot)
@@ -1258,8 +1267,8 @@ def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
             except OSError as error:
                 raise GateError(
                     t(
-                        f"无法为 Claude 快照 spec 文件: {context.task_spec}",
-                        f"could not snapshot spec file for Claude: {context.task_spec}",
+                        f"无法为 {context.settings.name} 快照 spec 文件: {context.task_spec}",
+                        f"could not snapshot spec file for {context.settings.name}: {context.task_spec}",
                     )
                 ) from error
             task_context = f"Authoritative spec file: {snapshot}. Read it completely before reviewing."
