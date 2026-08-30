@@ -548,9 +548,17 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
 
     cwd_text, base, commit, role_input, task_input = arguments[:5]
     review_context = arguments[5] if len(arguments) >= 6 and arguments[5] else "None provided."
-    # An empty seventh argument means a full review; the caller can pass "" for
-    # review-context and still name a reviewed commit.
+    # An empty seventh argument means a full review. Incremental mode needs the
+    # caller's prior-finding ledger in review-context: without it the reviewer is
+    # told not to re-audit unchanged code and has nothing to verify.
     reviewed = arguments[6] if len(arguments) == 7 and arguments[6] else None
+    if reviewed is not None and review_context == "None provided.":
+        raise GateError(
+            t(
+                "增量复审必须在 review-context 中提供上轮 finding 清单",
+                "incremental re-review requires the prior-finding ledger in review-context",
+            )
+        )
     roles = {
         "pm": "PM",
         "qa": "QA",
