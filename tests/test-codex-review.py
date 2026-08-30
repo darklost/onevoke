@@ -581,11 +581,14 @@ class CodexReviewGateTest(unittest.TestCase):
     def test_incremental_re_review_requires_the_prior_finding_ledger(self) -> None:
         fixed = self.commit("c.txt", "fix\n", "修复")
 
-        result = self.review(str(self.repo), self.base, fixed, "PM", "确认改动正确", "", self.head)
-
-        self.assertEqual(2, result.returncode, result.stderr)
-        self.assertIn("requires the prior-finding ledger", result.stderr)
-        self.assertFalse(self.argv_log.exists(), "gate must not launch the reviewer")
+        for context in ("", "   ", "\n\t"):
+            with self.subTest(context=repr(context)):
+                result = self.review(
+                    str(self.repo), self.base, fixed, "PM", "确认改动正确", context, self.head
+                )
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("requires the prior-finding ledger", result.stderr)
+                self.assertFalse(self.argv_log.exists(), "gate must not launch the reviewer")
 
     def test_too_many_arguments_report_usage(self) -> None:
         result = self.review(

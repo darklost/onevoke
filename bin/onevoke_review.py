@@ -547,7 +547,9 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
         raise GateError("", 2)
 
     cwd_text, base, commit, role_input, task_input = arguments[:5]
-    review_context = arguments[5] if len(arguments) >= 6 and arguments[5] else "None provided."
+    raw_review_context = arguments[5] if len(arguments) >= 6 else ""
+    # Whitespace-only context is no context: it must not satisfy the ledger check below.
+    review_context = raw_review_context if raw_review_context.strip() else "None provided."
     # An empty seventh argument means a full review. Incremental mode needs the
     # caller's prior-finding ledger in review-context: without it the reviewer is
     # told not to re-audit unchanged code and has nothing to verify.
