@@ -310,5 +310,21 @@ class GrokReviewGateTest(unittest.TestCase):
         self.assertIn(f"Authoritative spec file: {spec}", self.prompt_log.read_text())
 
 
+    def test_incremental_re_review_switches_prompt_to_the_fix_range(self) -> None:
+        fixed = self.commit("c.txt", "fix\n", "修复")
+
+        result = self.review(
+            str(self.repo), self.base, fixed, "PM", "确认改动正确",
+            "Prior findings: PM-001 closed by c.txt", self.head,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        prompt = self.prompt_log.read_text(encoding="utf-8")
+        self.assertIn("incremental re-review", prompt)
+        self.assertIn(f"fix range {self.head}..{fixed}", prompt)
+        self.assertIn("Prior findings: PM-001 closed by c.txt", prompt)
+        self.assertNotIn("Review the complete code state", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

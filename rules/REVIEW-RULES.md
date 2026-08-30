@@ -48,20 +48,27 @@
 
 ```text
 [1] PM          核对实现是否完整达到 task context; 按环节策略或审核档案免跑时标 N/A 并直接通过
-     |  必修 finding --> 修复并提交 (同一 base, 新 HEAD) --> 回 [1]
+     |  必修 finding --> 修复并提交 (同一 base, 新 HEAD) --> 增量复审 [1]
      v  通过
 [2] CSA/Hacker  按环节策略与触发条件决定; required 可越过触发条件; 两者均触发可并行; 均未运行标 N/A 并直接通过
-     |  合格 finding --> 用户决策 --> 1 修复并提交 --> 回 [2]
+     |  合格 finding --> 用户决策 --> 1 修复并提交 --> 增量复审 [2]
      |                           --> 2 确认通过 (交付说明记录接受的风险与理由)
      |                           --> 3 停止集成 (保留分支与 worktree)
      |                           --> 看板任务 15 分钟无决策: 超时忽略 --> 继续 [3]
      v  阶段结束
 [3] QA          核对功能正确性, 回归, 测试与代码质量; 按环节策略跳过则标 N/A
-     |  必修 finding --> 只修 QA 提的问题并提交 --> 回 [3]
-     |                   该修复实质改动安全相关代码 --> 先回 [2], 再回 [3]
+     |  必修 finding --> 只修 QA 提的问题并提交 --> 增量复审 [3]
+     |                   该修复实质改动安全相关代码 --> 先增量复审 [2], 再增量复审 [3]
      v  通过
    审核完成 --> 向用户展示全部未处理项 --> 进集成流程
 ```
+
+增量复审: 同一角色在同一 base 下的第二轮及之后一律是增量复审, 不再全量重审.
+
+- 调用时把该角色上一轮审过的 commit 作为 `reviewed-commit` 传给审核入口; 它必须在 base 之后, 新 HEAD 之前. 入口据此只把 `reviewed-commit..commit` 作为新材料, 并要求 reviewer 只做两件事: (1) 逐条核实上轮 finding 是否闭环; (2) 只对修复范围引入, 加剧或掩盖的问题, 或修复本身破坏了所触及需求的情况报新 gate finding. 上轮以来未变的代码视为该角色已接受, 不重新审计, 也不借此扩大审核面.
+- review context 必须列出上轮每条 finding 及主代理的处理结论: 成立项写修复 commit 与验证结果, 不成立项写核实依据, 无法核实项写用户决策; reviewer 只核对这些事实, 主代理不得省略或改写上轮清单.
+- 首轮不传 `reviewed-commit`. 该角色 PASS 后不再重跑 (见「结论沿用」). base 变更, 中途换 reviewer 或 task context 变更使增量链失效, 该角色从全量首轮重启.
+- 主代理的核实义务不因增量复审减少: 增量复审的每条结论同样逐条核实.
 
 - 分级: 全部角色的输出按下表六档标注, 缺级视为无效结论, 由主代理补判.
 
@@ -80,7 +87,7 @@
 - 第二阶段只把实际运行的 `CSA` 或 `Hacker` 返回且经主代理核实成立的 `blocking`, `high`, `medium` finding 交用户决策. 每项列出问题, 影响, 修复方法及至少三个选项: `1. 修复并重审`, `2. 确认通过并接受风险`, `3. 停止集成`. 其余档位和纯 defense-in-depth advisory 直接进未处理项清单, 不触发决策.
 - 仅看板任务适用安全 finding 超时. 每项从完整信息和选项送达用户时独立计时; 同批共用发送时间, 部分回答不停止其余项. 15 分钟无明确决策即标记"超时忽略", 记录角色, 档位, 问题, 影响, 发送时间, 超时时间和理由, 再继续. "超时忽略"不等于 `PASS`, 用户确认或接受风险; 卡片完成前收到决策则按最新指令处理.
 - 非看板任务及 `PM`, `QA` finding, 无法核实项, 契约或负责人变更, 以及用户明确要求的验收, 集成确认不得超时跳过.
-- 调用方式: 未明确 reviewer 时用命令根下的 `onevoke review <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, 由 Onevoke 读当前作用域配置进入单一门禁; 已明确 reviewer 时, POSIX 用 `<命令根>/onevoke-review.sh <reviewer> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context]`, Windows 人工调用普通参数可在 PowerShell 用 `& "$env:USERPROFILE\.local\bin\onevoke-review.cmd" ...`. 项目安装把该全局命令根换成当前作用域命令根. Windows 批处理和 Windows PowerShell 5 的原生命令行都不能保证任意 argv 无损; 含 `&|<>^%!`, 引号或边界反斜杠的数据不得由程序调用 `.cmd` 或拼进 shell 命令字符串. 自动化调用方必须用进程 API 的 argv 数组直接启动当前 Python, 并把命令根下的 `onevoke` (全局安装即 `Path.home() / ".local/bin/onevoke"`), `review` 及其参数作为独立数组成员; `onevoke` 再直接进入同目录 Python 门禁. 项目安装必须使用这些绝对入口, 禁止改用 PATH 中的全局同名命令. 禁外部调用者绕过 Onevoke 入口直调 Python 实现或 reviewer CLI. `CWD` 必须是目标 Git worktree 绝对路径; 两个 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件.
+- 调用方式: 未明确 reviewer 时用命令根下的 `onevoke review <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context] [reviewed-commit]`, 由 Onevoke 读当前作用域配置进入单一门禁; 已明确 reviewer 时, POSIX 用 `<命令根>/onevoke-review.sh <reviewer> <CWD> <base-commit> <commit> <role> <task-goal|absolute-spec-path> [review-context] [reviewed-commit]`, Windows 人工调用普通参数可在 PowerShell 用 `& "$env:USERPROFILE\.local\bin\onevoke-review.cmd" ...`. 项目安装把该全局命令根换成当前作用域命令根. Windows 批处理和 Windows PowerShell 5 的原生命令行都不能保证任意 argv 无损; 含 `&|<>^%!`, 引号或边界反斜杠的数据不得由程序调用 `.cmd` 或拼进 shell 命令字符串. 自动化调用方必须用进程 API 的 argv 数组直接启动当前 Python, 并把命令根下的 `onevoke` (全局安装即 `Path.home() / ".local/bin/onevoke"`), `review` 及其参数作为独立数组成员; `onevoke` 再直接进入同目录 Python 门禁. 项目安装必须使用这些绝对入口, 禁止改用 PATH 中的全局同名命令. 禁外部调用者绕过 Onevoke 入口直调 Python 实现或 reviewer CLI. `CWD` 必须是目标 Git worktree 绝对路径; 全部 commit 参数必须是完整 SHA; base 必须是 commit 祖先; `HEAD` 必须等于 commit; worktree 无未提交或未跟踪文件. `reviewed-commit` 只在增量复审时传, 必须是 base 的后代且是 commit 的祖先, 不得等于二者; 没有 review context 时用空串占位.
 - 一次完整审核中所有角色必须使用相同 `CWD`, base 与 task context, 同时触发的 `CSA` 与 `Hacker` 必须基于同一 commit. 各阶段结论在同一 base 下沿用: 通过后的 `PM` 结论对后续所有轮次有效, 通过后的安全角色结论对后续 `QA` 修复轮次有效 (安全相关改动的例外除外), 因此靠前阶段的 commit 允许早于 `QA`. 非集成原因的 base 变更 (用户要求换 base, 分支重建, 或审核期被迫 rebase) 使全部结论失效, 从第一阶段重启; 集成流程内因 `develop` 前进而做的 rebase 不属此列, 按 `GIT-RULES.md`「集成与清理」的一次性门沿用已通过结论. task context 是权威需求契约: 短任务传单个字符串, 长任务传可读的绝对 spec 路径.
 - 每个实际运行角色的 stdout 单独存为报告. 报告目录必须在目标 worktree 外, 用仅当前用户可访问的临时目录 (POSIX `0700`, Windows 受保护的当前用户独占 DACL), 禁混入日志, spec 或其他文件; 本轮审核通过, 用户完成第二阶段决策或本轮终止后清理该目录, 需保留诊断先向用户说明. 审核入口按「Reviewer 选择」表的隔离参数跑 reviewer, 结束时校验 worktree 未被改动; 禁改其 sandbox, 权限或工具参数绕过门禁.
 

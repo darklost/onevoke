@@ -1260,11 +1260,11 @@ def command_welcome(reset: bool) -> int:
 
 
 def command_review(arguments: list[str]) -> NoReturn:
-    if len(arguments) < 5 or len(arguments) > 6:
+    if len(arguments) < 5 or len(arguments) > 7:
         raise OnevokeError(
             t(
-                "用法: onevoke review <worktree> <base> <commit> <role> <task> [context]",
-                "usage: onevoke review <worktree> <base> <commit> <role> <task> [context]",
+                "用法: onevoke review <worktree> <base> <commit> <role> <task> [context] [reviewed-commit]",
+                "usage: onevoke review <worktree> <base> <commit> <role> <task> [context] [reviewed-commit]",
             )
         )
     role = arguments[3]

@@ -269,6 +269,7 @@ class ReviewContext:
     task_context: str
     task_spec: Path | None
     review_context: str
+    reviewed: str | None
     executable: str
     temp_root: Path
 
@@ -339,19 +340,21 @@ def usage() -> None:
     if LANGUAGE == "cn":
         print(
             f"用法: {ENTRYPOINT_NAME} <agent> <CWD> <base-commit> <commit> "
-            "<role> <task-goal|绝对 spec 路径> [review-context]",
+            "<role> <task-goal|绝对 spec 路径> [review-context] [reviewed-commit]",
             file=sys.stderr,
         )
         print("Agent: codex, claude, grok, cursor", file=sys.stderr)
         print("角色: PM, QA, CSA, CodeSecurityAnalyst, Hacker", file=sys.stderr)
+        print("reviewed-commit: 同一角色上一轮审过的 commit; 传入即为增量复审", file=sys.stderr)
     else:
         print(
             f"Usage: {ENTRYPOINT_NAME} <agent> <CWD> <base-commit> <commit> "
-            "<role> <task-goal|absolute-spec-path> [review-context]",
+            "<role> <task-goal|absolute-spec-path> [review-context] [reviewed-commit]",
             file=sys.stderr,
         )
         print("Agents: codex, claude, grok, cursor", file=sys.stderr)
         print("Roles: PM, QA, CSA, CodeSecurityAnalyst, Hacker", file=sys.stderr)
+        print("reviewed-commit: the commit this role reviewed last round; passing it makes an incremental re-review", file=sys.stderr)
 
 
 def positive_integer(value: str, variable: str) -> int:
@@ -539,12 +542,15 @@ def looks_like_absolute_path(value: str) -> bool:
 
 def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
     settings = agent_settings(agent)
-    if len(arguments) < 5 or len(arguments) > 6:
+    if len(arguments) < 5 or len(arguments) > 7:
         usage()
         raise GateError("", 2)
 
     cwd_text, base, commit, role_input, task_input = arguments[:5]
-    review_context = arguments[5] if len(arguments) == 6 and arguments[5] else "None provided."
+    review_context = arguments[5] if len(arguments) >= 6 and arguments[5] else "None provided."
+    # An empty seventh argument means a full review; the caller can pass "" for
+    # review-context and still name a reviewed commit.
+    reviewed = arguments[6] if len(arguments) == 7 and arguments[6] else None
     roles = {
         "pm": "PM",
         "qa": "QA",
@@ -625,7 +631,10 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
     if oid_result.returncode != 0:
         raise GateError(oid_result.stderr.strip() or "Git hash-object failed")
     oid_length = len(oid_result.stdout.strip())
-    for name, oid in (("base-commit", base), ("commit", commit)):
+    named_commits = [("base-commit", base), ("commit", commit)]
+    if reviewed is not None:
+        named_commits.append(("reviewed-commit", reviewed))
+    for name, oid in named_commits:
         if not re.fullmatch(rf"[0-9a-f]{{{oid_length}}}", oid):
             raise GateError(t(f"{name} 必须是完整 commit SHA", f"{name} must be a full commit SHA"))
         result = git_command(["cat-file", "-t", oid], cwd=root)
@@ -637,6 +646,30 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
     ancestor = git_command(["merge-base", "--is-ancestor", base, commit], cwd=root)
     if ancestor.returncode != 0:
         raise GateError(t("base-commit 不是 commit 的祖先", "base-commit is not an ancestor of commit"))
+    if reviewed is not None:
+        # The incremental range must sit strictly inside the frozen review base
+        # and the new HEAD; otherwise "unchanged since last round" is meaningless.
+        if reviewed in (commit, base):
+            raise GateError(
+                t(
+                    "reviewed-commit 不能等于 base-commit 或 commit",
+                    "reviewed-commit must differ from base-commit and commit",
+                )
+            )
+        if git_command(["merge-base", "--is-ancestor", base, reviewed], cwd=root).returncode != 0:
+            raise GateError(
+                t(
+                    "base-commit 不是 reviewed-commit 的祖先",
+                    "base-commit is not an ancestor of reviewed-commit",
+                )
+            )
+        if git_command(["merge-base", "--is-ancestor", reviewed, commit], cwd=root).returncode != 0:
+            raise GateError(
+                t(
+                    "reviewed-commit 不是 commit 的祖先",
+                    "reviewed-commit is not an ancestor of commit",
+                )
+            )
     head = git_command(["rev-parse", "HEAD"], cwd=root)
     if head.returncode != 0 or head.stdout.strip() != commit:
         raise GateError(t("worktree HEAD 与 commit 不一致", "worktree HEAD does not match commit"))
@@ -680,6 +713,7 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
         task_context=task_context,
         task_spec=task_spec,
         review_context=review_context,
+        reviewed=reviewed,
         executable=executable,
         temp_root=temp_root,
     )
@@ -782,13 +816,40 @@ def write_evidence(context: ReviewContext, path: Path) -> None:
         ("\n=== PATCH ===\n", ["diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--patch", f"{context.base}..{context.commit}"]),
         ("\n=== COMMIT TREE ===\n", ["ls-tree", "-r", context.commit]),
     )
+    if context.reviewed is not None:
+        fix_range = f"{context.reviewed}..{context.commit}"
+        commands += (
+            ("\n=== FIX RANGE COMMITS ===\n", ["log", "--no-ext-diff", "--no-textconv", "--format=fuller", "--no-patch", fix_range]),
+            ("\n=== FIX RANGE FILE LEDGER ===\n", ["diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--name-status", fix_range]),
+            ("\n=== FIX RANGE PATCH ===\n", ["diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--patch", fix_range]),
+        )
     pieces = [f"Review range: {context.base}..{context.commit}\n"]
+    if context.reviewed is not None:
+        pieces.append(f"Incremental re-review; fix range: {context.reviewed}..{context.commit}\n")
     for heading, arguments in commands:
         result = git_command(arguments, cwd=context.root)
         if result.returncode != 0:
             raise GateError(result.stderr.strip() or "failed to create review evidence")
         pieces.extend((heading, result.stdout))
     path.write_text("".join(pieces), encoding="utf-8")
+
+
+def incremental_scope_rules(context: ReviewContext) -> str:
+    return textwrap.dedent(f"""\
+        This is an incremental re-review by the same role on the same review base. Your role already
+        reviewed commit {context.reviewed}; the fix range {context.reviewed}..{context.commit} is the
+        only new material, and the caller's review context lists every finding from your previous round
+        with its disposition. Do two things and nothing more:
+        1. For every listed prior finding, verify at {context.commit} whether it is closed, still open, or
+           only partially fixed, and report that per finding ID with exact evidence. A disputed finding
+           is re-examined only against the caller's stated evidence; do not restate it without new facts.
+        2. Report a new gate finding only when the fix range introduces, worsens, or conceals it, or when a
+           prior fix breaks a requirement it touched. Treat code unchanged since {context.reviewed} as
+           already accepted by your role: do not re-audit it, do not raise findings on it, and do not widen
+           the review into unchanged areas. Use unchanged code only to judge the impact of the fix range.
+        The FIX RANGE sections of the evidence file are your navigation; the full {context.base}..{context.commit}
+        range is context only.
+    """)
 
 
 def build_prompt(context: ReviewContext, evidence_file: Path, task_context: str) -> str:
@@ -803,6 +864,8 @@ def build_prompt(context: ReviewContext, evidence_file: Path, task_context: str)
         to the task is supported by evidence or marked Unverifiable. Do not continue into an unrelated
         repository-wide audit.
     """)
+    if context.reviewed is not None:
+        scope_rules = incremental_scope_rules(context)
     return (
         f"You are the {context.role} review agent. The tracked files in the clean worktree at "
         f"{context.root} materialize commit\n"

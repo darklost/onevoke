@@ -527,5 +527,61 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertIn(f"Authoritative spec file: {spec}", self.stdin_log.read_text())
 
 
+    # ---- 增量复审 ----
+
+    def test_incremental_re_review_switches_prompt_to_the_fix_range(self) -> None:
+        fixed = self.commit("c.txt", "fix\n", "修复")
+
+        result = self.review(
+            str(self.repo), self.base, fixed, "PM", "确认改动正确",
+            "Prior findings: PM-001 closed by c.txt", self.head,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        prompt = self.stdin_log.read_text(encoding="utf-8")
+        self.assertIn("incremental re-review", prompt)
+        self.assertIn(f"fix range {self.head}..{fixed}", prompt)
+        self.assertIn("Prior findings: PM-001 closed by c.txt", prompt)
+        self.assertNotIn("Review the complete code state", prompt)
+
+    def test_empty_reviewed_commit_keeps_the_full_review(self) -> None:
+        result = self.review(str(self.repo), self.base, self.head, "PM", "确认改动正确", "", "")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        prompt = self.stdin_log.read_text(encoding="utf-8")
+        self.assertIn("Review the complete code state", prompt)
+        self.assertNotIn("incremental re-review", prompt)
+        self.assertIn("Additional caller-supplied review context: None provided.", prompt)
+
+    def test_reviewed_commit_must_sit_between_base_and_commit(self) -> None:
+        fixed = self.commit("c.txt", "fix\n", "修复")
+        # 与任务范围无关的 commit: 从 base 另起一条线.
+        self.git("checkout", "-q", "-b", "other", self.base)
+        stray = self.commit("d.txt", "stray\n", "无关")
+        self.git("checkout", "-q", "main")
+
+        for reviewed, message in (
+            (fixed, "must differ from base-commit and commit"),
+            (self.base, "must differ from base-commit and commit"),
+            (stray, "reviewed-commit is not an ancestor of commit"),
+            (self.head[:12], "must be a full commit SHA"),
+        ):
+            with self.subTest(reviewed=reviewed):
+                result = self.review(
+                    str(self.repo), self.base, fixed, "PM", "确认改动正确", "", reviewed
+                )
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(self.argv_log.exists(), "gate must not launch the reviewer")
+
+    def test_too_many_arguments_report_usage(self) -> None:
+        result = self.review(
+            str(self.repo), self.base, self.head, "PM", "确认改动正确", "", self.base, "extra"
+        )
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("[reviewed-commit]", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

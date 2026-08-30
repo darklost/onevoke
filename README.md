@@ -141,7 +141,7 @@ kanban rules
 
 ## 3. 审核
 
-任务命中审核白名单后, 由平台审核入口按 PM -> 安全角色 -> QA 三阶段串行审核: POSIX 使用 `onevoke-review.sh`; Windows 的人工包装入口是 `onevoke-review.cmd`, `onevoke review` 的程序化分发则直接进入 `onevoke_review.py`. 两者使用同一门禁实现. Codex, Claude 与 Grok 的只读 sandbox, 权限和工具隔离参数在两个平台保持不变; Cursor 用 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR` 隔离会话, 不做 `--sandbox` 事前阻断. 各角色是否运行由 `review_stages` 与项目规则决定, 实际运行的 QA 固定在最后. 每次修复只重跑当前阶段. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
+任务命中审核白名单后, 由平台审核入口按 PM -> 安全角色 -> QA 三阶段串行审核: POSIX 使用 `onevoke-review.sh`; Windows 的人工包装入口是 `onevoke-review.cmd`, `onevoke review` 的程序化分发则直接进入 `onevoke_review.py`. 两者使用同一门禁实现. Codex, Claude 与 Grok 的只读 sandbox, 权限和工具隔离参数在两个平台保持不变; Cursor 用 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR` 隔离会话, 不做 `--sandbox` 事前阻断. 各角色是否运行由 `review_stages` 与项目规则决定, 实际运行的 QA 固定在最后. 每次修复只对当前角色做增量复审: 把该角色上一轮审过的 commit 作为 `reviewed-commit` 传给审核入口, reviewer 只核实上轮 finding 是否闭环并检查修复范围, 不重新全量审计. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
 
 默认哪些环节运行可在配置文件的 `review_stages` 配置 (`auto` / `skip` / `required`), 项目规则或当前任务指令可覆盖. 全局安装的配置文件是 `~/.config/onevoke/config.json`, 项目安装是 `<主 worktree>/.onevoke/config.json`. 用命令根下的 `onevoke config` 查看当前值.
 
