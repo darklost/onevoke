@@ -515,6 +515,7 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertIn("You are the QA review agent", prompt)
         self.assertIn("Authoritative task goal: 确认改动正确", prompt)
         self.assertIn(f"{self.base}..{self.head}", prompt)
+        self.assertIn("Tag each such item with [mechanical]", prompt)
         self.assertIn("Do not modify files", prompt)
 
     def test_spec_file_is_passed_as_authoritative_context(self) -> None:

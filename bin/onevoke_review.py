@@ -798,7 +798,9 @@ TIER_RULES = textwrap.dedent("""\
     Always classify the following as at least medium, no matter how rarely they trigger or how small the
     consequence looks: documentation or code comments that disagree with the actual implementation; dead
     code (unreachable, or never called or referenced); redundant tests (duplicating coverage of the same
-    behavior, or asserting nothing about the behavior under test).
+    behavior, or asserting nothing about the behavior under test). Tag each such item with [mechanical]
+    right after its tier: the caller closes these with mechanical evidence and does not re-run the review
+    for them alone, so never mix a logic defect into a [mechanical] item.
 
     Blocking, high, and medium are gate findings and belong in the main findings section. After the gate
     findings, always emit a section headed NON-BLOCKING that lists every low, recommend, and suggest
