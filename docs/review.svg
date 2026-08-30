@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1136" viewBox="0 0 1600 1136" role="img" aria-labelledby="rv-title rv-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1186" viewBox="0 0 1600 1186" role="img" aria-labelledby="rv-title rv-desc">
   <title id="rv-title">Onevoke 审核流程</title>
-  <desc id="rv-desc">任务命中审核白名单后, 先按「审核环节」解析 PM/CSA/Hacker/QA 是否运行 (review_stages 与项目规则可覆盖), 跳过的标 N/A. PM 与 QA 基于同一 commit 并行首轮, 都通过后 CSA/Hacker 进入第二阶段. 每次修复只对当前角色做增量复审, 不重新全量审计, 通过后展示全部未处理项再进入集成. 只有经主代理核实的 blocking, high, medium 必修.</desc>
+  <desc id="rv-desc">任务命中审核白名单后, 先按「审核环节」解析 PM/CSA/Hacker/QA 是否运行 (review_stages 与项目规则可覆盖), 跳过的标 N/A. PM 与 QA 基于同一 commit 并行首轮, 都通过后 CSA/Hacker 进入第二阶段. 每次修复只对提出必修项的角色做增量复审, 不重新全量审计; 仅剩机械必修项时由主代理机械核实, 不重跑; 安全角色的修复由 QA (改功能行为时含 PM) 增量复审, PM/QA 修复实质改动安全代码时安全角色也增量复审, 通过后展示全部未处理项再进入集成. 只有经主代理核实的 blocking, high, medium 必修.</desc>
 
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
@@ -58,9 +58,10 @@
   <rect x="96" y="472" width="716" height="48" rx="12" fill="#f5f6ff" stroke="#dfe2fd" stroke-width="1.5"/>
   <path d="M124 487 A9 9 0 1 1 115 496" fill="none" stroke="#4338ca" stroke-width="2" stroke-linecap="round"/>
   <path d="M111 497 L119 497 L115 489 Z" fill="#4338ca"/>
-  <text x="148" y="502" class="s" font-size="15" fill="#4338ca">必修 finding → 合并 PM/QA 必修项一次修复 → 只对有必修项的角色增量复审</text>
+  <text x="148" y="502" class="s" font-size="15" fill="#4338ca">必修 finding → 合并 PM/QA 项一次修复 → 只复审有必修项的角色; 仅剩机械项不重跑</text>
 
-  <path d="M454 544 V570" class="flow"/>
+  <path d="M454 544 V570" fill="none" stroke="#94a3b8" stroke-width="2.5" stroke-dasharray="5 5" stroke-linecap="round"/>
+  <text x="472" y="562" class="s" font-size="13" fill="#64748b">PM ∥ QA: 同一 commit 并行首轮, 两者都通过后才进入第二阶段</text>
 
   <!-- 1b QA -->
   <rect x="64" y="576" width="780" height="164" rx="16" class="panel" filter="url(#card)"/>
@@ -71,14 +72,14 @@
   <rect x="96" y="672" width="716" height="48" rx="12" fill="#eefaf8" stroke="#cbeae5" stroke-width="1.5"/>
   <path d="M124 687 A9 9 0 1 1 115 696" fill="none" stroke="#0f766e" stroke-width="2" stroke-linecap="round"/>
   <path d="M111 697 L119 697 L115 689 Z" fill="#0f766e"/>
-  <text x="148" y="702" class="s" font-size="15" fill="#0f766e">必修 finding → 与 PM 项一并修复后增量复审; 已通过的角色不重跑</text>
+  <text x="148" y="702" class="s" font-size="15" fill="#0f766e">必修 finding → 与 PM 项一并修复后增量复审; 仅剩机械项不重跑, 已通过角色不重跑</text>
 
 
 
   <path d="M454 744 V770" class="flow"/>
 
   <!-- 2 安全角色 -->
-  <rect x="64" y="776" width="780" height="196" rx="16" class="panel" filter="url(#card)"/>
+  <rect x="64" y="776" width="780" height="246" rx="16" class="panel" filter="url(#card)"/>
   <rect x="96" y="804" width="40" height="40" rx="12" fill="#7c3aed"/>
   <text x="116" y="831" text-anchor="middle" class="s num">2</text>
   <text x="152" y="826" class="s pt">CSA / Hacker</text>
@@ -92,17 +93,19 @@
   <text x="372" y="935" text-anchor="middle" class="s" font-size="14" fill="#6d28d9">2 确认通过并接受风险</text>
   <rect x="488" y="914" width="128" height="32" rx="16" fill="#ffffff" stroke="#ddd0fb" stroke-width="1.5"/>
   <text x="552" y="935" text-anchor="middle" class="s" font-size="14" fill="#6d28d9">3 停止集成</text>
+  <text x="120" y="974" class="s" font-size="14" fill="#6d28d9">修复后 → 安全角色增量复审, 且 QA 增量复审修复范围 (改变功能行为时 PM 也复审)</text>
+  <text x="120" y="998" class="s" font-size="14" fill="#6d28d9">PM/QA 的后续修复实质改动安全代码 → 安全角色再增量复审, 直到各方都通过</text>
 
 
 
-  <path d="M454 976 V1002" class="flow"/>
+  <path d="M454 1026 V1052" class="flow"/>
 
   <!-- 通过 -->
-  <rect x="64" y="1008" width="780" height="88" rx="16" fill="#eefaf5" stroke="#a7e0cd" stroke-width="1.5"/>
-  <circle cx="112" cy="1052" r="18" fill="#059669"/>
-  <path d="M104 1052 L110 1058 L121 1045" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="146" y="1046" class="s" font-size="18" font-weight="700" fill="#064e3b">审核通过</text>
-  <text x="146" y="1074" class="s" font-size="15" fill="#3f6b5c">先展示全部未处理项, 再进入集成与清理</text>
+  <rect x="64" y="1058" width="780" height="88" rx="16" fill="#eefaf5" stroke="#a7e0cd" stroke-width="1.5"/>
+  <circle cx="112" cy="1102" r="18" fill="#059669"/>
+  <path d="M104 1102 L110 1108 L121 1095" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="146" y="1096" class="s" font-size="18" font-weight="700" fill="#064e3b">审核通过</text>
+  <text x="146" y="1124" class="s" font-size="15" fill="#3f6b5c">先展示全部未处理项, 再进入集成与清理</text>
 
   <!-- 分级表 -->
   <rect x="900" y="184" width="636" height="392" rx="16" class="panel" filter="url(#card)"/>
