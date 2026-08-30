@@ -725,11 +725,14 @@ ROLE_RULES = {
         Treat the task context as the requirements contract. Decompose it into atomic, observable
         requirements, then trace each one to full implementation evidence at the target commit.
         Build a requirement table with requirement, expected behavior, code evidence, and status:
-        Complete, Partial, Missing, Contradicted, or Unverifiable. Inspect every required user flow,
-        platform, state, error path, permission, and integration; tests and comments are supporting
-        evidence, not proof that production behavior exists. Only create requirements explicitly stated by
-        the task context or logically required by an existing contract. An unspecified platform, state, or
-        error path is not automatically a requirement. Do not invent requirements or expand scope.
+        Complete, Partial, Missing, Contradicted, or Unverifiable. Inspect only the user flows, platforms,
+        states, error paths, permissions, and integrations that the task context makes required; tests and
+        comments are supporting evidence, not proof that production behavior exists. Only create requirements
+        explicitly stated by the task context or logically required by an existing contract, and cite that
+        contract whenever you rely on it. An unspecified platform, state, error path, concurrency
+        interleaving, or hardening measure is not a requirement. Do not invent requirements or expand scope:
+        a gap that lies outside the contract, or inside its out-of-scope list, goes to NON-BLOCKING as
+        suggest tagged [out-of-contract], never to the gate findings.
         Summarize completion with status counts. Report each material gap as a gate finding with its
         tier, confidence, exact evidence, user impact, and the smallest product change that closes it.
     """),

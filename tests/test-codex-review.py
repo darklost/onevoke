@@ -525,7 +525,9 @@ class CodexReviewGateTest(unittest.TestCase):
         result = self.review(str(self.repo), self.base, self.head, "PM", str(spec))
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn(f"Authoritative spec file: {spec}", self.stdin_log.read_text())
+        prompt = self.stdin_log.read_text()
+        self.assertIn(f"Authoritative spec file: {spec}", prompt)
+        self.assertIn("suggest tagged [out-of-contract]", prompt)
 
 
     # ---- 增量复审 ----
