@@ -1237,7 +1237,7 @@ def tmux_launch(
     return tmux_capture(
         tmux,
         "new-session" if create else "new-window",
-        *(["-d"] if create else []),
+        "-d",
         "-P",
         "-F",
         "#{window_id}",
@@ -1317,7 +1317,7 @@ def herdr_create_tab(herdr: str, workspace: str, cwd: str, label: str) -> tuple[
         cwd,
         "--label",
         label,
-        "--focus",
+        "--no-focus",
     )
     data = herdr_json_result(result, "tab create")
     tab = data.get("tab")

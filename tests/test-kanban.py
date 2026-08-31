@@ -590,6 +590,7 @@ exit 1
         self.assertIn(started_at.group(1), self.run_command("list", "working").stdout)
         tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
         self.assertEqual("new-window", tmux_args[0])
+        self.assertIn("-d", tmux_args)
         self.assertEqual("$42:", tmux_args[tmux_args.index("-t") + 1])
         self.assertEqual(str(self.root.resolve().parent), tmux_args[tmux_args.index("-c") + 1])
         self.assertEqual("kb-任务-start-direct", tmux_args[tmux_args.index("-n") + 1])
@@ -976,6 +977,7 @@ exit 1
 
         arguments = self.tmux_arguments()
         self.assertEqual("new-window", arguments[0])
+        self.assertIn("-d", arguments)
         self.assertEqual(f"{session}:", arguments[arguments.index("-t") + 1])
         self.assertEqual("kb-任务-session-reuse", arguments[arguments.index("-n") + 1])
         self.assertFalse((self.root / "tmux.log.setopt").exists())
@@ -1045,6 +1047,7 @@ exit 1
         self.assertIn("启动方式=tmux", result.stdout)
         self.assertNotIn("启动方式=auto", result.stdout)
         self.assertEqual("new-window", self.tmux_arguments()[0])
+        self.assertIn("-d", self.tmux_arguments())
         self.assertTrue((self.root / "working" / task.name).exists())
 
     def test_default_auto_launcher_prefers_herdr_inside_herdr(self) -> None:
@@ -1056,7 +1059,9 @@ exit 1
         self.assertIn("启动方式=herdr", result.stdout)
         self.assertNotIn("启动方式=auto", result.stdout)
         self.assertIn("tab=w1:t9", result.stdout)
-        self.assertTrue((self.root / "herdr.log.create").exists())
+        create = self.herdr_arguments("create")
+        self.assertIn("--no-focus", create)
+        self.assertNotIn("--focus", create)
         self.assertFalse((self.root / "tmux.log").exists())
         self.assertTrue((self.root / "working" / task.name).exists())
 
@@ -1081,6 +1086,7 @@ exit 1
         self.assertIn("启动方式=tmux", result.stdout)
         self.assertNotIn("启动方式=auto", result.stdout)
         self.assertEqual("new-window", self.tmux_arguments()[0])
+        self.assertIn("-d", self.tmux_arguments())
         self.assertTrue((self.root / "working" / task.name).exists())
 
     def test_auto_launcher_without_herdr_or_tmux_does_not_claim(self) -> None:
@@ -1143,7 +1149,8 @@ exit 1
         self.assertEqual("w1", create[create.index("--workspace") + 1])
         self.assertEqual(str(self.root.resolve().parent), create[create.index("--cwd") + 1])
         self.assertEqual("kb-任务-herdr-start", create[create.index("--label") + 1])
-        self.assertIn("--focus", create)
+        self.assertIn("--no-focus", create)
+        self.assertNotIn("--focus", create)
         wait = self.herdr_arguments("wait")
         self.assertEqual(["pane", "wait-output", "w1:p9"], wait[:3])
         self.assertEqual(r"\S", wait[wait.index("--regex") + 1])
