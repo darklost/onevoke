@@ -602,67 +602,18 @@ def openat_nofollow(dir_fd: int, name: str, flags: int) -> int:
         raise
 
 
-def open_path_nofollow(root: Path, path: Path, *, write: bool = False) -> int:
-    """从看板根用 openat+O_NOFOLLOW 逐级打开, 关闭中间目录 fd 掉包窗口."""
-    ensure_no_symlinks_under_board(root, path)
-    relative = os.path.relpath(str(path), str(root.resolve(strict=False)))
-    parts = [] if relative in ("", ".") else list(Path(relative).parts)
-    if not parts:
-        raise KanbanError(t(f"任务文档路径无效: {path}", f"Invalid task document path: {path}"))
-    dir_fd = os.open(
-        root,
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-    )
-    try:
-        for part in parts[:-1]:
-            next_fd = openat_nofollow(
-                dir_fd, part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            )
-            os.close(dir_fd)
-            dir_fd = next_fd
-        final_flags = os.O_RDWR if write else os.O_RDONLY
-        fd = openat_nofollow(dir_fd, parts[-1], final_flags)
-    finally:
-        os.close(dir_fd)
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode):
-        os.close(fd)
-        raise KanbanError(t(f"任务文档必须是普通文件: {path}", f"Task document must be a regular file: {path}"))
-    return fd
-
-
-def open_task_document(entry: Entry, *, write: bool = False) -> int:
-    """打开任务文档且不跟随软链, 防止 scan 后被替换为看板外目标."""
-    root = board_root_from_entry(entry)
-    return open_path_nofollow(root, entry.document, write=write)
-
-
 def read_document(entry: Entry) -> str:
     try:
-        if os.name == "nt":
-            try:
-                data = read_regular_file_nofollow(
-                    board_root_from_entry(entry), entry.document
-                )
-            except UnsafePathError as error:
-                raise KanbanError(t(
-                    f"任务路径不得包含符号链接/重解析点且文档必须是普通文件: {error}",
-                    f"Task path must not contain a symlink/reparse point and the document must be a regular file: {error}",
-                )) from error
-            return data.decode("utf-8")
-        fd = open_task_document(entry, write=False)
         try:
-            chunks: list[bytes] = []
-            while True:
-                piece = os.read(fd, 1 << 20)
-                if not piece:
-                    break
-                chunks.append(piece)
-            return b"".join(chunks).decode("utf-8")
-        finally:
-            os.close(fd)
+            data = read_regular_file_nofollow(
+                board_root_from_entry(entry), entry.document
+            )
+        except UnsafePathError as error:
+            raise KanbanError(t(
+                f"任务路径不得包含符号链接/重解析点且文档必须是普通文件: {error}",
+                f"Task path must not contain a symlink/reparse point and the document must be a regular file: {error}",
+            )) from error
+        return data.decode("utf-8")
     except UnicodeError as error:
         raise KanbanError(t(f"任务文档不是有效 UTF-8: {entry.document}", f"Task document is not valid UTF-8: {entry.document}")) from error
 

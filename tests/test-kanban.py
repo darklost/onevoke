@@ -1782,7 +1782,9 @@ N/A
         entry = kanban["Entry"](task_id, "todo", task, task, "small")
         original_root = self.root.with_name(f"{self.root.name}-original")
         outside = self.root.with_name(f"{self.root.name}-outside")
-        outside.mkdir()
+        outside_task = outside / "todo" / task.name
+        outside_task.parent.mkdir(parents=True)
+        outside_task.write_text("outside sentinel\n", encoding="utf-8")
         real_open = os.open
         swapped = False
 
@@ -1800,6 +1802,9 @@ N/A
             ):
                 with self.assertRaises(OSError):
                     kanban["read_document"](entry)
+            self.assertEqual(
+                "outside sentinel\n", outside_task.read_text(encoding="utf-8")
+            )
         finally:
             if self.root.is_symlink():
                 self.root.unlink()
