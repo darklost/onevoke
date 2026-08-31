@@ -88,7 +88,11 @@ class KanbanCommandTest(unittest.TestCase):
         self.language.stop()
 
     def run_command(
-        self, *args: str, succeeds: bool = True, input_text: Optional[str] = None
+        self,
+        *args: str,
+        succeeds: bool = True,
+        input_text: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> subprocess.CompletedProcess:
         result = subprocess.run(
             [sys.executable, str(COMMAND), *args],
@@ -97,6 +101,7 @@ class KanbanCommandTest(unittest.TestCase):
             input=input_text,
             capture_output=True,
             check=False,
+            timeout=timeout,
         )
         if succeeds and result.returncode != 0:
             self.fail(result.stderr)
@@ -134,6 +139,16 @@ class KanbanCommandTest(unittest.TestCase):
             text.replace("- 任务组:\n", f"- 任务组: {task_group}\n", 1),
             encoding="utf-8",
         )
+
+    def read_process_json(
+        self, process: subprocess.Popen, *, timeout: float = 5.0
+    ) -> dict:
+        assert process.stdout is not None
+        ready, _, _ = select.select([process.stdout], [], [], timeout)
+        self.assertTrue(ready, f"事件读取超时; returncode={process.poll()}")
+        line = process.stdout.readline()
+        self.assertTrue(line, f"事件流提前结束; returncode={process.poll()}")
+        return json.loads(line)
 
     def install_fake_launchers(self) -> Path:
         fake_bin = self.root / "fake-bin"
@@ -1505,6 +1520,65 @@ exit 1
         )
         self.assertEqual("outside\n", outside.read_text(encoding="utf-8"))
 
+    def test_targeted_check_rejects_fifo_without_blocking(self) -> None:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-target-fifo-task"
+        small = self.root / "todo" / f"{task_id}.md"
+        os.mkfifo(small)
+        result = self.run_command("check", task_id, succeeds=False, timeout=5)
+        self.assertIn("任务入口类型错误", result.stderr)
+        small.unlink()
+
+        large = self.root / "todo" / task_id
+        large.mkdir()
+        os.mkfifo(large / "spec.md")
+        result = self.run_command("check", task_id, succeeds=False, timeout=5)
+        self.assertIn("spec.md 不是普通文件", result.stderr)
+
+    def test_targeted_scan_retries_a_concurrent_forward_move(self) -> None:
+        task_id, task = self.make_todo("target-race")
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_target_race")
+        finally:
+            sys.path.pop(0)
+        original_probe = kanban["regular_file_exists_nofollow"]
+        moved = False
+
+        def racing_probe(root: Path, path: Path) -> bool:
+            nonlocal moved
+            exists = original_probe(root, path)
+            if path == task and exists and not moved:
+                task.rename(self.root / "working" / task.name)
+                moved = True
+            return exists
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.dict(
+                kanban["scan_targets_once"].__globals__,
+                {"regular_file_exists_nofollow": racing_probe},
+            ):
+                board = kanban["scan_targets"](self.root, [task_id])
+
+        self.assertTrue(moved)
+        self.assertEqual("working", board.entries[task_id].state)
+        self.assertEqual([], board.problems)
+
+    def test_subscribe_rejects_non_finite_intervals(self) -> None:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-interval-task"
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-interval-group"
+        for option, value in (
+            ("--refresh", "nan"),
+            ("--refresh", "inf"),
+            ("--heartbeat", "nan"),
+            ("--heartbeat", "inf"),
+        ):
+            with self.subTest(option=option, value=value):
+                result = self.run_command(
+                    "subscribe", option, value, group_id, task_id, succeeds=False
+                )
+                self.assertIn("间隔必须大于 0", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_subscribe_emits_snapshot_changes_and_heartbeat_only_for_members(self) -> None:
         group_id = f"{datetime.now().strftime('%Y%m%d')}-events-group"
         first_id, first = self.make_todo("event-first")
@@ -1534,7 +1608,7 @@ exit 1
         )
         try:
             assert process.stdout is not None
-            snapshot = json.loads(process.stdout.readline())
+            snapshot = self.read_process_json(process)
             self.assertEqual("snapshot", snapshot["event"])
             self.assertEqual(group_id, snapshot["group_id"])
             self.assertEqual(
@@ -1555,7 +1629,7 @@ exit 1
 
             first.rename(self.root / "done" / first.name)
             second.rename(self.root / "working" / second.name)
-            changed = json.loads(process.stdout.readline())
+            changed = self.read_process_json(process)
             self.assertEqual("state-change", changed["event"])
             self.assertEqual(
                 [
@@ -1567,7 +1641,7 @@ exit 1
             self.assertEqual("working", snapshot["tasks"][first_id])
             self.assertEqual("done", changed["tasks"][first_id])
 
-            heartbeat = json.loads(process.stdout.readline())
+            heartbeat = self.read_process_json(process)
             self.assertEqual("heartbeat", heartbeat["event"])
             self.assertEqual(changed["tasks"], heartbeat["tasks"])
             self.assertNotIn(unrelated_id, heartbeat["tasks"])
@@ -1697,6 +1771,43 @@ N/A
             show.stderr,
         )
         self.assertEqual("external\n", outside.read_text(encoding="utf-8"))
+
+    def test_document_read_rejects_board_root_symlink_swap(self) -> None:
+        task_id, task = self.make_todo("root-swap")
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_root_swap")
+        finally:
+            sys.path.pop(0)
+        entry = kanban["Entry"](task_id, "todo", task, task, "small")
+        original_root = self.root.with_name(f"{self.root.name}-original")
+        outside = self.root.with_name(f"{self.root.name}-outside")
+        outside.mkdir()
+        real_open = os.open
+        swapped = False
+
+        def swap_before_root_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if Path(path) == self.root and not swapped:
+                self.root.rename(original_root)
+                self.root.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch.object(
+                kanban["os"], "open", side_effect=swap_before_root_open
+            ):
+                with self.assertRaises(OSError):
+                    kanban["read_document"](entry)
+        finally:
+            if self.root.is_symlink():
+                self.root.unlink()
+            if original_root.exists():
+                original_root.rename(self.root)
+            shutil.rmtree(outside)
+
+        self.assertTrue(swapped)
 
     def test_write_text_atomic_rejects_document_symlink(self) -> None:
         task_id, task = self.make_todo("write-link")
