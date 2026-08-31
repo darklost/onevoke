@@ -1814,6 +1814,24 @@ N/A
 
         self.assertTrue(swapped)
 
+    def test_document_read_derives_boundary_without_path_resolve(self) -> None:
+        task_id, task = self.make_todo("lexical-boundary")
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_lexical_boundary")
+        finally:
+            sys.path.pop(0)
+        entry = kanban["Entry"](task_id, "todo", task, task, "small")
+
+        with mock.patch.object(
+            Path,
+            "resolve",
+            side_effect=AssertionError("安全路径派生不得调用 Path.resolve"),
+        ):
+            document = kanban["read_document"](entry)
+
+        self.assertIn("# 任务 lexical-boundary", document)
+
     def test_write_text_atomic_rejects_document_symlink(self) -> None:
         task_id, task = self.make_todo("write-link")
         outside = self.root / "write-secret.md"
