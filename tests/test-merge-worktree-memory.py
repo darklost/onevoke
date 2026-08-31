@@ -339,6 +339,7 @@ class MergeTest(unittest.TestCase):
             with merger.exclusive_file_lock(lock):
                 process = subprocess.Popen(
                     [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.target)],
+                    env=merger_env(self.missing_config),
                     text=True,
                     encoding="utf-8",
                     stdout=subprocess.PIPE,
@@ -365,6 +366,7 @@ class MergeTest(unittest.TestCase):
         processes = [
             subprocess.Popen(
                 [*MERGER_COMMAND, "--source", str(source), "--target", str(self.target)],
+                env=merger_env(self.missing_config),
                 text=True,
                 encoding="utf-8",
                 stdout=subprocess.PIPE,
