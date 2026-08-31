@@ -30,7 +30,8 @@ kanban new [--large] <feature|bug|chore|research> <slug> <title...>
 kanban move <task-id> <todo|working|done|archived|trash>
 kanban pick [task-id]
 kanban start [--agent codex|claude|grok|cursor] [--launcher auto|tmux|tmux-session|herdr|foreground|console] [task-id]
-kanban check
+kanban check [task-id ...]
+kanban subscribe [--refresh SECONDS] [--heartbeat SECONDS] <task-group> <task-id>...
 kanban web [--host HOST] [--port PORT] [--refresh SECONDS] [--assets DIR] [--open]
 kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
 ```
@@ -38,7 +39,8 @@ kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
 - `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式. 原生 Windows 上 Agent CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` 无法提供无损 argv 边界, `welcome`, `doctor` 与 `start` 均不得把它们视为可用 Agent.
 - `init` 幂等创建看板及 6 个状态目录, Git 项目只更新本地 `info/exclude`. Windows 新目录必须相对固定父句柄以 `CREATE_NEW` 创建并在创建时应用当前用户独占的 protected DACL, 创建竞态失败关闭; 既有目录只迁移叶目录 ACL. Git exclude 的父链逐分量拒绝 reparse point, 既有 ACL 不变, 去重读取和追加在同一固定叶句柄及文件锁内完成.
 - 六种 launcher: `auto` 在启动当时解析, 不把结果写回配置; 处于 herdr (`HERDR_ENV=1`) 时按 `herdr` 启动, 否则处于 tmux 时按 `tmux` 启动, 同时处于两者时 herdr 优先, 两者都不在则失败且不领取, 不回落到 `tmux-session`, `foreground` 或 `console`. `tmux` 在启动者当前 session 里建任务 window, 要求 `start` 本身跑在 tmux 内; `tmux-session` 按项目主树路径确定一个专属 session (`kb-<目录名>-<路径摘要>`), 不存在就新建, 已存在就复用, 同一项目的全部任务卡共用该 session, 每张卡一个 window, 不要求 `start` 跑在 tmux 内, 启动后不切换客户端, 只输出 session 名, window id 和 attach 提示; `herdr` 要求 `HERDR_ENV=1` 且 herdr 在 PATH, 在当前 workspace 新建 tab (`--focus`, 标签复用 `window_name()`) 后先等根 pane 就绪, 再在该 pane 执行与 tmux 相同的 Agent 命令, 不使用 `herdr agent start`; `foreground` 在当前终端前台运行并等待 Agent 退出; `console` 仅支持原生 Windows, 在独立控制台窗口启动 Agent 后立即返回 PID. `console` 没有 session/window 复用、attach 或输出抓取能力, 不是 tmux 或 `tmux-session` 的等价实现. POSIX 默认 `auto`, Windows 默认 `console`; Windows 拒绝 `auto` 和 `herdr`.
-- `check` 列出全部无效入口并以非零退出. `web` 和 `tui` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
+- `check` 不带任务 ID 时列出全部无效入口并以非零退出; 指定一个或多个任务 ID 时只检查这些精确目标及其跨状态/入口形态冲突, 无关无效入口不影响结果. `subscribe` 要求显式任务组 ID 和成员任务 ID, 校验成员归属后输出逐行 JSON 状态事件. `web` 和 `tui` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
+- `subscribe` 的每行 JSON 都含 `event`, `group_id` 和按任务 ID 映射状态的 `tasks`. 初始事件的 `event` 为 `snapshot`; 状态事件为 `state-change`, 另含 `changed` 数组, 每项固定含 `task_id`, `from`, `to`; 心跳事件为 `heartbeat`. `--refresh` 是状态扫描秒数, 默认 1; `--heartbeat` 是无状态变化后的心跳秒数, 默认 900. 两者必须大于 0.
 - `web` 是原生 Windows 第一阶段保证的看板 UI. `tui` 默认按终端宽度显示尽可能多的栏目, 每栏默认最小 40 列 (可用 `-`/`=` 调节并记住), 宽度不足时少显示, 不足一栏最小宽度时按实际宽度显示单栏, 左右切换时始终保持选中栏可见. `--single` 即使终端足够宽也只显示一栏. `--theme` 指定初始配色主题 (默认 auto 跟随终端). 方向键或 `hjkl` 切换栏目和任务, 鼠标单击栏目或任务卡聚焦/选中, 双击打开详情, 在任务卡上拖选文本自动复制到系统剪贴板, 滚轮在看板翻卡、在详情滚动正文, PgUp/PgDn 按页翻动任务列表, `/` 搜索 (也可点工具栏搜索区), `y` 复制当前任务 ID, Enter 查看任务卡, `a` 切换存档栏目, `t` 循环切换 auto/light/dark 主题, `r` 刷新, `q` 退出; 搜索覆盖标题, 任务 ID, 任务组, 类型, 负责人和状态. 任务卡详情内可用 `hjkl`/方向键移动光标, 滚轮滚动正文, Ctrl-d/u 半页, Ctrl-f/b 或 PgUp/PgDn 整页, `gg`/`G` 到顶/底, `/` 搜索正文并用 `n`/`N` 跳转匹配, `v`/`V` 进入字符/行选择模式并用 `y` 复制, 拖选正文同样自动复制. 默认每 30 秒自动刷新, 按任务 ID 原位更新并尽量保留当前栏目的选中项和滚动位置. Windows TUI 仍要求当前 Python 提供可用 curses 后端, 不属于本阶段保证; 无法加载时使用 `kanban web`.
 - 命令只做结构和机械校验; 授权, 依赖和终止理由由 Agent 按本文件判断.
 
@@ -194,18 +196,19 @@ kanban move <task-id> working
 
 ## 任务组编排
 
-- 用户启动任务组后, 启动者成为主控 (编排) Agent, 只校验依赖, 按顺序启动就绪卡, 定时检查卡片状态和给出组级结论. 主控 Agent 不实现组内任务, 不检查或修改子任务的代码, worktree, commit, 测试或审核内容.
+- 用户启动任务组后, 启动者成为主控 (编排) Agent, 只校验依赖, 按顺序启动就绪卡, 订阅状态事件和给出组级结论. 主控 Agent 不实现组内任务, 不检查或修改子任务的代码, worktree, commit, 测试或审核内容.
 - 启动前读取全组卡片, 核对 ID, 依赖, 契约和修改范围; 有缺失引用, 环或隔离冲突时不启动受影响卡. 将已确认的 `backlog` 卡片移入 `todo/`, 已处于后续状态的卡片保持原状.
 - 每张就绪的 `todo` 卡都用 `kanban start <task-id>` 启动, launcher 默认取 Onevoke 配置, `--launcher` 只覆盖本次; 一个任务组内只用同一种 launcher, 所选 launcher 在当前平台不可用时报告阻塞. 首轮启动无前置任务的卡, 之后只启动全部前置卡都在 `done/` 的卡; 同时就绪且无资源冲突的卡并行启动, 禁越过依赖提前启动.
 - 首张卡启动成功后立即告知用户: 本会话是任务组主控, 须保留到全组按依赖顺序执行完毕, 不要结束当前 session; 提前结束会失去依赖校验, 顺序启动和组级结论. 主控会话持续到任务组成功或用户明确终止.
-- 以首张卡启动成功的时间为基准设置固定检查点, 每隔 15 分钟执行一轮状态检查; 不得自行缩短周期. Agent 消息或用户输入可触发额外检查, 额外检查后继续等待原定检查点, 不重置或取消后续定时检查.
-- 只有检查中确认执行 Agent 明确失败或已停止才提前处置; 其余情况一律保持 15 分钟一轮, 不因输出无变化, 卡片无进展或等待时间长而缩短周期或提前介入.
-- 两个检查点之间使用当前 Agent 或 runtime 支持的最长单次阻塞等待. 支持连续等待至下一检查点时必须一次等满; 只有等待接口存在更短的硬上限时才可续接等待, 续接时不得运行命令, 读取卡片或输出无变化状态. 禁止用分钟级或其他短周期轮询计时.
-- 每轮状态检查只运行 `kanban check`, 读取全组卡片状态, 并在 launcher 提供只读输出通道时查看各执行 Agent 的输出, 核对前置任务是否已进入 `done`, 判断执行 Agent 是仍在运行, 明确失败还是已停止. tmux 启动的卡用 `kanban start` 返回的 window id 执行 `tmux capture-pane -p -t <window-id>`, 需要时配合 `tmux list-windows` 确认窗口是否还在; `tmux-session` 启动的卡同样用返回的 window id, 列窗口时加 `-t <session>`. herdr 启动的卡用返回的 pane id 执行 `herdr pane read <pane-id>`. `console` 不提供输出抓取, 只用返回 PID 只读判断进程是否存在并结合卡片状态判断; 不读取、控制或关闭独立控制台, 不把 PID 当作 tmux window id 或可恢复 session.
+- 启动首批需监控的组内任务后, 主控运行 `kanban subscribe <task-group> <task-id>...` 并阻塞读取其逐行 JSON 输出. 命令先输出当前真实状态的 `snapshot`, 之后只在目标卡状态变化时输出 `state-change`; 事件包含任务组 ID, 变化卡的前后状态和全组当前快照. 主控按初始快照补齐订阅启动前已经发生的迁移, 不依赖历史事件.
+- 收到 `state-change` 后, 主控只对变化卡以及可能因它进入 `done` 而解除依赖的直接后继卡运行 `kanban check <task-id>...`, 读取这些卡片并核对依赖; 新就绪卡仍按既定顺序用 `kanban start` 启动. 新成员启动后重启订阅, 参数包含当前仍需监控的明确成员集合, 并以新的初始快照继续判断.
+- 订阅无状态变化达 15 分钟时输出 `heartbeat`. 心跳只用于检查处于 `working` 的成员及对应执行 Agent 是否仍存活, 不运行全看板 `kanban check`, 不重新读取无关卡. Agent 消息或用户输入可触发同范围的额外存活检查, 不改变下一次心跳语义.
+- 状态事件之间持续阻塞读取订阅输出, 禁止自行增加短周期轮询. 只有状态事件, heartbeat 或订阅进程明确失败/退出才触发处置; 无输出和等待时间长本身不构成异常.
+- 状态事件后的定向检查或 heartbeat 存活检查中, launcher 提供只读输出通道时可查看对应执行 Agent 的输出. tmux 启动的卡用 `kanban start` 返回的 window id 执行 `tmux capture-pane -p -t <window-id>`, 需要时配合 `tmux list-windows` 确认窗口是否还在; `tmux-session` 启动的卡同样用返回的 window id, 列窗口时加 `-t <session>`. herdr 启动的卡用返回的 pane id 执行 `herdr pane read <pane-id>`. `console` 不提供输出抓取, 只用返回 PID 只读判断进程是否存在并结合卡片状态判断; 不读取、控制或关闭独立控制台, 不把 PID 当作 tmux window id 或可恢复 session.
 - 查看输出只读不交互: 不向执行 Agent 的窗口或会话发送按键, 消息, 催促或指令, 不中断, 恢复, 重启, 接管或改派子任务, 也不据此检查或修改子任务的代码, worktree, commit, 测试或审核内容.
 - 执行 Agent 明确失败或已停止 (输出报错终止, 进程退出, tmux window 消失) 而卡片未进 `done/`, 或卡片状态异常, 顺序冲突时, 只记录现状并向用户报告, 等用户决定交接, 改契约或终止; `working` 卡不得再次 `start`.
-- 执行 Agent 仍在运行时, 即使相邻两轮检查无进展也只在本轮记录现状, 继续按 15 分钟周期检查, 不提前介入或终止等待.
-- 全部组内卡进入 `done/` 才算成功. 任一卡进入 `archived/` 或 `trash/` 时, 须等待用户修改组契约或终止整组.
+- 执行 Agent 仍在运行时, 即使相邻 heartbeat 之间无进展也只记录现状并继续阻塞等待订阅事件, 不提前介入或终止等待.
+- 全部组内卡进入 `done/` 后先停止订阅并运行一次不带目标的 `kanban check`; 完整检查通过才算成功. 任一卡进入 `archived/` 或 `trash/` 时, 须等待用户修改组契约或终止整组.
 - 编排结束时汇总执行顺序, 并行情况和组级结果, 再按卡片列出"未处理问题", 分类与记录要求按 `REVIEW-RULES.md`「结论与故障处置」的未处理项清单, 另加验证缺口和后续任务; 没有写"无", 每项另写任务 ID. 成功时仍发送各卡完成报告; 终止时同样按「完成报告」模板逐卡补发未完成卡的汇报, 再列终止决策.
 
 ## 执行与完成

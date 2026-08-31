@@ -8,6 +8,7 @@ import json
 import os
 import re
 import runpy
+import select
 import shutil
 import struct
 import subprocess
@@ -125,6 +126,14 @@ class KanbanCommandTest(unittest.TestCase):
         self.make_ready(task)
         self.run_command("move", task_id, "todo")
         return task_id, self.root / "todo" / task.name
+
+    @staticmethod
+    def set_task_group(path: Path, task_group: str) -> None:
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            text.replace("- 任务组:\n", f"- 任务组: {task_group}\n", 1),
+            encoding="utf-8",
+        )
 
     def install_fake_launchers(self) -> Path:
         fake_bin = self.root / "fake-bin"
@@ -1443,6 +1452,141 @@ exit 1
         result = self.run_command("check")
 
         self.assertEqual("通过: 1 个任务\n", result.stdout)
+
+    def test_targeted_check_ignores_unrelated_invalid_entries(self) -> None:
+        first_id, _ = self.make_todo("targeted-clean")
+        second_id, _ = self.make_todo("targeted-second")
+        (self.root / "backlog" / "notes.md").write_text("随手记", encoding="utf-8")
+
+        result = self.run_command("check", first_id, second_id)
+
+        self.assertEqual("通过: 2 个任务\n", result.stdout)
+        self.assertEqual("", result.stderr)
+        self.run_command("check", succeeds=False)
+
+    def test_targeted_check_rejects_missing_duplicate_and_invalid_target(self) -> None:
+        task_id, task = self.make_todo("targeted-broken")
+        missing = f"{datetime.now().strftime('%Y%m%d')}-missing-target-task"
+        self.assertIn(
+            "任务不存在",
+            self.run_command("check", missing, succeeds=False).stderr,
+        )
+
+        duplicate = self.root / "working" / task.name
+        duplicate.write_bytes(task.read_bytes())
+        self.assertIn(
+            "重复任务 ID",
+            self.run_command("check", task_id, succeeds=False).stderr,
+        )
+        duplicate.unlink()
+
+        task.unlink()
+        task.mkdir()
+        self.assertIn(
+            "任务入口类型错误",
+            self.run_command("check", task_id, succeeds=False).stderr,
+        )
+
+    def test_targeted_check_rejects_symlink_and_missing_large_spec(self) -> None:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-target-link-task"
+        outside = self.root.parent / "outside-target.md"
+        outside.write_text("outside\n", encoding="utf-8")
+        (self.root / "todo" / f"{task_id}.md").symlink_to(outside)
+        self.assertIn(
+            "符号链接/重解析点",
+            self.run_command("check", task_id, succeeds=False).stderr,
+        )
+
+        (self.root / "todo" / f"{task_id}.md").unlink()
+        (self.root / "todo" / task_id).mkdir()
+        self.assertIn(
+            "大任务缺少 spec.md",
+            self.run_command("check", task_id, succeeds=False).stderr,
+        )
+        self.assertEqual("outside\n", outside.read_text(encoding="utf-8"))
+
+    def test_subscribe_emits_snapshot_changes_and_heartbeat_only_for_members(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-events-group"
+        first_id, first = self.make_todo("event-first")
+        second_id, second = self.make_todo("event-second")
+        unrelated_id, unrelated = self.make_todo("event-unrelated")
+        self.set_task_group(first, group_id)
+        self.set_task_group(second, group_id)
+        first = first.rename(self.root / "working" / first.name)
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "subscribe",
+                group_id,
+                first_id,
+                second_id,
+                "--refresh",
+                "0.5",
+                "--heartbeat",
+                "1.2",
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            assert process.stdout is not None
+            snapshot = json.loads(process.stdout.readline())
+            self.assertEqual("snapshot", snapshot["event"])
+            self.assertEqual(group_id, snapshot["group_id"])
+            self.assertEqual(
+                {first_id: "working", second_id: "todo"}, snapshot["tasks"]
+            )
+
+            unrelated.write_text(
+                unrelated.read_text(encoding="utf-8") + "\n正文变化\n",
+                encoding="utf-8",
+            )
+            unrelated.rename(self.root / "working" / unrelated.name)
+            first.write_text(
+                first.read_text(encoding="utf-8") + "\n目标正文变化\n",
+                encoding="utf-8",
+            )
+            ready, _, _ = select.select([process.stdout], [], [], 0.25)
+            self.assertEqual([], ready)
+
+            first.rename(self.root / "done" / first.name)
+            second.rename(self.root / "working" / second.name)
+            changed = json.loads(process.stdout.readline())
+            self.assertEqual("state-change", changed["event"])
+            self.assertEqual(
+                [
+                    {"from": "working", "task_id": first_id, "to": "done"},
+                    {"from": "todo", "task_id": second_id, "to": "working"},
+                ],
+                changed["changed"],
+            )
+            self.assertEqual("working", snapshot["tasks"][first_id])
+            self.assertEqual("done", changed["tasks"][first_id])
+
+            heartbeat = json.loads(process.stdout.readline())
+            self.assertEqual("heartbeat", heartbeat["event"])
+            self.assertEqual(changed["tasks"], heartbeat["tasks"])
+            self.assertNotIn(unrelated_id, heartbeat["tasks"])
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
+    def test_subscribe_rejects_invalid_group_membership_and_duplicate_members(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-events-group"
+        task_id, _ = self.make_todo("event-wrong-group")
+
+        wrong_group = self.run_command(
+            "subscribe", group_id, task_id, succeeds=False
+        )
+        self.assertIn("任务不属于指定任务组", wrong_group.stderr)
+        duplicated = self.run_command(
+            "subscribe", group_id, task_id, task_id, succeeds=False
+        )
+        self.assertIn("成员任务 ID 不得重复", duplicated.stderr)
 
     def test_duplicate_task_id_blocks_only_that_task(self) -> None:
         duplicated, todo_path = self.make_todo("dup")

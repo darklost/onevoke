@@ -93,9 +93,13 @@ Agent 会填完整任务卡, 再执行:
 kanban new feature login-retry 登录重试
 kanban pick 20260813-login-retry-task
 kanban start 20260813-login-retry-task
+kanban check 20260813-login-retry-task
+kanban subscribe 20260813-login-group 20260813-login-retry-task
 ```
 
 `kanban start` 支持 `auto`, `tmux`, `tmux-session`, `herdr`, `foreground`, `console` 六种 launcher. POSIX 默认 `auto`, 原生 Windows 默认 `console`; `auto` 在启动当时解析: 处于 herdr 则新建 herdr tab, 否则处于 tmux 则新建 tmux window, 两者都不在则失败且不领取, 不回落到 `tmux-session` 或 `foreground`. `console` 仅支持 Windows, 会在独立控制台窗口启动 Agent 并立即返回 PID. 它不创建或复用 tmux session, 也不提供 attach 或输出抓取能力; 需要在当前终端等待 Agent 时使用 `foreground`. `herdr` 仅支持 POSIX, 要求当前处于 herdr (`HERDR_ENV=1`), 会在当前 workspace 新建 tab, 等该 tab 的 shell 就绪后启动 Agent. Windows 拒绝 `auto` 和 `herdr`.
+
+`kanban check` 不带参数时检查完整看板; 传入一个或多个任务 ID 时只检查这些目标及其跨状态冲突. `kanban subscribe <task-group> <task-id>...` 校验成员归属后输出 JSON Lines: 每行含 `event`, `group_id` 和 `tasks`; 启动时输出当前 `snapshot`, 状态变化时输出带 `changed` (`task_id`/`from`/`to`) 的 `state-change`, 默认无变化 15 分钟后输出 `heartbeat`. 可用 `--refresh` 和 `--heartbeat` 调整间隔.
 
 大型任务由 Agent 拆成多张可并行执行的任务卡, 再按依赖启动.
 

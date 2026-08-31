@@ -40,12 +40,14 @@ from onevoke_fs import (
     create_private_directory_nofollow,
     create_directory_with_text_file_nofollow,
     directory_identity_nofollow,
+    directory_exists_nofollow,
     ensure_inherited_directory_path_nofollow,
     ensure_private_directory_nofollow,
     exclusive_file_lock,
     is_reparse_point,
     open_append_file_nofollow,
     read_regular_file_nofollow,
+    read_regular_file_if_exists_nofollow,
     rename_nofollow,
     write_text_atomic_nofollow,
 )
@@ -66,6 +68,7 @@ TRANSITIONS = {
     "trash": set(),
 }
 TASK_ID_RE = re.compile(r"^\d{8}-[a-z0-9]+(?:-[a-z0-9]+)*-task$")
+TASK_GROUP_RE = re.compile(r"^\d{8}-[a-z0-9]+(?:-[a-z0-9]+)*-group$")
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 TYPE_NAMES = {
     "feature": "Feature",
@@ -421,6 +424,103 @@ def scan(root: Path) -> Board:
                 reject(path, t(f"重复任务 ID: {entries[task_id].path} 与 {path}", f"Duplicate task ID: {entries[task_id].path} and {path}"), task_id)
                 continue
             entries[task_id] = Entry(task_id, state, path, document, kind)
+    return Board(entries, blocked, problems)
+
+
+def scan_targets(root: Path, values: Iterable[str]) -> Board:
+    """只探测明确任务 ID 的合法入口，并保留现有 no-follow 安全边界."""
+    ensure_layout(root)
+    task_ids = [normalize_task_id(value) for value in values]
+    if len(task_ids) != len(set(task_ids)):
+        raise KanbanError(t("指定任务 ID 不得重复", "Target task IDs must not be repeated"))
+
+    entries: Dict[str, Entry] = {}
+    blocked: Dict[str, str] = {}
+    problems: list[Problem] = []
+    for task_id in task_ids:
+        matches: list[Entry] = []
+        for state in STATES:
+            state_path = root / state
+            small_path = state_path / f"{task_id}.md"
+            large_path = state_path / task_id
+
+            if is_reparse_point(small_path):
+                problems.append(Problem(small_path, t(
+                    f"任务入口不得是符号链接/重解析点: {small_path}",
+                    f"Task entry must not be a symlink/reparse point: {small_path}",
+                )))
+            else:
+                try:
+                    small_exists = (
+                        read_regular_file_if_exists_nofollow(root, small_path)
+                        is not None
+                    )
+                except OSError:
+                    problems.append(Problem(small_path, t(
+                        f"任务入口类型错误: {small_path}",
+                        f"Task entry has the wrong type: {small_path}",
+                    )))
+                else:
+                    if small_exists:
+                        matches.append(Entry(task_id, state, small_path, small_path, "small"))
+
+            if is_reparse_point(large_path):
+                problems.append(Problem(large_path, t(
+                    f"任务入口不得是符号链接/重解析点: {large_path}",
+                    f"Task entry must not be a symlink/reparse point: {large_path}",
+                )))
+                continue
+            try:
+                large_exists = directory_exists_nofollow(root, large_path)
+            except OSError:
+                problems.append(Problem(large_path, t(
+                    f"任务入口类型错误: {large_path}",
+                    f"Task entry has the wrong type: {large_path}",
+                )))
+                continue
+            if not large_exists:
+                continue
+            document = large_path / "spec.md"
+            if is_reparse_point(document):
+                problems.append(Problem(large_path, t(
+                    f"大任务 spec.md 不得是符号链接/重解析点: {document}",
+                    f"Large-task spec.md must not be a symlink/reparse point: {document}",
+                )))
+                continue
+            try:
+                spec_exists = (
+                    read_regular_file_if_exists_nofollow(root, document) is not None
+                )
+            except OSError:
+                problems.append(Problem(large_path, t(
+                    f"大任务 spec.md 不是普通文件: {document}",
+                    f"Large-task spec.md is not a regular file: {document}",
+                )))
+                continue
+            if not spec_exists:
+                problems.append(Problem(large_path, t(
+                    f"大任务缺少 spec.md: {large_path}",
+                    f"Large task is missing spec.md: {large_path}",
+                )))
+                continue
+            matches.append(Entry(task_id, state, large_path, document, "large"))
+
+        task_problems = [problem for problem in problems if problem.path.name in (task_id, f"{task_id}.md")]
+        if len(matches) > 1:
+            message = t(
+                f"重复任务 ID: {' 与 '.join(str(entry.path) for entry in matches)}",
+                f"Duplicate task ID: {' and '.join(str(entry.path) for entry in matches)}",
+            )
+            problems.append(Problem(matches[-1].path, message))
+            blocked[task_id] = message
+        elif task_problems:
+            blocked[task_id] = task_problems[0].message
+        elif matches:
+            entries[task_id] = matches[0]
+        else:
+            message = t(f"任务不存在: {task_id}", f"Task does not exist: {task_id}")
+            problems.append(Problem(root, message))
+            blocked[task_id] = message
     return Board(entries, blocked, problems)
 
 
@@ -1758,8 +1858,8 @@ def command_tui(args: argparse.Namespace, root: Path) -> None:
         raise KanbanError(str(error)) from error
 
 
-def command_check(root: Path) -> int:
-    board = scan(root)
+def command_check(args: argparse.Namespace, root: Path) -> int:
+    board = scan_targets(root, args.tasks) if args.tasks else scan(root)
     for problem in board.problems:
         print(t(f"无效: {problem.message}", f"invalid: {problem.message}"), file=sys.stderr)
     if board.problems:
@@ -1772,6 +1872,71 @@ def command_check(root: Path) -> int:
         return 1
     print(t(f"通过: {len(board.entries)} 个任务", f"ok: {len(board.entries)} tasks"))
     return 0
+
+
+def group_state_snapshot(root: Path, task_ids: list[str]) -> tuple[Board, dict[str, str]]:
+    board = scan_targets(root, task_ids)
+    if board.problems:
+        raise KanbanError(board.problems[0].message)
+    return board, {task_id: board.entries[task_id].state for task_id in task_ids}
+
+
+def emit_group_event(payload: dict) -> None:
+    print(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
+
+
+def command_subscribe(args: argparse.Namespace, root: Path) -> None:
+    if not TASK_GROUP_RE.fullmatch(args.group):
+        raise KanbanError(t(
+            f"无效任务组 ID: {args.group}",
+            f"Invalid task group ID: {args.group}",
+        ))
+    if args.refresh <= 0:
+        raise KanbanError(t("扫描间隔必须大于 0", "Refresh interval must be greater than 0"))
+    if args.heartbeat <= 0:
+        raise KanbanError(t("心跳间隔必须大于 0", "Heartbeat interval must be greater than 0"))
+
+    task_ids = [normalize_task_id(value) for value in args.tasks]
+    if len(task_ids) != len(set(task_ids)):
+        raise KanbanError(t("成员任务 ID 不得重复", "Member task IDs must not be repeated"))
+    board, snapshot = group_state_snapshot(root, task_ids)
+    for task_id in task_ids:
+        actual_group = task_group_from(read_document(board.entries[task_id]))
+        if actual_group != args.group:
+            raise KanbanError(t(
+                f"任务不属于指定任务组: {task_id} (实际: {actual_group or 'N/A'})",
+                f"Task does not belong to the specified group: {task_id} (actual: {actual_group or 'N/A'})",
+            ))
+
+    emit_group_event({"event": "snapshot", "group_id": args.group, "tasks": snapshot})
+    last_event = time.monotonic()
+    try:
+        while True:
+            heartbeat_remaining = args.heartbeat - (time.monotonic() - last_event)
+            time.sleep(min(args.refresh, max(0.0, heartbeat_remaining)))
+            _, current = group_state_snapshot(root, task_ids)
+            changed = [
+                {"from": snapshot[task_id], "task_id": task_id, "to": current[task_id]}
+                for task_id in task_ids
+                if current[task_id] != snapshot[task_id]
+            ]
+            if changed:
+                emit_group_event({
+                    "changed": changed,
+                    "event": "state-change",
+                    "group_id": args.group,
+                    "tasks": current,
+                })
+                snapshot = current
+                last_event = time.monotonic()
+            elif time.monotonic() - last_event >= args.heartbeat:
+                emit_group_event({"event": "heartbeat", "group_id": args.group, "tasks": current})
+                last_event = time.monotonic()
+    except KeyboardInterrupt:
+        return
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1816,7 +1981,34 @@ def parser() -> argparse.ArgumentParser:
         "--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
 
-    commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
+    check_parser = commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
+    check_parser.add_argument(
+        "tasks",
+        nargs="*",
+        metavar=t("任务", "task"),
+        help=t("只检查指定任务 ID", "check only the specified task IDs"),
+    )
+
+    subscribe_parser = commands.add_parser(
+        "subscribe",
+        help=t("订阅任务组成员的状态事件", "subscribe to task-group member state events"),
+    )
+    subscribe_parser.add_argument("group", metavar=t("任务组", "task-group"))
+    subscribe_parser.add_argument("tasks", nargs="+", metavar=t("任务", "task"))
+    subscribe_parser.add_argument(
+        "--refresh",
+        type=float,
+        default=1.0,
+        metavar=t("秒", "seconds"),
+        help=t("状态扫描间隔秒数, 默认 1", "state scan interval in seconds; default 1"),
+    )
+    subscribe_parser.add_argument(
+        "--heartbeat",
+        type=float,
+        default=900.0,
+        metavar=t("秒", "seconds"),
+        help=t("无变化心跳间隔秒数, 默认 900", "idle heartbeat interval in seconds; default 900"),
+    )
 
     web_parser = commands.add_parser(
         "web",
@@ -1902,7 +2094,9 @@ def main() -> int:
         elif args.command == "start":
             command_start(args, root)
         elif args.command == "check":
-            return command_check(root)
+            return command_check(args, root)
+        elif args.command == "subscribe":
+            command_subscribe(args, root)
         elif args.command == "web":
             command_web(args, root)
         elif args.command == "tui":
