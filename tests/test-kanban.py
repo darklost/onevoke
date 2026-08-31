@@ -49,6 +49,7 @@ def install_env(home: Path, **extra: str) -> dict[str, str]:
         if key not in _LOCALE_VARS
     }
     env["HOME"] = str(home)
+    env["ONEVOKE_CONFIG"] = str(home / ".config" / "onevoke" / "config.json")
     env.update(extra)
     return env
 RULES_DIR = PROJECT_ROOT / "rules"
@@ -60,13 +61,20 @@ STATES = ("backlog", "todo", "working", "done", "archived", "trash")
 @unittest.skipUnless(os.name == "posix", "PTY, flock, tmux, and shell tests require POSIX")
 class KanbanCommandTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
-        self.language.start()
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         for state in STATES:
             (self.root / state).mkdir()
         self.home = self.root / "home"
+        self.config = self.home / ".config" / "onevoke" / "config.json"
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                "ONEVOKE_LANG": "zh",
+                "ONEVOKE_CONFIG": str(self.config),
+            },
+        )
+        self.environment.start()
         rules_dir = self.home / ".agents"
         rules_dir.mkdir(parents=True)
         (rules_dir / "KANBAN-RULES.md").write_bytes(RULES.read_bytes())
@@ -84,8 +92,8 @@ class KanbanCommandTest(unittest.TestCase):
             self.env.pop(name, None)
 
     def tearDown(self) -> None:
+        self.environment.stop()
         self.temp.cleanup()
-        self.language.stop()
 
     def run_command(
         self,

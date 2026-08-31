@@ -43,13 +43,19 @@ def load_onevoke_module():
 @unittest.skipUnless(os.name == "posix", "PTY welcome tests require POSIX")
 class OnevokeCommandTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
-        self.language.start()
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.home = self.root / "home"
         self.home.mkdir()
         self.config = self.home / ".config" / "onevoke" / "config.json"
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                "ONEVOKE_LANG": "zh",
+                "ONEVOKE_CONFIG": str(self.config),
+            },
+        )
+        self.environment.start()
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
         self.env = os.environ.copy()
@@ -66,8 +72,8 @@ class OnevokeCommandTest(unittest.TestCase):
             self.env.pop(name, None)
 
     def tearDown(self) -> None:
+        self.environment.stop()
         self.temp.cleanup()
-        self.language.stop()
 
     def fake_command(self, name: str, body: str | None = None) -> Path:
         command = self.fake_bin / name

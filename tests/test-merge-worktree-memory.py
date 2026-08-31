@@ -20,10 +20,13 @@ MERGER_COMMAND = (sys.executable, str(MERGER))
 _LOCALE_VARS = ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
 
 
-def merger_env(**extra: str) -> dict[str, str]:
+def merger_env(
+    config_path: Path, *, language: str | None = "en", **extra: str
+) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key not in _LOCALE_VARS}
-    env["ONEVOKE_LANG"] = "en"
-    env.setdefault("ONEVOKE_CONFIG", str(Path(tempfile.gettempdir()) / "onevoke-merge-test-missing-config.json"))
+    if language is not None:
+        env["ONEVOKE_LANG"] = language
+    env["ONEVOKE_CONFIG"] = str(config_path)
     env.update(extra)
     return env
 
@@ -130,6 +133,7 @@ class MergeTest(unittest.TestCase):
         self.target = self.root / "tgt"
         self.source_memory = self.source / ".memsearch" / "memory"
         self.target_memory = self.target / ".memsearch" / "memory"
+        self.missing_config = self.root / "missing-onevoke-config.json"
         self.source_memory.mkdir(parents=True)
         self.target_memory.mkdir(parents=True)
         subprocess.run(["git", "-C", str(self.source), "init", "-q"], check=True)
@@ -153,7 +157,7 @@ class MergeTest(unittest.TestCase):
                 "--target", str(self.target),
                 *args,
             ],
-            env=merger_env(**env_overrides),
+            env=merger_env(self.missing_config, **env_overrides),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -165,7 +169,7 @@ class MergeTest(unittest.TestCase):
     ) -> subprocess.CompletedProcess:
         return subprocess.run(
             [*MERGER_COMMAND, "--source", str(source), "--target", str(target)],
-            env=merger_env(),
+            env=merger_env(self.missing_config),
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -458,7 +462,7 @@ class MergeTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(other), "init", "-q"], check=True)
         result = subprocess.run(
             [*MERGER_COMMAND, "--source", str(other), "--target", str(self.target)],
-            env=merger_env(),
+            env=merger_env(self.missing_config),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -481,7 +485,7 @@ class MergeTest(unittest.TestCase):
     def test_source_equal_to_target_is_a_noop(self) -> None:
         result = subprocess.run(
             [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.source)],
-            env=merger_env(),
+            env=merger_env(self.missing_config),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -502,7 +506,7 @@ class MergeTest(unittest.TestCase):
 
         result = subprocess.run(
             [*MERGER_COMMAND, "--source", str(bare), "--target", str(fresh_target)],
-            env=merger_env(),
+            env=merger_env(self.missing_config),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -519,7 +523,7 @@ class MergeTest(unittest.TestCase):
 
         result = subprocess.run(
             [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.target)],
-            env=merger_env(),
+            env=merger_env(self.missing_config),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -533,7 +537,7 @@ class MergeTest(unittest.TestCase):
     def test_merge_messages_default_to_chinese_without_locale(self) -> None:
         result = subprocess.run(
             [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.target)],
-            env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
+            env=merger_env(self.missing_config, language=None),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -546,7 +550,7 @@ class MergeTest(unittest.TestCase):
     def test_merge_help_defaults_to_chinese_without_locale(self) -> None:
         result = subprocess.run(
             [*MERGER_COMMAND, "--help"],
-            env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
+            env=merger_env(self.missing_config, language=None),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -564,7 +568,7 @@ class MergeTest(unittest.TestCase):
         )
         result = subprocess.run(
             [*MERGER_COMMAND, "--lang", "en", "--source", str(self.source), "--target", str(self.target)],
-            env=merger_env(ONEVOKE_CONFIG=str(config_path)),
+            env=merger_env(config_path),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -576,7 +580,7 @@ class MergeTest(unittest.TestCase):
     def test_merge_invalid_argument_defaults_to_chinese_without_locale(self) -> None:
         result = subprocess.run(
             [*MERGER_COMMAND, "--nope"],
-            env={key: value for key, value in os.environ.items() if key not in _LOCALE_VARS},
+            env=merger_env(self.missing_config, language=None),
             text=True,
             encoding="utf-8",
             capture_output=True,
@@ -601,7 +605,7 @@ class MergeTest(unittest.TestCase):
 
         result = subprocess.run(
             [*MERGER_COMMAND, "--source", str(self.source), "--target", str(self.target)],
-            env=merger_env(),
+            env=merger_env(self.missing_config),
             text=True,
             encoding="utf-8",
             capture_output=True,
