@@ -15,7 +15,7 @@ if exist "%SystemRoot%\py.exe" (
   )
 )
 for %%D in ("%CD%\py.exe") do set "ONEVOKE_CURRENT_PY=%%~fD"
-for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" "$PATH:py.exe" 2^>nul') do (
+for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" py.exe 2^>nul') do (
   if /i not "%%~fP"=="%ONEVOKE_CURRENT_PY%" (
     "%%~fP" -3 -X utf8 -c "import sys; raise SystemExit(sys.version_info.major != 3)" >nul 2>nul
     if not errorlevel 1 (
@@ -25,7 +25,7 @@ for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" "$PATH:py.exe" 2^>nu
   )
 )
 for %%D in ("%CD%\python.exe") do set "ONEVOKE_CURRENT_PYTHON=%%~fD"
-for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" "$PATH:python.exe" 2^>nul') do (
+for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" python.exe 2^>nul') do (
   if /i not "%%~fP"=="%ONEVOKE_CURRENT_PYTHON%" (
     "%%~fP" -X utf8 -c "import sys; raise SystemExit(sys.version_info.major != 3)" >nul 2>nul
     if not errorlevel 1 (

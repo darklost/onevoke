@@ -622,6 +622,18 @@ class WindowsInstallerTest(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual(["safe argument"], json.loads(result.stdout))
 
+    def test_python_shims_query_where_path_without_invalid_path_prefix(self) -> None:
+        for shim_name in (
+            "onevoke.cmd",
+            "kanban.cmd",
+            "merge-worktree-memory.cmd",
+            "onevoke-review.cmd",
+        ):
+            content = (PROJECT_ROOT / "bin" / shim_name).read_text(encoding="utf-8")
+            with self.subTest(shim=shim_name):
+                self.assertNotIn("$PATH:", content)
+                self.assertIn('where.exe" python.exe', content)
+
 
 if __name__ == "__main__":
     unittest.main()
