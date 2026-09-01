@@ -1494,7 +1494,7 @@ def tmux_launch(
         "-d",
         "-P",
         "-F",
-        "#{window_id}",
+        "#{window_id}\t#{pane_id}",
         *(["-s", session] if create else ["-t", session + ":"]),
         "-c",
         cwd,
@@ -1649,6 +1649,9 @@ SESSION_FIELD = "会话"
 WINDOW_FIELD = "窗口"
 SESSION_REFERENCE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 HERDR_WINDOW_RE = re.compile(r"^herdr:([^:\s]+:[^:\s]+):([^:\s]+:[^:\s]+)$")
+TMUX_WINDOW_RE = re.compile(r"^(tmux|tmux-session):([^:\s]+):([^:\s]+):([^:\s]+)$")
+NOTIFY_DEFAULT_TIMEOUT = 120.0
+NOTIFY_POLL_INTERVAL = 0.1
 
 
 @dataclass(frozen=True)
@@ -1960,11 +1963,20 @@ def launch_agent(
             subcommand = "new-session" if create else "new-window"
             detail = result.stderr.strip() or f"exit {result.returncode}"
             raise KanbanError(t(f"tmux {subcommand} 失败: {detail}", f"tmux {subcommand} failed: {detail}"))
-        window = result.stdout.strip() or "unknown"
+        location = result.stdout.strip().split("\t")
+        if len(location) != 2 or not all(location):
+            raise KanbanError(t(
+                "tmux 启动失败: 未返回 window/pane id",
+                "tmux launch failed: window/pane id was not returned",
+            ))
+        window, pane = location
         if create:
             # 标记项目归属供后续复用校验; 写失败不影响本次启动, 未标记的 session 仍会被复用.
             tmux_capture(plan.tmux, "set-option", "-t", plan.session, PROJECT_SESSION_OPTION, str(plan.project))
-        return LaunchOutcome(window=window)
+        outcome = LaunchOutcome(window=window, pane=pane)
+        if location_callback is not None:
+            location_callback(outcome)
+        return outcome
     except (KanbanError, OSError, UnicodeError, ValueError) as error:
         close_error = herdr_close_tab(plan.herdr_bin, created_tab) if created_tab is not None else None
         raise LaunchFailure(error, close_error) from error
@@ -2070,7 +2082,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         original,
         agent_name,
         session,
-        "" if plan.launcher == "herdr" else plan.launcher,
+        "" if plan.launcher in ("herdr", "tmux", "tmux-session") else plan.launcher,
     )
     prompt = start_agent_prompt(entry.task_id, current_install_paths(), task_group_from(original))
     moved = move_entry(entry, root, "working")
@@ -2078,8 +2090,11 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     model_entry = config["models"]["kanban"][agent_name]
     agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind, session), prompt]
 
-    def record_herdr_location(outcome: LaunchOutcome) -> None:
-        location = f"herdr:{outcome.tab}:{outcome.pane}"
+    def record_terminal_location(outcome: LaunchOutcome) -> None:
+        if plan.launcher == "herdr":
+            location = f"herdr:{outcome.tab}:{outcome.pane}"
+        else:
+            location = f"{plan.launcher}:{plan.session}:{outcome.window}:{outcome.pane}"
         write_text_atomic(
             moved.document,
             window_metadata(updated, location),
@@ -2092,7 +2107,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             root,
             name,
             agent_argv,
-            record_herdr_location if plan.launcher == "herdr" else None,
+            record_terminal_location if plan.launcher in ("herdr", "tmux", "tmux-session") else None,
         )
     except LaunchFailure as failure:
         rollback_launch(root, moved, entry.state, failure, original)
@@ -2177,7 +2192,19 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
     report_launch(t("已唤醒", "resumed"), moved, session.agent, plan, outcome)
 
 
-def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None:
+def resolved_task_session(entry: Entry, text: str) -> AgentSession:
+    session = session_from(text)
+    if session.agent == "codex" and not session.reference:
+        return AgentSession("codex", find_codex_session(entry.task_id))
+    if not session.reference:
+        raise KanbanError(t(
+            f"任务卡的 {session.agent} 会话缺少 id",
+            f"Task session for {session.agent} has no id",
+        ))
+    return session
+
+
+def herdr_pane_info(herdr: str, pane_id: str) -> dict:
     result = herdr_capture(herdr, "pane", "get", pane_id)
     if result.returncode != 0:
         raise KanbanError(t(
@@ -2188,6 +2215,11 @@ def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None
     pane = data.get("pane")
     if not isinstance(pane, dict) or herdr_public_id(pane.get("pane_id")) != pane_id:
         raise KanbanError(t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}"))
+    return pane
+
+
+def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None:
+    pane = herdr_pane_info(herdr, pane_id)
     actual_agent = pane.get("agent")
     if actual_agent != session.agent:
         raise KanbanError(t(
@@ -2197,14 +2229,43 @@ def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None
     status = pane.get("agent_status")
     if status != "idle":
         raise KanbanError(t(f"pane 非 idle: {pane_id}: {status or 'N/A'}", f"pane is not idle: {pane_id}: {status or 'N/A'}"))
-    if session.reference:
-        agent_session = pane.get("agent_session")
-        actual_session = agent_session.get("value") if isinstance(agent_session, dict) else None
-        if actual_session != session.reference:
-            raise KanbanError(t(
-                f"会话不匹配: 卡片={session.reference}, pane={actual_session or 'N/A'}",
-                f"Session mismatch: task={session.reference}, pane={actual_session or 'N/A'}",
-            ))
+    agent_session = pane.get("agent_session")
+    actual_session = agent_session.get("value") if isinstance(agent_session, dict) else None
+    if actual_session != session.reference:
+        raise KanbanError(t(
+            f"会话不匹配: 卡片={session.reference}, pane={actual_session or 'N/A'}",
+            f"Session mismatch: task={session.reference}, pane={actual_session or 'N/A'}",
+        ))
+
+
+def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
+    result = tmux_capture(
+        tmux,
+        "display-message",
+        "-p",
+        "-t",
+        pane_id,
+        "#{pane_current_command}\t#{pane_in_mode}\t#{pane_dead}",
+    )
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"tmux pane 不存在: {pane_id}: {result.stderr.strip() or f'exit {result.returncode}'}",
+            f"tmux pane does not exist: {pane_id}: {result.stderr.strip() or f'exit {result.returncode}'}",
+        ))
+    fields = result.stdout.strip().split("\t")
+    if len(fields) != 3:
+        raise KanbanError(t("tmux pane 探查响应无效", "tmux pane probe returned an invalid response"))
+    command, in_mode, dead = fields
+    if dead != "0":
+        raise KanbanError(t(f"tmux pane 已退出: {pane_id}", f"tmux pane is dead: {pane_id}"))
+    if in_mode != "0":
+        raise KanbanError(t(f"tmux pane 处于 copy-mode: {pane_id}", f"tmux pane is in copy mode: {pane_id}"))
+    expected = Path(agent_executable_name(session.agent)).name
+    if command != expected:
+        raise KanbanError(t(
+            f"tmux 前台进程不匹配: 期望={expected}, 实际={command or 'N/A'}",
+            f"tmux foreground process mismatch: expected={expected}, actual={command or 'N/A'}",
+        ))
 
 
 def write_notify_message(message: str) -> Path:
@@ -2228,6 +2289,141 @@ def write_notify_message(message: str) -> Path:
         raise
 
 
+def remove_notify_message(path: Path) -> None:
+    try:
+        path.unlink()
+        path.parent.rmdir()
+    except OSError:
+        pass
+
+
+def notify_instruction(entry: Entry, message_path: Path, marker: str) -> str:
+    return t(
+        f"# onevoke-notify: 请读取 {message_path}, 先原样输出 {marker}, 再按看板规则处理任务 {entry.task_id}.",
+        f"# onevoke-notify: read {message_path}, first output {marker} exactly, then handle task {entry.task_id} under the kanban rules.",
+    )
+
+
+def herdr_direct_notify(herdr: str, pane_id: str, instruction: str, marker: str, timeout: float) -> None:
+    result = herdr_capture(herdr, "pane", "send-keys", pane_id, instruction, "Enter")
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"herdr 直投失败: {herdr_failure_detail(result)}",
+            f"herdr direct notification failed: {herdr_failure_detail(result)}",
+        ))
+    result = herdr_capture(
+        herdr,
+        "pane",
+        "wait-output",
+        pane_id,
+        "--regex",
+        rf"(?m)^{re.escape(marker)}$",
+        "--source",
+        "recent",
+        "--timeout",
+        str(max(1, int(timeout * 1000))),
+    )
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"herdr 回执超时: {marker}: {herdr_failure_detail(result)}",
+            f"herdr acknowledgement timed out: {marker}: {herdr_failure_detail(result)}",
+        ))
+
+
+def tmux_direct_notify(tmux: str, pane_id: str, instruction: str, marker: str, timeout: float) -> None:
+    for arguments in (
+        ("send-keys", "-t", pane_id, "-l", instruction),
+        ("send-keys", "-t", pane_id, "Enter"),
+    ):
+        result = tmux_capture(tmux, *arguments)
+        if result.returncode != 0:
+            raise KanbanError(t(
+                f"tmux 直投失败: {result.stderr.strip() or f'exit {result.returncode}'}",
+                f"tmux direct notification failed: {result.stderr.strip() or f'exit {result.returncode}'}",
+            ))
+    deadline = time.monotonic() + timeout
+    while True:
+        result = tmux_capture(tmux, "capture-pane", "-p", "-t", pane_id)
+        if result.returncode != 0:
+            raise KanbanError(t(
+                f"tmux 读取回执失败: {result.stderr.strip() or f'exit {result.returncode}'}",
+                f"tmux acknowledgement read failed: {result.stderr.strip() or f'exit {result.returncode}'}",
+            ))
+        if any(line.strip() == marker for line in result.stdout.splitlines()):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise KanbanError(t(f"tmux 回执超时: {marker}", f"tmux acknowledgement timed out: {marker}"))
+        time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
+
+
+def notify_resume_prompt(task_id: str, message: str, paths: InstallPaths) -> str:
+    prompt = resume_agent_prompt(task_id, message, paths)
+    return prompt.replace(
+        "卡片已迁回 working.",
+        "notify 将在确认本会话存活后把卡片迁回 working.",
+        1,
+    )
+
+
+def validate_resumed_agent(plan: LaunchPlan, outcome: LaunchOutcome, session: AgentSession, timeout: float) -> None:
+    if plan.launcher in ("foreground", "console"):
+        time.sleep(min(0.25, timeout))
+        if outcome.process.poll() is not None:
+            raise KanbanError(t(
+                f"恢复 Agent 秒退: exit {outcome.process.returncode}",
+                f"Resumed Agent exited immediately: exit {outcome.process.returncode}",
+            ))
+        return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if plan.launcher == "herdr":
+                pane = herdr_pane_info(plan.herdr_bin, outcome.pane)
+                agent_session = pane.get("agent_session")
+                reference = agent_session.get("value") if isinstance(agent_session, dict) else None
+                if (
+                    pane.get("agent") == session.agent
+                    and reference == session.reference
+                    and pane.get("agent_status") not in (None, "", "unknown")
+                ):
+                    return
+            else:
+                tmux_notify_target(plan.tmux, outcome.pane, session)
+                return
+        except (KanbanError, OSError, UnicodeError):
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise KanbanError(t("恢复 Agent 存活校验超时", "Resumed Agent liveness check timed out"))
+        time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
+
+
+def cleanup_failed_resume(plan: LaunchPlan, outcome: LaunchOutcome) -> None:
+    if plan.launcher == "herdr" and outcome.tab:
+        herdr_close_tab(plan.herdr_bin, outcome.tab)
+    elif plan.launcher in ("tmux", "tmux-session") and outcome.window:
+        tmux_capture(plan.tmux, "kill-window", "-t", outcome.window)
+    elif outcome.process is not None and outcome.process.poll() is None:
+        outcome.process.terminate()
+
+
+def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout: float) -> None:
+    session = resolved_task_session(entry, text)
+    config = effective_config(load_config())
+    plan = prepare_launch(config["launcher"], root.parent.resolve(), "notify")
+    agent = resolve_agent_binary(session.agent)
+    model_entry = config["models"]["kanban"][session.agent]
+    prompt = notify_resume_prompt(entry.task_id, message, current_install_paths())
+    agent_argv = [*agent_command(session.agent, agent, model_entry, entry.kind, session, resume=True), prompt]
+    outcome = launch_agent(plan, root, window_name(entry, text), agent_argv)
+    try:
+        validate_resumed_agent(plan, outcome, session, timeout)
+    except BaseException:
+        cleanup_failed_resume(plan, outcome)
+        raise
+
+
 def command_notify(args: argparse.Namespace, root: Path) -> None:
     entry = locate(load_board(root), args.task)
     if entry.state not in RESUME_STATES:
@@ -2235,55 +2431,61 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
             f"只能直投 {' 或 '.join(RESUME_STATES)} 中的任务; {entry.task_id} 在 {entry.state}",
             f"Only tasks in {' or '.join(RESUME_STATES)} can be notified; {entry.task_id} is in {entry.state}",
         ))
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        raise KanbanError(t("notify 超时必须是大于 0 的有限秒数", "notify timeout must be a finite number greater than 0"))
     message = read_task_message(args, "notify")
     text = read_document(entry)
     window = metadata_from(text, WINDOW_FIELD)
-    if not window:
-        raise KanbanError(t(
-            f"任务卡没有 `{WINDOW_FIELD}` 记录, 无直投通道",
-            f"Task has no `{WINDOW_FIELD}` metadata; no direct notification channel is available",
-        ))
-    match = HERDR_WINDOW_RE.fullmatch(window)
-    if match is None:
-        launcher = window.split(":", 1)[0]
-        if launcher == "herdr":
-            raise KanbanError(t(
-                f"任务卡的 `{WINDOW_FIELD}` 记录无效: {window}",
-                f"Task `{WINDOW_FIELD}` metadata is invalid: {window}",
-            ))
-        raise KanbanError(t(
-            f"launcher 不支持直投: {launcher}",
-            f"Launcher does not support direct notification: {launcher}",
-        ))
-    _tab_id, pane_id = match.groups()
-    if os.name == "nt":
-        raise KanbanError(t(
-            "launcher 不支持直投: herdr (Windows)",
-            "Launcher does not support direct notification: herdr (Windows)",
-        ))
-    session = session_from(text)
-    herdr = shutil.which("herdr")
-    if not herdr:
-        raise KanbanError(t("herdr 不在 PATH, 无法直投", "herdr is not in PATH; cannot notify directly"))
-    herdr_notify_target(herdr, pane_id, session)
-    message_path = write_notify_message(message)
-    instruction = t(
-        f"继续 Kanban 任务 {entry.task_id}. 请读取消息文件 {message_path} 并按看板规则处理.",
-        f"Continue Kanban task {entry.task_id}. Read message file {message_path} and handle it according to the kanban rules.",
-    )
+    direct_error = t("任务卡没有 `窗口` 记录", "Task has no `窗口` metadata")
+    direct_channel = ""
+    message_path = None
     try:
-        herdr_pane_run(herdr, pane_id, instruction)
-    except BaseException:
+        session = resolved_task_session(entry, text)
+        marker = f"ONEVOKE-NOTIFY-ACK:{uuid.uuid4()}"
+        message_path = write_notify_message(message)
+        instruction = notify_instruction(entry, message_path, marker)
+        herdr_match = HERDR_WINDOW_RE.fullmatch(window)
+        tmux_match = TMUX_WINDOW_RE.fullmatch(window)
+        if herdr_match:
+            _tab_id, pane_id = herdr_match.groups()
+            herdr = shutil.which("herdr")
+            if not herdr:
+                raise KanbanError(t("herdr 不在 PATH", "herdr is not in PATH"))
+            herdr_notify_target(herdr, pane_id, session)
+            herdr_direct_notify(herdr, pane_id, instruction, marker, args.timeout)
+            direct_channel = "herdr-direct"
+        elif tmux_match:
+            _launcher, _tmux_session, _window_id, pane_id = tmux_match.groups()
+            tmux = shutil.which("tmux")
+            if not tmux:
+                raise KanbanError(t("tmux 不在 PATH", "tmux is not in PATH"))
+            tmux_notify_target(tmux, pane_id, session)
+            tmux_direct_notify(tmux, pane_id, instruction, marker, args.timeout)
+            direct_channel = "tmux-direct"
+        else:
+            raise KanbanError(t(f"无可用直投地址: {window or 'N/A'}", f"No direct notification address: {window or 'N/A'}"))
+    except (KanbanError, OSError, UnicodeError, ValueError) as error:
+        direct_error = str(error)
+        if message_path is not None:
+            remove_notify_message(message_path)
         try:
-            message_path.unlink()
-            message_path.parent.rmdir()
-        except OSError:
-            pass
-        raise
+            notify_via_resume(entry, text, message, root, args.timeout)
+        except (KanbanError, OSError, UnicodeError, ValueError, LaunchFailure) as resume_error:
+            raise KanbanError(t(
+                f"notify 失败: 直投={direct_error}; 恢复={resume_error}",
+                f"notify failed: direct={direct_error}; resume={resume_error}",
+            )) from resume_error
+        channel = "resume"
+    else:
+        channel = direct_channel
     moved = move_entry(entry, root, "working") if entry.state != "working" else entry
+    if channel == "resume":
+        output_path = "N/A"
+    else:
+        output_path = str(message_path)
     print(t(
-        f"已直投: {moved.task_id}\tAgent={session.agent}\tpane={pane_id}\t消息文件={message_path}",
-        f"notified: {moved.task_id}\tagent={session.agent}\tpane={pane_id}\tmessage-file={message_path}",
+        f"已通知: {moved.task_id}\t通道={channel}\t消息文件={output_path}",
+        f"notified: {moved.task_id}\tchannel={channel}\tmessage-file={output_path}",
     ))
 
 
@@ -2708,11 +2910,18 @@ def parser() -> argparse.ArgumentParser:
 
     notify_parser = commands.add_parser(
         "notify",
-        help=t("向仍存活的 herdr 执行 Agent 直投事项", "notify a live herdr execution Agent directly"),
+        help=t("向原执行 Agent 投递事项并自动选择直投或恢复", "notify the original execution Agent using direct delivery or automatic resume"),
     )
     notify_parser.add_argument("task", metavar=t("任务", "task"))
     notify_parser.add_argument("--message", help=t("交给执行 Agent 处理的事项", "the items for the execution Agent to handle"))
     notify_parser.add_argument("--message-file", help=t("从 UTF-8 文件读取事项", "read the items from a UTF-8 file"))
+    notify_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=NOTIFY_DEFAULT_TIMEOUT,
+        metavar=t("秒", "seconds"),
+        help=t("等待直投回执与恢复存活的超时秒数, 默认 120", "seconds to wait for direct acknowledgement and resumed-agent liveness; default 120"),
+    )
 
     check_parser = commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
     check_parser.add_argument(
