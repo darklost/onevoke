@@ -20,7 +20,7 @@ from onevoke_config import ConfigError, install_paths
 from onevoke_fs import tighten_private_file_permissions
 
 
-ACTIVE_STATES = ("backlog", "todo", "working", "done")
+ACTIVE_STATES = ("backlog", "todo", "working", "review", "done")
 ALL_STATES = ACTIVE_STATES + ("archived", "trash")
 CARD_HEIGHT = 4
 DEFAULT_COLUMN_WIDTH = 40
@@ -59,6 +59,7 @@ THEME_PALETTES = {
         "backlog": curses.COLOR_CYAN,
         "todo": curses.COLOR_YELLOW,
         "working": curses.COLOR_BLUE,
+        "review": curses.COLOR_MAGENTA,
         "done": curses.COLOR_GREEN,
         "archived": curses.COLOR_MAGENTA,
         "trash": curses.COLOR_RED,
@@ -70,6 +71,7 @@ THEME_PALETTES = {
         "backlog": curses.COLOR_CYAN,
         "todo": curses.COLOR_YELLOW,
         "working": curses.COLOR_BLUE,
+        "review": curses.COLOR_MAGENTA,
         "done": curses.COLOR_GREEN,
         "archived": curses.COLOR_MAGENTA,
         "trash": curses.COLOR_RED,
@@ -85,6 +87,8 @@ COLOR_NAMES = (
     "done",
     "archived",
     "trash",
+    # review 排在既有状态之后: 颜色对不足 (COLOR_PAIRS=8) 时先保住原有六栏配色.
+    "review",
     "accent",
 )
 

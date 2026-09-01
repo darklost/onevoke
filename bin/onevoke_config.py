@@ -56,6 +56,8 @@ PROJECT_INSTALL_DIRNAME = ".onevoke"
 PROJECT_GIT_EXCLUDE_PATTERN = "/.onevoke/"
 InstallMode = Literal["global", "project"]
 EXECUTION_AGENTS = ("codex", "claude", "grok", "cursor")
+# 任务卡规模: 大任务是含 spec.md 的目录, 小任务是单文件; kanban start 按规模选 Agent 和档位.
+TASK_SCALES = ("large", "small")
 REVIEW_AGENTS = ("codex", "claude", "grok", "cursor")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 REVIEW_STAGE_MODES = ("auto", "skip", "required")
@@ -527,6 +529,7 @@ def default_config() -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "welcome_complete": False,
         "kanban_agent": "codex",
+        "kanban_agents": {scale: "codex" for scale in TASK_SCALES},
         "launcher": "console" if os.name == "nt" else "auto",
         "reviewers": {role: "codex" for role in REVIEW_ROLES},
         "review_stages": default_review_stages(),
@@ -546,6 +549,38 @@ def _validate_choice(value: object, choices: tuple[str, ...], name: str) -> str:
             )
         )
     return value
+
+
+def _validate_kanban_agents(raw: object, default_agent: str) -> dict[str, str]:
+    """校验按规模选 Agent 的 kanban_agents 段; 缺失的规模回落到 kanban_agent."""
+    if not isinstance(raw, dict):
+        raise ConfigError(language_text(
+            "kanban_agents 必须是 JSON object",
+            "kanban_agents must be a JSON object",
+        ))
+    unknown = set(raw) - set(TASK_SCALES)
+    if unknown:
+        raise ConfigError(language_text(
+            f"kanban_agents 含未知规模: {', '.join(sorted(unknown))}; 只允许 {', '.join(TASK_SCALES)}",
+            f"kanban_agents has unknown scales: {', '.join(sorted(unknown))}; only {', '.join(TASK_SCALES)} are allowed",
+        ))
+    agents = {scale: default_agent for scale in TASK_SCALES}
+    for scale in TASK_SCALES:
+        if scale in raw:
+            agents[scale] = _validate_choice(raw[scale], EXECUTION_AGENTS, f"kanban_agents.{scale}")
+    return agents
+
+
+def kanban_agent_for(config: dict[str, Any], kind: str) -> str:
+    """kanban start 按任务规模选执行 Agent; 已校验配置总含两档."""
+    if kind not in TASK_SCALES:
+        raise ConfigError(language_text(f"未知任务规模: {kind!r}", f"unknown task scale: {kind!r}"))
+    return config["kanban_agents"][kind]
+
+
+def execution_agents_in_use(config: dict[str, Any]) -> list[str]:
+    """按大, 小任务顺序去重列出配置实际会启动的执行 Agent."""
+    return list(dict.fromkeys(config["kanban_agents"][scale] for scale in TASK_SCALES))
 
 
 def _validate_review_stages(raw: object) -> dict[str, str]:
@@ -638,6 +673,11 @@ def validate_config(raw: object) -> dict[str, Any]:
     if not isinstance(welcome_complete, bool):
         raise ConfigError(language_text("welcome_complete 必须是 boolean", "welcome_complete must be a boolean"))
     kanban_agent = _validate_choice(raw.get("kanban_agent"), EXECUTION_AGENTS, "kanban_agent")
+    kanban_agents = (
+        _validate_kanban_agents(raw["kanban_agents"], kanban_agent)
+        if "kanban_agents" in raw
+        else {scale: kanban_agent for scale in TASK_SCALES}
+    )
     launcher = _validate_choice(raw.get("launcher"), LAUNCHERS, "launcher")
 
     reviewers = raw.get("reviewers")
@@ -666,6 +706,7 @@ def validate_config(raw: object) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "welcome_complete": welcome_complete,
         "kanban_agent": kanban_agent,
+        "kanban_agents": kanban_agents,
         "launcher": launcher,
         "reviewers": validated_reviewers,
         "review_stages": review_stages,

@@ -43,13 +43,19 @@ def load_onevoke_module():
 @unittest.skipUnless(os.name == "posix", "PTY welcome tests require POSIX")
 class OnevokeCommandTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
-        self.language.start()
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.home = self.root / "home"
         self.home.mkdir()
         self.config = self.home / ".config" / "onevoke" / "config.json"
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                "ONEVOKE_LANG": "zh",
+                "ONEVOKE_CONFIG": str(self.config),
+            },
+        )
+        self.environment.start()
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
         self.env = os.environ.copy()
@@ -66,8 +72,8 @@ class OnevokeCommandTest(unittest.TestCase):
             self.env.pop(name, None)
 
     def tearDown(self) -> None:
+        self.environment.stop()
         self.temp.cleanup()
-        self.language.stop()
 
     def fake_command(self, name: str, body: str | None = None) -> Path:
         command = self.fake_bin / name
@@ -277,10 +283,11 @@ class OnevokeCommandTest(unittest.TestCase):
 
     def test_welcome_colors_question_titles_and_honors_no_color(self) -> None:
         self.install_fake_environment(tmux=True)
-        answers = "1\n\n8\n\n\n"
+        answers = "1\n\n\n8\n\n\n"
         prompts = (
             "当前配置",
-            "kanban 默认用哪个 Agent 执行任务?",
+            "大任务 (含 spec.md 的目录卡) 用哪个 Agent 执行?",
+            "小任务 (单文件卡) 用哪个 Agent 执行?",
             "使用 MemSearch?",
         )
 
@@ -372,6 +379,168 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertFalse(bash_log.exists())
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_welcome_configures_execution_agents_by_scale(self) -> None:
+        self.install_fake_environment(tmux=True)
+
+        # 菜单 1 先问大任务 Agent (Codex), 再问小任务 Agent (Grok), 然后回车保存.
+        returncode, output = self.run_on_tty("1\n1\n3\n\n", "welcome")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("大任务 (含 spec.md 的目录卡) 用哪个 Agent 执行?", output)
+        self.assertIn("小任务 (单文件卡) 用哪个 Agent 执行?", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual({"large": "codex", "small": "grok"}, config["kanban_agents"])
+        self.assertEqual("codex", config["kanban_agent"])
+        self.assertIn("执行 Agent: 大 codex / 小 grok", output)
+        self.assertIn("kanban codex:", output)
+        self.assertIn("kanban grok:", output)
+
+        shown = self.run_command("config")
+        self.assertEqual(0, shown.returncode, shown.stderr)
+        self.assertIn("看板 Agent: 大 codex / 小 grok", shown.stdout)
+        self.assertIn("看板模型 codex:", shown.stdout)
+        self.assertIn("看板模型 grok:", shown.stdout)
+
+    def test_welcome_models_menu_covers_both_execution_agents(self) -> None:
+        self.install_fake_environment(tmux=True)
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "kanban_agents": {"large": "codex", "small": "claude"},
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+        # 字段顺序: Codex 模型, Codex 大档, Codex 小档, Claude 模型, Claude 大档, Claude 小档, 审核 Codex 模型.
+        returncode, output = self.run_on_tty("7\n6\nlow\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("kanban Claude 小任务推理档位", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("low", config["models"]["kanban"]["claude"]["small_effort"])
+        self.assertEqual("medium", config["models"]["kanban"]["codex"]["small_effort"])
+        self.assertEqual({"large": "codex", "small": "claude"}, config["kanban_agents"])
+
+    def test_doctor_warns_when_the_small_task_agent_is_unavailable(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.fake_command("grok", "#!/bin/sh\nexit 1\n")
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "kanban_agents": {"large": "codex", "small": "grok"},
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+        result = self.run_command("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("配置的执行 Agent 不可用: grok", result.stderr)
+        self.assertNotIn("配置的执行 Agent 不可用: codex", result.stderr)
+
+    def write_scaled_config(self, large: str, small: str, *, memsearch: bool = False) -> None:
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": large,
+            "kanban_agents": {"large": large, "small": small},
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": memsearch},
+        }
+        self.config.parent.mkdir(parents=True, exist_ok=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+    def test_welcome_memsearch_covers_every_supported_execution_agent(self) -> None:
+        self.install_fake_environment(tmux=True)
+        git_log, bash_log = self.install_fake_memsearch_tools()
+        self.write_scaled_config("codex", "claude")
+
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        # Codex 走上游安装脚本, Claude 给出插件安装提示; 两个在用 Agent 都要覆盖.
+        self.assertIn("MemSearch 安装命令已执行", output)
+        self.assertIn("/plugin install memsearch", output)
+        self.assertTrue(git_log.exists())
+        self.assertTrue(bash_log.exists())
+        self.assertNotIn("不覆盖执行 Agent", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_welcome_memsearch_warns_about_uncovered_execution_agents(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.install_fake_memsearch_tools()
+        self.write_scaled_config("codex", "grok")
+
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 不覆盖执行 Agent Grok", output)
+        self.assertIn("MemSearch 安装命令已执行", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertTrue(config["memsearch"]["enabled"])
+
+        # 全部在用 Agent 都不支持时拒绝启用.
+        self.write_scaled_config("grok", "grok")
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
+        self.assertEqual(0, returncode, output)
+        self.assertIn("当前执行 Agent 不支持 MemSearch 集成", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_reconciles_memsearch_when_agents_change_after_enablement(self) -> None:
+        self.install_fake_environment(tmux=True)
+        git_log, bash_log = self.install_fake_memsearch_tools()
+        self.write_scaled_config("codex", "codex", memsearch=True)
+
+        # 已启用 MemSearch 且只有 Codex; 把小任务 Agent 改成 Claude 后直接保存.
+        returncode, output = self.run_on_tty("1\n1\n2\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("/plugin install memsearch", output)
+        # Codex 已覆盖, 不重复克隆安装.
+        self.assertFalse(git_log.exists())
+        self.assertFalse(bash_log.exists())
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual({"large": "codex", "small": "claude"}, config["kanban_agents"])
+        self.assertTrue(config["memsearch"]["enabled"])
+
+        # 已启用时改成不受支持的 Grok: 保存前告警, 仍保持启用 (Codex 仍被覆盖).
+        returncode, output = self.run_on_tty("1\n1\n3\n\n", "welcome", "--reset")
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 不覆盖执行 Agent Grok", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertTrue(config["memsearch"]["enabled"])
+
+        # 已启用但菜单 8 再次确认时, 同样对账: Grok 告警, Codex 不重装.
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 不覆盖执行 Agent Grok", output)
+        self.assertFalse(git_log.exists())
+
+    def test_welcome_disables_memsearch_when_no_configured_agent_is_supported(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.install_fake_memsearch_tools()
+        self.write_scaled_config("codex", "codex", memsearch=True)
+
+        # 已启用 MemSearch, 把大小任务 Agent 都改成 Grok 后直接保存.
+        returncode, output = self.run_on_tty("1\n3\n3\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("当前执行 Agent 不支持 MemSearch 集成", output)
+        self.assertIn("MemSearch 已关闭", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
 
     def test_doctor_fails_without_any_agent_or_reviewer(self) -> None:
         for name in (
@@ -636,7 +805,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
         # 即使进入当前不可用的 Agent、Reviewer 和 launcher, 空回车也保留当前值.
         returncode, output = self.run_on_tty(
-            "1\n\n2\n\n6\n\n\n", "welcome", "--reset"
+            "1\n\n\n2\n\n6\n\n\n", "welcome", "--reset"
         )
 
         self.assertEqual(0, returncode, output)

@@ -15,6 +15,7 @@ from typing import Any, NoReturn
 from onevoke_config import (
     ARGPARSE_ZH,
     EXECUTION_AGENTS,
+    TASK_SCALES,
     LANGUAGES,
     REVIEW_AGENTS,
     REVIEW_ROLES,
@@ -30,6 +31,7 @@ from onevoke_config import (
     configured_language,
     default_config,
     effective_config,
+    execution_agents_in_use,
     install_paths,
     language_text,
     load_config,
@@ -53,6 +55,8 @@ COMMANDS = (
     MERGE_ENTRYPOINT,
 )
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok", "cursor": "Cursor"}
+# 目前只有 Codex 与 Claude 有 MemSearch 集成.
+MEMSEARCH_AGENTS = ("codex", "claude")
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
 REVIEW_STAGE_LABELS = {
     "auto": ("按档案自动", "follow audit profile"),
@@ -492,16 +496,16 @@ def validate_configured_resources(
     """对生效配置逐项核对执行 Agent、Reviewer、审核入口和 launcher."""
     healthy = True
     effective = effective_config(config)
-    selected_agent = effective["kanban_agent"]
-    selected_state = agents.get(selected_agent, {})
-    if not agent_usable(selected_state):
-        healthy = False
-        warning(
-            t(
-                f"配置的执行 Agent 不可用: {selected_agent}; 请安装后重新运行 onevoke welcome --reset.",
-                f"Configured execution Agent is unavailable: {selected_agent}; install it, then run onevoke welcome --reset.",
+    for selected_agent in execution_agents_in_use(effective):
+        selected_state = agents.get(selected_agent, {})
+        if not agent_usable(selected_state):
+            healthy = False
+            warning(
+                t(
+                    f"配置的执行 Agent 不可用: {selected_agent}; 请安装后重新运行 onevoke welcome --reset.",
+                    f"Configured execution Agent is unavailable: {selected_agent}; install it, then run onevoke welcome --reset.",
+                )
             )
-        )
 
     review_command = review_gate()
     if not review_command and os.name == "nt" and current_paths().mode != "project":
@@ -770,6 +774,14 @@ def edit_review_stages(config: dict[str, Any]) -> None:
     )
 
 
+def format_kanban_agents_summary(config: dict[str, Any]) -> str:
+    """大小任务同一 Agent 时只显示一次, 否则按规模分别列出."""
+    agents = config["kanban_agents"]
+    if len(set(agents.values())) == 1:
+        return agents["large"]
+    return f"{t('大', 'large')} {agents['large']} / {t('小', 'small')} {agents['small']}"
+
+
 def format_kanban_model_summary(agent: str, entry: dict[str, str]) -> str:
     if agent == "cursor":
         large = entry["large_model"] or t("(CLI 默认)", "(CLI default)")
@@ -799,48 +811,62 @@ def ask_text(prompt: str, default: str) -> str:
     return answer if answer else default
 
 
+def edit_execution_agents(config: dict[str, Any], execution_choices: list[tuple[str, str]]) -> None:
+    """先问大任务 Agent 再问小任务 Agent; kanban_agent 保留为大任务 Agent 供旧字段读取."""
+    large = ask_choice(
+        t("大任务 (含 spec.md 的目录卡) 用哪个 Agent 执行?", "Which Agent should execute large tasks (directory cards with spec.md)?"),
+        choices_with_current(execution_choices, config["kanban_agents"]["large"]),
+        config["kanban_agents"]["large"],
+    )
+    small = ask_choice(
+        t("小任务 (单文件卡) 用哪个 Agent 执行?", "Which Agent should execute small tasks (single-file cards)?"),
+        choices_with_current(execution_choices, config["kanban_agents"]["small"]),
+        config["kanban_agents"]["small"],
+    )
+    config["kanban_agents"] = {"large": large, "small": small}
+    config["kanban_agent"] = large
+
+
 def edit_models(config: dict[str, Any]) -> None:
     """只列出当前配置实际用到的 Agent, 并允许精确修改一个字段."""
-    kanban_agent = config["kanban_agent"]
-    kanban_entry = config["models"]["kanban"][kanban_agent]
     fields: list[tuple[str, dict[str, str], str, str]] = []
-    if kanban_agent == "cursor":
-        fields.extend(
-            (
+    for kanban_agent in execution_agents_in_use(config):
+        kanban_entry = config["models"]["kanban"][kanban_agent]
+        if kanban_agent == "cursor":
+            fields.extend(
                 (
-                    t("kanban Cursor 大任务模型", "kanban Cursor large-task model"),
-                    kanban_entry,
-                    "large_model",
-                    t("大任务完整模型 id?", "Full model id for large tasks?"),
-                ),
-                (
-                    t("kanban Cursor 小任务模型", "kanban Cursor small-task model"),
-                    kanban_entry,
-                    "small_model",
-                    t("小任务完整模型 id?", "Full model id for small tasks?"),
-                ),
-            )
-        )
-    else:
-        fields.extend(
-            (
-                (
-                    t(
-                        f"kanban {AGENT_LABELS[kanban_agent]} 模型",
-                        f"kanban {AGENT_LABELS[kanban_agent]} model",
+                    (
+                        t("kanban Cursor 大任务模型", "kanban Cursor large-task model"),
+                        kanban_entry,
+                        "large_model",
+                        t("大任务完整模型 id?", "Full model id for large tasks?"),
                     ),
+                    (
+                        t("kanban Cursor 小任务模型", "kanban Cursor small-task model"),
+                        kanban_entry,
+                        "small_model",
+                        t("小任务完整模型 id?", "Full model id for small tasks?"),
+                    ),
+                )
+            )
+            continue
+        label = AGENT_LABELS[kanban_agent]
+        fields.extend(
+            (
+                (
+                    t(f"kanban {label} 模型", f"kanban {label} model"),
                     kanban_entry,
                     "model",
                     t("任务模型?", "Task model?"),
                 ),
                 (
-                    t("kanban 大任务推理档位", "kanban large-task reasoning effort"),
+                    t(f"kanban {label} 大任务推理档位", f"kanban {label} large-task reasoning effort"),
                     kanban_entry,
                     "large_effort",
                     t("大任务推理档位?", "Reasoning effort for large tasks?"),
                 ),
                 (
-                    t("kanban 小任务推理档位", "kanban small-task reasoning effort"),
+                    t(f"kanban {label} 小任务推理档位", f"kanban {label} small-task reasoning effort"),
                     kanban_entry,
                     "small_effort",
                     t("小任务推理档位?", "Reasoning effort for small tasks?"),
@@ -925,6 +951,32 @@ def install_memsearch_for(agent: str) -> None:
         success(t("MemSearch 安装命令已执行.", "The MemSearch installation commands completed."))
     except (OSError, subprocess.CalledProcessError) as error:
         warning(t(f"MemSearch 安装命令无法执行: {error}", f"Could not run the MemSearch installation commands: {error}"))
+
+
+def reconcile_memsearch(config: dict[str, Any], covered: set[str]) -> bool:
+    """按当前在用执行 Agent 对账 MemSearch 覆盖面.
+
+    受支持且尚未覆盖的 Agent 执行安装或给出提示并记入 covered; 不受支持的逐个告警;
+    没有任何受支持 Agent 时返回 False, 调用方据此拒绝启用. 菜单确认与保存前都调用,
+    因此已启用后再改执行 Agent 也会补装, 不依赖 false -> true 的一次性转换.
+    """
+    in_use = execution_agents_in_use(config)
+    memory_agents = [agent for agent in in_use if agent in MEMSEARCH_AGENTS]
+    if not memory_agents:
+        warning(t("当前执行 Agent 不支持 MemSearch 集成.", "The current execution Agent does not support MemSearch integration."))
+        return False
+    for agent in in_use:
+        if agent not in MEMSEARCH_AGENTS:
+            warning(t(
+                f"MemSearch 不覆盖执行 Agent {AGENT_LABELS[agent]}: 该 Agent 没有集成, 由它执行的任务不会写入记忆.",
+                f"MemSearch does not cover execution Agent {AGENT_LABELS[agent]}: it has no integration, so tasks it runs will not be recorded.",
+            ))
+    for agent in memory_agents:
+        if agent in covered:
+            continue
+        install_memsearch_for(agent)
+        covered.add(agent)
+    return True
 
 
 def install_tmux() -> bool:
@@ -1030,17 +1082,17 @@ def edit_launcher(config: dict[str, Any]) -> None:
 
 def print_welcome_menu(config: dict[str, Any]) -> None:
     print(f"\n{color('1;36', t('当前配置', 'Current configuration'))}", file=sys.stderr)
-    print(f"  1. {t('执行 Agent', 'Execution Agent')}: {config['kanban_agent']}", file=sys.stderr)
+    print(f"  1. {t('执行 Agent', 'Execution Agent')}: {format_kanban_agents_summary(config)}", file=sys.stderr)
     for index, role in enumerate(REVIEW_ROLES, 2):
         print(f"  {index}. {role} Reviewer: {config['reviewers'][role]}", file=sys.stderr)
     print(f"  6. {t('启动方式', 'Launcher')}: {config['launcher']}", file=sys.stderr)
     print(f"  7. {t('模型与推理档位', 'Models and reasoning efforts')}", file=sys.stderr)
-    kanban_agent = config["kanban_agent"]
-    kanban_entry = config["models"]["kanban"][kanban_agent]
-    print(
-        f"     kanban {kanban_agent}: {format_kanban_model_summary(kanban_agent, kanban_entry)}",
-        file=sys.stderr,
-    )
+    for kanban_agent in execution_agents_in_use(config):
+        kanban_entry = config["models"]["kanban"][kanban_agent]
+        print(
+            f"     kanban {kanban_agent}: {format_kanban_model_summary(kanban_agent, kanban_entry)}",
+            file=sys.stderr,
+        )
     for reviewer in dict.fromkeys(config["reviewers"].values()):
         entry = config["models"]["review"][reviewer]
         print(
@@ -1124,8 +1176,13 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         for section, entries in existing["models"].items()
     }
     config["kanban_agent"] = existing["kanban_agent"]
-    if not existing["welcome_complete"] and not agent_usable(agents.get(config["kanban_agent"], {})):
-        config["kanban_agent"] = execution_choices[0][0]
+    config["kanban_agents"] = dict(existing["kanban_agents"])
+    if not existing["welcome_complete"]:
+        if not agent_usable(agents.get(config["kanban_agent"], {})):
+            config["kanban_agent"] = execution_choices[0][0]
+        for scale in TASK_SCALES:
+            if not agent_usable(agents.get(config["kanban_agents"][scale], {})):
+                config["kanban_agents"][scale] = config["kanban_agent"]
     for role in REVIEW_ROLES:
         previous = existing["reviewers"][role]
         config["reviewers"][role] = previous
@@ -1155,6 +1212,12 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
             )
         )
     config["memsearch"]["enabled"] = existing["memsearch"]["enabled"]
+    # 既有配置已启用时, 其在用的受支持 Agent 视为已覆盖; 之后新增的 Agent 才需要补装.
+    memsearch_covered = (
+        {agent for agent in execution_agents_in_use(existing) if agent in MEMSEARCH_AGENTS}
+        if existing["memsearch"]["enabled"]
+        else set()
+    )
     config["review_stages"] = dict(existing["review_stages"])
     if config_valid:
         stored_language = configured_language()
@@ -1170,11 +1233,7 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         if action == "cancel":
             raise OnevokeError(t("用户取消, 配置未更改", "Cancelled; configuration was not changed"))
         if action == "1":
-            config["kanban_agent"] = ask_choice(
-                t("kanban 默认用哪个 Agent 执行任务?", "Which Agent should kanban use by default?"),
-                choices_with_current(execution_choices, config["kanban_agent"]),
-                config["kanban_agent"],
-            )
+            edit_execution_agents(config, execution_choices)
         elif action in ("2", "3", "4", "5"):
             role = REVIEW_ROLES[int(action) - 2]
             config["reviewers"][role] = ask_choice(
@@ -1187,7 +1246,6 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         elif action == "7":
             edit_models(config)
         elif action == "8":
-            memory_agent = config["kanban_agent"] if config["kanban_agent"] in ("codex", "claude") else None
             enabled = ask_yes_no(t("使用 MemSearch?", "Use MemSearch?"), config["memsearch"]["enabled"])
             if os.name == "nt" and enabled:
                 warning(t(
@@ -1195,24 +1253,30 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
                     "The upstream MemSearch installer currently requires Bash; this integration is not enabled on native Windows yet.",
                 ))
                 continue
-            if enabled and not config["memsearch"]["enabled"]:
-                if memory_agent is None:
-                    warning(t("当前执行 Agent 不支持 MemSearch 集成.", "The current execution Agent does not support MemSearch integration."))
-                    continue
-                install_memsearch_for(memory_agent)
+            if enabled and not reconcile_memsearch(config, memsearch_covered):
+                config["memsearch"]["enabled"] = False
+                continue
             config["memsearch"]["enabled"] = enabled
         elif action == "9":
             edit_review_stages(config)
         elif action == "10":
             edit_language(config)
 
-    selected_agent = config["kanban_agent"]
+    agents_changed = execution_agents_in_use(config) != execution_agents_in_use(existing)
+    if config["memsearch"]["enabled"] and agents_changed and os.name != "nt":
+        # 执行 Agent 在菜单 1 被改过: 保存前按最终配置补装新增 Agent, 全部不受支持时关闭.
+        # 未改 Agent 的既有配置原样保留, 空回车不改变用户已有取值.
+        if not reconcile_memsearch(config, memsearch_covered):
+            config["memsearch"]["enabled"] = False
+            warning(t("MemSearch 已关闭: 当前配置的执行 Agent 都没有集成.", "MemSearch has been disabled: none of the configured execution Agents has an integration."))
+
     entry = rules_entry()
-    integrated, detail = rules_integration(selected_agent)
-    if integrated:
-        success(t(f"{AGENT_LABELS[selected_agent]} 已接入 Onevoke 规则: {detail}", f"{AGENT_LABELS[selected_agent]} is connected to Onevoke rules: {detail}"))
-    else:
-        warning(t(f"{AGENT_LABELS[selected_agent]} 尚未接入 Onevoke 规则: {detail}", f"{AGENT_LABELS[selected_agent]} is not connected to Onevoke rules: {detail}"))
+    for selected_agent in execution_agents_in_use(config):
+        integrated, detail = rules_integration(selected_agent)
+        if integrated:
+            success(t(f"{AGENT_LABELS[selected_agent]} 已接入 Onevoke 规则: {detail}", f"{AGENT_LABELS[selected_agent]} is connected to Onevoke rules: {detail}"))
+        else:
+            warning(t(f"{AGENT_LABELS[selected_agent]} 尚未接入 Onevoke 规则: {detail}", f"{AGENT_LABELS[selected_agent]} is not connected to Onevoke rules: {detail}"))
         print(t(
             f"请按 README 的接入章节把规则入口接到 {entry}, welcome 不会覆盖 Agent 规则文件.",
             f"Follow the README integration section and point the rules entry to {entry}; welcome will not overwrite Agent rules files.",
@@ -1295,14 +1359,15 @@ def print_config(config: dict[str, Any]) -> None:
     effective = effective_config(config)
     status = t("已完成", "complete") if config["welcome_complete"] else t("未完成", "incomplete")
     print(f"{t('引导', 'welcome')}: {status}")
-    print(f"{t('看板 Agent', 'kanban agent')}: {effective['kanban_agent']}")
+    print(f"{t('看板 Agent', 'kanban agent')}: {format_kanban_agents_summary(effective)}")
     print(f"{t('启动方式', 'launcher')}: {effective['launcher']}")
-    kanban_agent = effective["kanban_agent"]
-    kanban_entry = effective["models"]["kanban"][kanban_agent]
-    print(
-        f"{t('看板模型', 'kanban model')}: "
-        f"{format_kanban_model_summary(kanban_agent, kanban_entry)}"
-    )
+    for kanban_agent in execution_agents_in_use(effective):
+        kanban_entry = effective["models"]["kanban"][kanban_agent]
+        label = "" if len(execution_agents_in_use(effective)) == 1 else f" {kanban_agent}"
+        print(
+            f"{t('看板模型', 'kanban model')}{label}: "
+            f"{format_kanban_model_summary(kanban_agent, kanban_entry)}"
+        )
     for role in REVIEW_ROLES:
         reviewer = effective["reviewers"][role]
         review_entry = effective["models"]["review"][reviewer]

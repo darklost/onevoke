@@ -24,21 +24,25 @@ KANBAN_DIR="$MAIN_WORKTREE/kanban"
 ```text
 kanban init [project-path]
 kanban rules
-kanban list [--mobile] [backlog|todo|working|done|archived|trash]
+kanban list [--mobile] [backlog|todo|working|review|done|archived|trash]
 kanban show <task-id>
 kanban new [--large] <feature|bug|chore|research> <slug> <title...>
-kanban move <task-id> <todo|working|done|archived|trash>
+kanban move <task-id> <todo|working|review|done|archived|trash>
 kanban pick [task-id]
 kanban start [--agent codex|claude|grok|cursor] [--launcher auto|tmux|tmux-session|herdr|foreground|console] [task-id]
-kanban check
+kanban resume (--message TEXT | --message-file FILE) [--launcher ...] <task-id>
+kanban check [task-id ...]
+kanban subscribe [--refresh SECONDS] [--heartbeat SECONDS] <task-group> <task-id>...
 kanban web [--host HOST] [--port PORT] [--refresh SECONDS] [--assets DIR] [--open]
 kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
 ```
 
-- `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式. 原生 Windows 上 Agent CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` 无法提供无损 argv 边界, `welcome`, `doctor` 与 `start` 均不得把它们视为可用 Agent.
-- `init` 幂等创建看板及 6 个状态目录, Git 项目只更新本地 `info/exclude`. Windows 新目录必须相对固定父句柄以 `CREATE_NEW` 创建并在创建时应用当前用户独占的 protected DACL, 创建竞态失败关闭; 既有目录只迁移叶目录 ACL. Git exclude 的父链逐分量拒绝 reparse point, 既有 ACL 不变, 去重读取和追加在同一固定叶句柄及文件锁内完成.
-- 六种 launcher: `auto` 在启动当时解析, 不把结果写回配置; 处于 herdr (`HERDR_ENV=1`) 时按 `herdr` 启动, 否则处于 tmux 时按 `tmux` 启动, 同时处于两者时 herdr 优先, 两者都不在则失败且不领取, 不回落到 `tmux-session`, `foreground` 或 `console`. `tmux` 在启动者当前 session 里建任务 window, 要求 `start` 本身跑在 tmux 内; `tmux-session` 按项目主树路径确定一个专属 session (`kb-<目录名>-<路径摘要>`), 不存在就新建, 已存在就复用, 同一项目的全部任务卡共用该 session, 每张卡一个 window, 不要求 `start` 跑在 tmux 内, 启动后不切换客户端, 只输出 session 名, window id 和 attach 提示; `herdr` 要求 `HERDR_ENV=1` 且 herdr 在 PATH, 在当前 workspace 新建 tab (`--focus`, 标签复用 `window_name()`) 后先等根 pane 就绪, 再在该 pane 执行与 tmux 相同的 Agent 命令, 不使用 `herdr agent start`; `foreground` 在当前终端前台运行并等待 Agent 退出; `console` 仅支持原生 Windows, 在独立控制台窗口启动 Agent 后立即返回 PID. `console` 没有 session/window 复用、attach 或输出抓取能力, 不是 tmux 或 `tmux-session` 的等价实现. POSIX 默认 `auto`, Windows 默认 `console`; Windows 拒绝 `auto` 和 `herdr`.
-- `check` 列出全部无效入口并以非零退出. `web` 和 `tui` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
+- `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. Agent 按卡片规模选取: 大任务 (含 `spec.md` 的目录卡) 用配置 `kanban_agents.large`, 小任务 (单文件卡) 用 `kanban_agents.small`, 两者缺省都等于 `kanban_agent`; 成功输出写明规模和实际 Agent. `start` 默认使用 Agent 的免确认模式, 并把执行 Agent 的会话标识写入卡片 `会话` 字段: Claude 与 Grok 预分配会话 UUID, Cursor 先用 `create-chat` 预建 chat (失败则不领取), Codex 只记 Agent 名.
+- `resume` 用卡片 `会话` 记录的原 Agent 和会话唤醒执行 Agent, 保留其上下文: Claude/Grok 用 `--resume <uuid>`, Cursor 用 `--resume <chat-id>`, Codex 用 `codex resume <session-id>`, 其 session id 在 `CODEX_HOME` (默认 `~/.codex`) 的 rollout 记录中按"以该任务的 start/resume prompt 开头的用户消息"检索 (只提到任务 ID 的主控会话不算), 找不到则失败. 只接受 `review/` 或 `working/` 中的卡: `review/` 卡先原子迁回 `working/`, 启动失败迁回 `review/`; `working/` 卡不迁移. prompt 只含任务 ID, 固定要求和 `--message`/`--message-file` 给出的事项 (二者必须且只能给一个, 不得为空); launcher 与 `start` 相同, 成功输出格式同 `start` 但动词为 `已唤醒`. 没有 `会话` 记录的卡 (未经 `start` 启动) 不能 `resume`. 原生 Windows 上 Agent CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` 无法提供无损 argv 边界, `welcome`, `doctor` 与 `start` 均不得把它们视为可用 Agent.
+- `init` 幂等创建看板及 7 个状态目录 (`backlog`, `todo`, `working`, `review`, `done`, `archived`, `trash`), 既有看板重跑一次即补建缺失目录, Git 项目只更新本地 `info/exclude`. Windows 新目录必须相对固定父句柄以 `CREATE_NEW` 创建并在创建时应用当前用户独占的 protected DACL, 创建竞态失败关闭; 既有目录只迁移叶目录 ACL. Git exclude 的父链逐分量拒绝 reparse point, 既有 ACL 不变, 去重读取和追加在同一固定叶句柄及文件锁内完成.
+- 六种 launcher: `auto` 在启动当时解析, 不把结果写回配置; 处于 herdr (`HERDR_ENV=1`) 时按 `herdr` 启动, 否则处于 tmux 时按 `tmux` 启动, 同时处于两者时 herdr 优先, 两者都不在则失败且不领取, 不回落到 `tmux-session`, `foreground` 或 `console`. `tmux` 在启动者当前 session 里后台建任务 window, 要求 `start` 本身跑在 tmux 内; `tmux-session` 按项目主树路径确定一个专属 session (`kb-<目录名>-<路径摘要>`), 不存在就新建, 已存在就复用, 同一项目的全部任务卡共用该 session, 每张卡一个后台 window, 不要求 `start` 跑在 tmux 内, 启动后不切换客户端, 只输出 session 名, window id 和 attach 提示; `herdr` 要求 `HERDR_ENV=1` 且 herdr 在 PATH, 在当前 workspace 后台新建 tab (`--no-focus`, 标签复用 `window_name()`) 后先等根 pane 就绪, 再在该 pane 执行与 tmux 相同的 Agent 命令, 不使用 `herdr agent start`; `foreground` 在当前终端前台运行并等待 Agent 退出; `console` 仅支持原生 Windows, 在独立控制台窗口启动 Agent 后立即返回 PID. `console` 没有 session/window 复用、attach 或输出抓取能力, 不是 tmux 或 `tmux-session` 的等价实现. POSIX 默认 `auto`, Windows 默认 `console`; Windows 拒绝 `auto` 和 `herdr`.
+- `check` 不带任务 ID 时列出全部无效入口并以非零退出; 指定一个或多个任务 ID 时只检查这些精确目标及其跨状态/入口形态冲突, 无关无效入口不影响结果. `subscribe` 要求显式任务组 ID 和成员任务 ID, 校验成员归属后输出逐行 JSON 状态事件. `web` 和 `tui` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
+- `subscribe` 的每行 JSON 都含 `event`, `group_id` 和按任务 ID 映射状态的 `tasks`. 初始事件的 `event` 为 `snapshot`; 状态事件为 `state-change`, 另含 `changed` 数组, 每项固定含 `task_id`, `from`, `to`; 心跳事件为 `heartbeat`. `--refresh` 是状态扫描秒数, 默认 1; `--heartbeat` 是无状态变化后的心跳秒数, 默认 900. 两者必须是有限且大于 0 的数值.
 - `web` 是原生 Windows 第一阶段保证的看板 UI. `tui` 默认按终端宽度显示尽可能多的栏目, 每栏默认最小 40 列 (可用 `-`/`=` 调节并记住), 宽度不足时少显示, 不足一栏最小宽度时按实际宽度显示单栏, 左右切换时始终保持选中栏可见. `--single` 即使终端足够宽也只显示一栏. `--theme` 指定初始配色主题 (默认 auto 跟随终端). 方向键或 `hjkl` 切换栏目和任务, 鼠标单击栏目或任务卡聚焦/选中, 双击打开详情, 在任务卡上拖选文本自动复制到系统剪贴板, 滚轮在看板翻卡、在详情滚动正文, PgUp/PgDn 按页翻动任务列表, `/` 搜索 (也可点工具栏搜索区), `y` 复制当前任务 ID, Enter 查看任务卡, `a` 切换存档栏目, `t` 循环切换 auto/light/dark 主题, `r` 刷新, `q` 退出; 搜索覆盖标题, 任务 ID, 任务组, 类型, 负责人和状态. 任务卡详情内可用 `hjkl`/方向键移动光标, 滚轮滚动正文, Ctrl-d/u 半页, Ctrl-f/b 或 PgUp/PgDn 整页, `gg`/`G` 到顶/底, `/` 搜索正文并用 `n`/`N` 跳转匹配, `v`/`V` 进入字符/行选择模式并用 `y` 复制, 拖选正文同样自动复制. 默认每 30 秒自动刷新, 按任务 ID 原位更新并尽量保留当前栏目的选中项和滚动位置. Windows TUI 仍要求当前 Python 提供可用 curses 后端, 不属于本阶段保证; 无法加载时使用 `kanban web`.
 - 命令只做结构和机械校验; 授权, 依赖和终止理由由 Agent 按本文件判断.
 
@@ -48,20 +52,24 @@ kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
 
 - `backlog/`: 已记录但尚未承诺执行.
 - `todo/`: 用户已确认, 契约完整, 尚未领取.
-- `working/`: 已领取, 正在实现, 验证, 审核或集成.
+- `working/`: 已领取, 正在实现, 验证, 审核或集成; 任务组卡在修复轮次也回到这里.
+- `review/`: 仅任务组卡使用. 开发, 验证已完成, 任务分支已提交 push 并 ff 进组集成分支, 等主控安排组级审核与集成; 执行 Agent 迁入后退出.
 - `done/`: 已满足完成门禁的近期任务.
 - `archived/`: 不占活跃看板的完成, 取消, 重复或不修复记录.
 - `trash/`: 用户明确要求删除, 但尚未永久清理的入口; 不是任务状态.
 
 ```text
-backlog -> todo -> working -> done -> archived
-    |        |         |
-    +--------+---------+-> archived
+backlog -> todo -> working -> done -> archived        (单卡流程)
+                      |  ^
+                      v  |  修复轮次迁回 working
+                    review -> done                     (任务组流程)
 
-除 trash 外任意状态 -> trash, 仅限用户明确要求
+backlog, todo, working, review -> archived            仅限用户授权的终止
+除 trash 外任意状态 -> trash                            仅限用户明确要求
 ```
 
-- 进 `todo/` 须完成任务目标, 预期成果, 验收条件和不在本轮范围; 进 `done/` 的门禁见「执行与完成」, 其余见「终止与清理」.
+- 进 `todo/` 须完成任务目标, 预期成果, 验收条件和不在本轮范围; 进 `review/` 须已填写 `任务分支`; 进 `done/` 的门禁见「执行与完成」, 其余见「终止与清理」.
+- 旧版看板没有 `review/`: 其余 6 个状态目录齐全时, 任一 `kanban` 命令首次定位看板即自动补建 `review/`, 不要求用户重跑 `init`; 其他状态目录缺失, 或 `review` 位置被文件/符号链接占用时所有命令失败.
 
 ## 入口与文档
 
@@ -80,6 +88,7 @@ backlog -> todo -> working -> done -> archived
 - 任务组:
 - 创建时间: YYYY-MM-DD HH:MM
 - 负责人:
+- 会话:
 - 开始时间:
 - 完成时间:
 - 任务分支:
@@ -130,7 +139,7 @@ backlog -> todo -> working -> done -> archived
 
 ### 契约与记录
 
-- 领取后填写负责人, 开始时间和任务分支, 无分支写 `N/A`; 命令迁入 `done/` 时填写完成时间. 结果只在进入 `done/`, `archived/` 或 `trash/` 前填写.
+- 领取后填写负责人, 开始时间和任务分支, 无分支写 `N/A`; `start` 同时写入 `会话` (旧卡没有该行时插在负责人之后, 不要求改写旧卡), 手工领取的卡留空. 命令迁入 `done/` 时填写完成时间. 结果只在进入 `done/`, `archived/` 或 `trash/` 前填写.
 - 卡片进入 `todo/` 后, 任务目标, 用户决策, 预期成果, 验收条件, 不在本轮范围以及任务组关系冻结. 修改任何一项都要先取得用户明确决策.
 - 「不在本轮范围」是审核的 risk-bounded stop 边界, 必须按四类逐一判定并写明理由: (1) 改动前已存在的问题; (2) 并发交错, 跨平台与安全加固; (3) 共享契约, 公共 API 与架构文档的同步; (4) 相邻功能与后续阶段. 验收条件未要求的类别写明排除, 由本卡承担的类别写明纳入; 只有一条泛泛的排除不算契约完整, `pick` 前由建卡 Agent 补齐. 审核时 reviewer 与主代理都以这份清单判定 finding 是否越出契约, 越出的记未处理项并建议后续卡.
 - 实施期只追加关键决策, 验证, 环境缺口, commit, 阻塞和下一步, 不复制会话流水. 稳定的架构, API 和长期规则仍须写入仓库文档或项目规则.
@@ -138,10 +147,12 @@ backlog -> todo -> working -> done -> archived
 ## 任务规模与任务组
 
 - 一张卡只承载一个任务目标. 需求含多个可分别验收的目标时必须拆成多张卡, 一卡一目标, 再按任务组组织依赖; 不得把多个目标合写进同一张卡的任务目标或验收条件.
-- 选卡片形态前先判断总体目标能否拆成可独立领取, 验收或终止, 且资源不冲突的并行子任务. 能拆就必须建任务组, 不得仅因范围大而保留为单张大任务卡.
-- 小任务是单文件卡片; 大任务是目标, 负责人, 验收和生命周期必须统一, 不能安全拆成并行交付, 且需要独立 spec, 按需分阶段计划和完整报告的单张卡片. 行数不是判据.
+- 默认拆小: 总体目标能拆成可独立验收的子目标就必须拆成任务组, 能否并行不是判据. 只能串行的子目标同样拆卡, 用 `前置任务` 表达顺序; 不得因为范围大, 子目标之间有依赖, 或"反正是一个人做"而保留为单张大任务卡.
+- 小卡的粒度: 一个可观察, 可验证的成果; 一个执行 Agent 在一次会话内能完成; 一轮 PM/QA 审核能精读完其 diff. 出现下列任一信号即应再拆: 验收条件里有多个可分别验收的目标; 需要 `plan.md` 分阶段; 改动跨多个互不相关的模块或测试集; 完成后要分别向不同接口方交付. 行数不是判据.
+- 大任务形态是例外, 只用于目标, 负责人, 验收和生命周期必须统一, 拆开后任何一张卡都无法独立验收的情形. 选 `--large` 时必须在 `讨论与决策` 写明「为何不能拆」, 没有理由的大卡在 `pick` 前退回拆分.
+- 涉及共享接口, 数据格式或跨卡契约时先建一张契约卡: 它只定义接口并写进仓库文档或项目规则, 后续实现卡以它为前置任务, 避免拆小后各卡对接口理解不一致.
 - 拆卡应减少依赖以便并行, 且不得职责重叠; 不能安全隔离的同资源修改须建立依赖并串行, 但不影响其他无冲突子任务并行. 组内每张子卡再按自身复杂度选小任务或大任务形态.
-- 新卡默认是小任务. 小任务变复杂时, 仅 `backlog/` 的当前编辑者或 `working/` 的负责人可以升级: 建同 ID 目录, 原内容转入 `spec.md`, 按需建 `plan.md`, 不保留原文件. `todo/` 中禁止改变形态.
+- 新卡默认是小任务. 小任务变复杂时, 仅 `backlog/` 的当前编辑者或 `working/` 的负责人可以升级: 建同 ID 目录, 原内容转入 `spec.md`, 按需建 `plan.md`, 不保留原文件. `todo/` 中禁止改变形态. 已由 `start` 启动的卡升级后不换 Agent, 不重新 `start`, 只在完成报告注明规模变化.
 
 任务组只是独立卡片间的关系, 不是入口或状态. 每张卡的元数据都保留可选的 `任务组` 字段; 不属于任务组时留空, 属于任务组时必须填写组内一致的任务组 ID. 每张组内卡还在 `讨论与决策` 开头记录:
 
@@ -149,7 +160,7 @@ backlog -> todo -> working -> done -> archived
 前置任务: N/A
 ```
 
-- 任务组 ID 格式为 `YYYYMMDD-short-slug-group`, 全看板唯一且组内一致. `前置任务` 是同组任务 ID 的逗号分隔列表, 无依赖写 `N/A`; 只有前置卡进入 `done/` 才满足依赖.
+- 任务组 ID 格式为 `YYYYMMDD-short-slug-group`, 全看板唯一且组内一致. `前置任务` 是同组任务 ID 的逗号分隔列表, 无依赖写 `N/A`; 前置卡进入 `review/` 或 `done/` 即满足依赖 (其改动已在组集成分支上).
 - 升级前没有 `任务组` 元数据的旧卡按空值处理; 旧卡已在 `讨论与决策` 中记录 `任务组: ...` 时, 读取方继续兼容, 不要求批量改写.
 - 建组时一次列全卡片和依赖图, 排除缺失引用, 环, 职责重叠及无法独立验收的卡片; 进 `todo/` 前冻结关系.
 
@@ -190,44 +201,69 @@ kanban move <task-id> working
   - foreground 单卡: 启动者在 Agent 退出后检查结果, 直到任务完成或明确交接.
   - tmux、tmux-session 或 herdr 单卡: 执行 Agent 在独立 window 或 tab 直接向用户汇报, 启动者不巡检. 启动成功后立即告知用户本会话不跟踪该任务进度, 当前 session 可以结束, 下一个任务另开会话; `tmux-session` 还要一并给出 session 名和 attach 命令; `herdr` 还要给出 tab id 和 pane id. `auto` 解析为 `herdr` 或 `tmux` 后按对应单卡规则协调. 用户明确要求跟踪时改按 foreground 单卡协调.
   - console 单卡: 执行 Agent 在独立 Windows 控制台直接向用户汇报, 启动者不抓取输出. 启动成功后告知用户 PID 及本会话不跟踪进度; 该 PID 只用于只读判断进程是否仍存在, 不能用于 attach 或恢复输出. 用户明确要求由启动者跟踪时改按 foreground 单卡协调.
-  - 任务组: 按「任务组编排」巡检, 启动成功不解除该责任.
+  - 任务组: 按「任务组编排」督办, 组级审核, 集成和收尾, 启动成功不解除该责任.
 
 ## 任务组编排
 
-- 用户启动任务组后, 启动者成为主控 (编排) Agent, 只校验依赖, 按顺序启动就绪卡, 定时检查卡片状态和给出组级结论. 主控 Agent 不实现组内任务, 不检查或修改子任务的代码, worktree, commit, 测试或审核内容.
-- 启动前读取全组卡片, 核对 ID, 依赖, 契约和修改范围; 有缺失引用, 环或隔离冲突时不启动受影响卡. 将已确认的 `backlog` 卡片移入 `todo/`, 已处于后续状态的卡片保持原状.
-- 每张就绪的 `todo` 卡都用 `kanban start <task-id>` 启动, launcher 默认取 Onevoke 配置, `--launcher` 只覆盖本次; 一个任务组内只用同一种 launcher, 所选 launcher 在当前平台不可用时报告阻塞. 首轮启动无前置任务的卡, 之后只启动全部前置卡都在 `done/` 的卡; 同时就绪且无资源冲突的卡并行启动, 禁越过依赖提前启动.
-- 首张卡启动成功后立即告知用户: 本会话是任务组主控, 须保留到全组按依赖顺序执行完毕, 不要结束当前 session; 提前结束会失去依赖校验, 顺序启动和组级结论. 主控会话持续到任务组成功或用户明确终止.
-- 以首张卡启动成功的时间为基准设置固定检查点, 每隔 15 分钟执行一轮状态检查; 不得自行缩短周期. Agent 消息或用户输入可触发额外检查, 额外检查后继续等待原定检查点, 不重置或取消后续定时检查.
-- 只有检查中确认执行 Agent 明确失败或已停止才提前处置; 其余情况一律保持 15 分钟一轮, 不因输出无变化, 卡片无进展或等待时间长而缩短周期或提前介入.
-- 两个检查点之间使用当前 Agent 或 runtime 支持的最长单次阻塞等待. 支持连续等待至下一检查点时必须一次等满; 只有等待接口存在更短的硬上限时才可续接等待, 续接时不得运行命令, 读取卡片或输出无变化状态. 禁止用分钟级或其他短周期轮询计时.
-- 每轮状态检查只运行 `kanban check`, 读取全组卡片状态, 并在 launcher 提供只读输出通道时查看各执行 Agent 的输出, 核对前置任务是否已进入 `done`, 判断执行 Agent 是仍在运行, 明确失败还是已停止. tmux 启动的卡用 `kanban start` 返回的 window id 执行 `tmux capture-pane -p -t <window-id>`, 需要时配合 `tmux list-windows` 确认窗口是否还在; `tmux-session` 启动的卡同样用返回的 window id, 列窗口时加 `-t <session>`. herdr 启动的卡用返回的 pane id 执行 `herdr pane read <pane-id>`. `console` 不提供输出抓取, 只用返回 PID 只读判断进程是否存在并结合卡片状态判断; 不读取、控制或关闭独立控制台, 不把 PID 当作 tmux window id 或可恢复 session.
-- 查看输出只读不交互: 不向执行 Agent 的窗口或会话发送按键, 消息, 催促或指令, 不中断, 恢复, 重启, 接管或改派子任务, 也不据此检查或修改子任务的代码, worktree, commit, 测试或审核内容.
-- 执行 Agent 明确失败或已停止 (输出报错终止, 进程退出, tmux window 消失) 而卡片未进 `done/`, 或卡片状态异常, 顺序冲突时, 只记录现状并向用户报告, 等用户决定交接, 改契约或终止; `working` 卡不得再次 `start`.
-- 执行 Agent 仍在运行时, 即使相邻两轮检查无进展也只在本轮记录现状, 继续按 15 分钟周期检查, 不提前介入或终止等待.
-- 全部组内卡进入 `done/` 才算成功. 任一卡进入 `archived/` 或 `trash/` 时, 须等待用户修改组契约或终止整组.
-- 编排结束时汇总执行顺序, 并行情况和组级结果, 再按卡片列出"未处理问题", 分类与记录要求按 `REVIEW-RULES.md`「结论与故障处置」的未处理项清单, 另加验证缺口和后续任务; 没有写"无", 每项另写任务 ID. 成功时仍发送各卡完成报告; 终止时同样按「完成报告」模板逐卡补发未完成卡的汇报, 再列终止决策.
+任务组采用组级审核: 执行 Agent 只负责开发, 验证, 提交和 push; 主控 (编排) Agent 决定何时审核, 把 finding 派回对应卡的原执行 Agent 修复, 审核通过后统一集成并收尾. 单卡流程不变, 仍由执行 Agent 自行审核和合回.
+
+### 角色与分工
+
+- 用户启动任务组后, 启动者成为主控 Agent, 负责: 校验依赖, 创建组集成分支, 按顺序启动就绪卡, 订阅状态事件, 安排审核批次, 归属并派回 finding, 集成组分支, 逐卡收尾和组级结论. 主控不实现组内任务, 不直接修改子任务的代码, worktree, commit 或测试; 与执行 Agent 的唯一交互通道是 `kanban resume`, 不向其窗口或会话发送按键, 消息或催促.
+- 组内卡的执行 Agent 负责: 准备工作区, 实现, 验证, 按关注点提交并 push 任务分支, 按 `GIT-RULES.md`「组集成分支」ff 进组分支, 写好 `实施与验证` 和「完成总结」中的交付, 验收, 验证部分, 填 `任务分支`, 执行 `kanban move <task-id> review` 后退出. 执行 Agent 不触发审核, 不合回 `develop`, 不清理 worktree; 收到 `resume` 派回的 finding 时承担 `REVIEW-RULES.md`「主代理的核实义务」并修复.
+
+### 启动与订阅
+
+- 启动前读取全组卡片, 核对 ID, 依赖, 契约和修改范围; 有缺失引用, 环或隔离冲突时不启动受影响卡. 将已确认的 `backlog` 卡片移入 `todo/`, 已处于后续状态的卡片保持原状. 首卡启动前按 `GIT-RULES.md`「组集成分支」创建组分支并记录其 base commit.
+- 每张就绪的 `todo` 卡都用 `kanban start <task-id>` 启动, Agent 按卡片规模取配置, launcher 默认取 Onevoke 配置, `--launcher` 只覆盖本次; 一个任务组内只用同一种 launcher, 所选 launcher 在当前平台不可用时报告阻塞. 首轮启动无前置任务的卡, 之后只启动全部前置卡都在 `review/` 或 `done/` 的卡; 同时就绪且无资源冲突的卡并行启动, 禁越过依赖提前启动. `start` 的 prompt 只传任务 ID; 执行 Agent 从卡片 `任务组` 字段和本规则得知自己走任务组流程.
+- 首张卡启动成功后立即告知用户: 本会话是任务组主控, 须保留到全组按依赖顺序执行完毕, 不要结束当前 session; 提前结束会失去依赖校验, 顺序启动, 组级审核和集成. 主控会话持续到任务组成功或用户明确终止.
+- 启动首批需监控的组内任务后, 主控运行 `kanban subscribe <task-group> <task-id>...` 并阻塞读取其逐行 JSON 输出. 命令先输出当前真实状态的 `snapshot`, 之后只在目标卡状态变化时输出 `state-change`; 事件包含任务组 ID, 变化卡的前后状态和全组当前快照. 主控按初始快照补齐订阅启动前已经发生的迁移, 不依赖历史事件.
+- 收到 `state-change` 后, 主控只对变化卡以及可能因它进入 `review`/`done` 而解除依赖的直接后继卡运行 `kanban check <task-id>...`, 读取这些卡片并核对依赖; 新就绪卡仍按既定顺序用 `kanban start` 启动; 进入 `review/` 的卡进入待审核集合. 新成员启动或 `resume` 后重启订阅, 参数包含当前仍需监控的明确成员集合, 并以新的初始快照继续判断.
+- 订阅无状态变化达 15 分钟时输出 `heartbeat`. 心跳只用于检查处于 `working` 的成员及对应执行 Agent 是否仍存活, 不运行全看板 `kanban check`, 不重新读取无关卡. Agent 消息或用户输入可触发同范围的额外存活检查, 不改变下一次心跳语义.
+- 状态事件之间持续阻塞读取订阅输出, 禁止自行增加短周期轮询. 只有状态事件, heartbeat 或订阅进程明确失败/退出才触发处置; 无输出和等待时间长本身不构成异常.
+- 状态事件后的定向检查或 heartbeat 存活检查中, launcher 提供只读输出通道时可查看对应执行 Agent 的输出. tmux 启动的卡用 `kanban start` 返回的 window id 执行 `tmux capture-pane -p -t <window-id>`, 需要时配合 `tmux list-windows` 确认窗口是否还在; `tmux-session` 启动的卡同样用返回的 window id, 列窗口时加 `-t <session>`. herdr 启动的卡用返回的 pane id 执行 `herdr pane read <pane-id>`. `console` 不提供输出抓取, 只用返回 PID 只读判断进程是否存在并结合卡片状态判断; 不读取, 控制或关闭独立控制台, 不把 PID 当作 tmux window id 或可恢复 session.
+- 查看输出只读不交互: 不向执行 Agent 的窗口或会话发送按键, 消息, 催促或指令, 不中断, 恢复, 重启, 接管或改派子任务. 派回事项一律经 `kanban resume`.
+
+### 审核批次与派回
+
+- 主控决定审核时机与批次: 把已进 `review/` 的卡按同一模块, 同一里程碑或依赖链分批, 一批的 diff 应能被 reviewer 精读; 不强制全组一次, 也不强制每卡一次. 批次的 CWD, base, task context 和角色流转按 `REVIEW-RULES.md`「任务组的组级审核」执行: 每批是独立的完整审核, 后一批的 base 是前一批通过的组分支 commit; 只有批内修复轮次做增量复审.
+- finding 由主控按卡片的修改范围归属: 命中哪张卡的 `任务目标`/`不在本轮范围`/实际改动就派给哪张卡; 跨卡的集成类 finding 派给修改范围命中的卡, 都命不中时主控建一张小修复卡加入本组 (填 `任务组` 与 `前置任务`, `pick` 后 `start`).
+- 派回用 `kanban resume <task-id> --message-file <findings>`: 文件写明 reviewer 角色, 档位, finding 原文和主控已知的事实, 不写主控自己的结论. 卡片迁回 `working/`, 原执行 Agent 带上下文继续: 逐条核实, 修复, 提交 push, rebase 到组分支头并 ff, 在 `实施与验证` 写上轮 finding 清单与处理结论, 再 `move review`. 主控收到 `state-change` 后汇总各卡清单组成 review context, 触发增量复审.
+- 执行 Agent 判为不成立或超出契约的 finding 连同依据回到主控; 主控不得改写, 按 `REVIEW-RULES.md`「主代理的核实义务」纳入未处理项交用户复核.
+- 一张卡 `resume` 后未进入 `review/` 而执行 Agent 已退出, 或同一 finding 两轮未闭环, 按「异常恢复」记录现状并向用户报告, 不改派, 不由主控代修.
+
+### 集成与收尾
+
+- 全部组内卡进入 `review/` 且所有批次审核通过后, 主控按 `GIT-RULES.md`「组集成分支」把组分支 rebase 到最新 `develop`, 重做验证, fast-forward 合回并 push; `develop` 前进只重做 rebase 和验证, 沿用已通过审核结论. 组内任一卡仍在 `working/` 时不集成.
+- 集成失败 (rebase, 验证, push 或 ff 未完成), 用户要求暂停或不合回时: 组内卡全部留在 `review/`, 保留组分支, 任务分支与 worktree, 主控记录阻塞及解除条件并按「完成报告」模板逐卡汇报, 末行状态写 `review (阻塞)`; 只有确实派回修复 (rebase 冲突, 审核 finding) 时才经 `resume` 把对应卡迁回 `working/`, 主控不得为表示阻塞而手工迁移卡片.
+- 集成成功后主控按依赖顺序逐卡收尾, 一张卡的收尾是一个整体: 运行记忆合并, 删该卡 worktree 与任务分支, 在卡片「完成总结」补写审核和收尾两部分 (各角色结论, 修复轮次, 最终 commit, 组分支与 `develop` 集成结果), 填 `结果: completed`, 执行 `kanban move <task-id> done`. 主控是这些卡的结束者, 按「完成报告」模板逐卡汇报. 执行 Agent 在迁 `review/` 前写好的交付, 验收, 验证部分不由主控改写.
+- 清理中途失败 (某张卡的记忆合并或分支, worktree 删除失败) 时: 已完成收尾并进入 `done/` 的卡保持 `done/`, 不回退; 失败卡与尚未收尾的卡留在 `review/`, 只保留它们尚存的 worktree 与分支, 组分支保留; 逐卡按真实状态汇报, 失败卡写明失败步骤, 错误和解除条件, 状态写 `review (阻塞)`. 代码已在 `develop`, 因此不重新集成, 解除后只继续未完成的收尾.
+- 全部组内卡进入 `done/` 后停止订阅, 删组分支, 运行一次不带目标的 `kanban check`; 完整检查通过才算成功. 任一卡进入 `archived/` 或 `trash/` 时, 须等待用户修改组契约或终止整组.
+- 编排结束时汇总执行顺序, 并行情况, 审核批次与轮次, 集成结果, 再按卡片列出"未处理问题", 分类与记录要求按 `REVIEW-RULES.md`「结论与故障处置」的未处理项清单, 另加验证缺口和后续任务; 没有写"无", 每项另写任务 ID. 终止时按「完成报告」模板逐卡补发未完成卡的汇报, 再列终止决策.
 
 ## 执行与完成
 
-- `working/` 中按项目规则完成准备, 实现, 验证, 提交, push, 审核, 集成和清理; 暂时失败或阻塞时保留原状态并记录阻塞及解除条件. 小任务写 `实施与验证`, 大任务按需维护 `plan.md`.
+- 单卡在 `working/` 中按项目规则完成准备, 实现, 验证, 提交, push, 审核, 集成和清理; 任务组卡只做到提交, push 与 ff 进组分支, 然后迁 `review/`, 审核, 集成和清理由主控按「任务组编排」完成. 暂时失败或阻塞时保留原状态并记录阻塞及解除条件. 小任务写 `实施与验证`, 大任务按需维护 `plan.md`.
 - 审核门槛和安全审核决策超时按 `REVIEW-RULES.md`, 本文件不另定. 未处理项先写入小卡 `实施与验证` 或大卡 `plan.md`, 再带入完成总结或 `report.md`.
 - 默认完成顺序如下, 集成前不设验收环节, 不停下等用户确认:
 
 ```text
-实现与验证 -> 必要审核 -> 集成与清理 -> 写完成记录
--> move done -> kanban check -> 最终完成报告
+单卡:   实现与验证 -> 必要审核 -> 集成与清理 -> 写完成记录
+        -> move done -> kanban check -> 最终完成报告
+任务组: 实现与验证 -> 提交 push 并 ff 进组分支 -> 写实施与验证及交付/验收/验证
+        -> move review -> (主控) 组级审核 -> resume 修复 -> 集成组分支
+        -> 补写审核/收尾 -> move done -> kanban check -> 完成报告
 ```
 
 - 合回时机取 `ONEVOKE-AGENTS.md`「看板任务完成」: 默认在验证和必要审核通过后, 按 `GIT-RULES.md`「集成与清理」直接 fast-forward 合回目标分支, 不等用户验收.
-- 用户要求暂停或不合回, 必要审核未通过, 或集成, 清理失败时不集成也不迁 `done/`: 卡片留 `working/`, 保留分支与 worktree, 记录阻塞及解除条件, 并按本文件「完成报告」模板向用户汇报. 用户明确要求的验收或集成确认不适用 15 分钟超时.
-- 实现, 验证记录, 必要审核及适用的集成清理全部完成后, 才可填写完成总结或 `report.md` 和 `结果: completed`, 再执行 `kanban move <task-id> done` 和 `kanban check`. 非代码任务的不适用项写 `N/A`.
+- 用户要求暂停或不合回, 必要审核未通过, 或集成, 清理失败时: 单卡不集成也不迁 `done/`, 留 `working/`, 保留分支与 worktree; 任务组卡在集成失败时全部留 `review/` 并保留资源, 集成成功后清理中途失败时已进入 `done/` 的卡不回退, 其余卡留 `review/` 只保留尚存资源, 均按「任务组编排」的「集成与收尾」执行. 两种情形都记录阻塞及解除条件, 并按本文件「完成报告」模板向用户汇报. 用户明确要求的验收或集成确认不适用 15 分钟超时.
+- 实现, 验证记录, 必要审核及适用的集成清理全部完成后, 才可填写完成总结或 `report.md` 和 `结果: completed`, 再执行 `kanban move <task-id> done` 和 `kanban check`. 非代码任务的不适用项写 `N/A`. 任务组卡由主控在组集成后执行这一步; `review/` 卡不得由执行 Agent 直接迁 `done/`.
 - 用户在完成报告后测试发现的问题按新任务处理: 另建卡片并在 `讨论与决策` 指向原卡, 不把已进 `done/` 的卡退回 `working/`, 也不复用原卡继续改.
 
 ## 完成报告
 
-- 任务卡本轮结束时一律按模板汇报一次, 不得用自由格式总结代替, 也不得只报一句完成或阻塞了事. 结束指卡片进入 `done/`, `archived/` 或 `trash/`, 以及阻塞后停在 `working/` 交回用户; 卡片仍在推进时不发.
-- 8 个字段不得省略也不得合并, 无内容写 `无` 或 `N/A`. 结束方式写进末行 `任务卡最终状态`, 取 `done`, `archived (<结果>)`, `trash` 或 `working (阻塞)`.
+- 任务卡本轮结束时一律按模板汇报一次, 不得用自由格式总结代替, 也不得只报一句完成或阻塞了事. 结束指卡片进入 `done/`, `archived/` 或 `trash/`, 以及阻塞后停在 `working/` (单卡) 或 `review/` (任务组卡) 交回用户; 卡片仍在推进时不发.
+- 8 个字段不得省略也不得合并, 无内容写 `无` 或 `N/A`. 结束方式写进末行 `任务卡最终状态`, 取 `done`, `archived (<结果>)`, `trash`, `working (阻塞)` 或 `review (阻塞)`.
 - 未进 `done/` 时, `任务` 用卡片当前所在状态目录下的绝对路径, `交付`, `验收`, `验证`, `审核`, `收尾` 只写已实际完成的部分, 未做项写 `未执行` 并注明原因; 不得因为任务没完成就留空, 省行或改用别的格式.
 - 阻塞汇报在 `未处理问题` 里逐项列出剩余工作, 阻塞原因和解除条件, 并写明分支与 worktree 的保留现状; 终止汇报另写用户授权的结论 (`cancelled`, `duplicate`, `wontfix`) 和原因, `duplicate` 指向替代卡.
 - 谁结束谁汇报: 交接后的接管 Agent 按同一模板汇报, 不因换会话或换执行者免除; 协调 Agent 的组级汇总不替代单卡汇报.
@@ -244,7 +280,7 @@ kanban move <task-id> working
 - 审核: <PM, CSA, Hacker, QA 的 reviewer, 状态和摘要; 审核期间修复>
 - 收尾: <完整 SHA | N/A>; <集成结果 | N/A>; <主树同步, worktree, 分支, 临时审核文件, `kanban check`, memsearch 均完成或逐项异常>
 - 未处理问题 (<N>): <无; 或逐项写 `[来源或类别][档位或状态] 问题; 影响: ...; 理由: ...`; 超时项附发送时间和超时时间>
-- 总结: <一句话总结>; 代码分支: <代码最终所在分支 | N/A>; 任务卡最终状态: <done | archived (<结果>) | trash | working (阻塞)>
+- 总结: <一句话总结>; 代码分支: <代码最终所在分支 | N/A>; 任务卡最终状态: <done | archived (<结果>) | trash | working (阻塞) | review (阻塞)>
 ```
 
 ## 终止与清理
@@ -255,6 +291,6 @@ kanban move <task-id> working
 
 ## 异常恢复
 
-- `working/` 卡中断, 无负责人或长期无进展时, 协调 Agent 可核实并恢复原会话; 其他 Agent 不得自行接管, 迁移或归档. 无法恢复时由用户决定交接或终止. 进程退出不改变 `working/`, 不退回 `todo/` 或再次 `start`.
+- `working/` 卡中断, 无负责人或长期无进展时, 协调 Agent 可核实并恢复原会话: 卡片有 `会话` 记录时用 `kanban resume <task-id> --message <现状与要求>` 带上下文唤醒, 卡片不迁移; 其他 Agent 不得自行接管, 迁移或归档. 无法恢复时由用户决定交接或终止. 进程退出不改变 `working/`, 不退回 `todo/` 或再次 `start`.
 - 出现重复 ID, 跨状态副本, 文件与目录同 ID, 大任务缺 `spec.md`, 目标冲突, 状态目录缺失或不可写时, 停止受影响操作并保留现场. 不通过删除, 改名或移动来绕过报错.
 - 看板无 Git 历史; 误删先查 `trash/` 和本机备份, 不伪造内容.

@@ -2,7 +2,7 @@
   "use strict";
 
   const config = window.KANBAN_WEB || {};
-  const ACTIVE_STATES = ["backlog", "todo", "working", "done"];
+  const ACTIVE_STATES = ["backlog", "todo", "working", "review", "done"];
   const ALL_STATES = ACTIVE_STATES.concat(["archived", "trash"]);
 
   const boardEl = document.getElementById("board");
@@ -114,7 +114,7 @@
     sizeBadge.textContent = sizeLabel(task.kind);
 
     const stateBadge = card.querySelector(".task-state");
-    const showState = ["working", "done", "archived", "trash"].includes(task.state);
+    const showState = ["working", "review", "done", "archived", "trash"].includes(task.state);
     stateBadge.className = `badge task-state ${task.state}`;
     stateBadge.textContent = statusLabel(task.state);
     stateBadge.hidden = !showState;

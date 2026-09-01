@@ -930,6 +930,35 @@ if os.name == "nt":
             raise
 
 
+    def regular_file_exists_nofollow(root: Path, path: Path) -> bool:
+        """只通过固定句柄判断普通文件是否存在，不读取文件内容."""
+        root_absolute, candidate, parts = _relative_parts(root, path)
+        if not parts:
+            raise UnsafePathError(f"protected file cannot be the root: {candidate}")
+        try:
+            with _open_chain(
+                root_absolute,
+                candidate.parent,
+                final_access=_FILE_READ_ATTRIBUTES,
+                final_expected="directory",
+            ) as (_, parent_handle):
+                handle = _try_open_leaf(
+                    parent_handle,
+                    candidate.name,
+                    candidate,
+                    access=_FILE_READ_ATTRIBUTES,
+                    expected="file",
+                )
+                if handle is None:
+                    return False
+                _close_handle(handle)
+                return True
+        except OSError as error:
+            if _is_missing_windows_error(error):
+                return False
+            raise
+
+
     @contextlib.contextmanager
     def _open_regular_stream_if_exists_nofollow(
         root: Path,
@@ -2095,6 +2124,27 @@ else:
             return read_regular_file_nofollow(root, path)
         except FileNotFoundError:
             return None
+
+
+    def regular_file_exists_nofollow(root: Path, path: Path) -> bool:
+        """用非阻塞 no-follow 打开判断普通文件，避免 FIFO 等入口挂起."""
+        try:
+            with _open_posix_parent(root, path) as (candidate, parent_fd):
+                fd = _openat_nofollow(
+                    parent_fd,
+                    candidate.name,
+                    os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
+                )
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise UnsafePathError(
+                            f"task document is not a regular file: {candidate}"
+                        )
+                    return True
+                finally:
+                    os.close(fd)
+        except FileNotFoundError:
+            return False
 
 
     @contextlib.contextmanager

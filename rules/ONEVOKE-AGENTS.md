@@ -49,6 +49,11 @@
 - 固定 `main` + `develop`, 不使用其他长期分支模型; 机制与初始化见 `GIT-RULES.md`「分支与 worktree」.
 - `main` 只从 `develop` 前进, 且必须用户明确确认; Agent 不自动推 `main`.
 
+### 执行 Agent
+
+- `kanban start` 按任务卡规模选执行 Agent: 大任务 (含 `spec.md` 的目录卡) 取配置 `kanban_agents.large`, 小任务 (单文件卡) 取 `kanban_agents.small`; 两者缺省都等于 `kanban_agent`, 用 `onevoke welcome` 菜单「执行 Agent」分别设置. `--agent` 只覆盖本次. 模型与推理档位按 `models.kanban.<agent>` 的大, 小任务档位取值.
+- `kanban resume` 用卡片记录的原会话唤醒同一执行 Agent, 不换 Agent; 机制见 `KANBAN-RULES.md`「命令契约」.
+
 ### Launcher
 
 - launcher 有 `auto`, `tmux`, `tmux-session`, `herdr`, `foreground`, `console` 六种. POSIX 默认 `auto`; 原生 Windows 默认 `console`, 且 Windows 不使用 `auto`/`tmux`/`tmux-session`/`herdr`.
@@ -68,6 +73,7 @@
 
 ### 看板任务完成
 
-- 实现, 验证和必要审核通过后, 直接按 `GIT-RULES.md`「集成与清理」fast-forward 合回 `develop`, 不请求验收也不等确认; 合回并清理完才填 `结果: completed`, 迁 `done/`, 再发「完成报告」; 任务卡以任何方式结束都按该模板汇报一次.
-- 用户要求暂停或不合回, 必要审核未通过, 或集成, 清理失败时: 卡片留 `working/`, 保留分支与 worktree, 按 `KANBAN-RULES.md`「完成报告」模板汇报, 并在其中写明阻塞和解除条件.
+- 单卡: 实现, 验证和必要审核通过后, 直接按 `GIT-RULES.md`「集成与清理」fast-forward 合回 `develop`, 不请求验收也不等确认; 合回并清理完才填 `结果: completed`, 迁 `done/`, 再发「完成报告」; 任务卡以任何方式结束都按该模板汇报一次.
+- 任务组成员卡: 执行 Agent 只做实现, 验证, 提交 push 并按 `GIT-RULES.md`「组集成分支」ff 进组分支, 然后迁 `review/` 退出, 不自行审核和合回. 审核批次, finding 派回 (`kanban resume`), 组分支集成和逐卡迁 `done/` 由主控按 `KANBAN-RULES.md`「任务组编排」完成; 完成报告由主控逐卡发出.
+- 用户要求暂停或不合回, 必要审核未通过, 或集成, 清理失败时: 单卡留 `working/` 并保留分支与 worktree; 任务组成员卡在集成失败时全部留 `review/` 并保留资源, 集成成功后清理中途失败时已进入 `done/` 的卡不回退, 其余留 `review/`, 按 `KANBAN-RULES.md`「任务组编排」处理. 均按 `KANBAN-RULES.md`「完成报告」模板汇报, 并在其中写明阻塞和解除条件.
 - 用户事后测试发现的问题另建新卡, 不退回也不复用已进 `done/` 的卡.
