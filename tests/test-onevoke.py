@@ -531,9 +531,10 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_welcome_disables_memsearch_when_no_configured_agent_is_supported(self) -> None:
         self.install_fake_environment(tmux=True)
         self.install_fake_memsearch_tools()
-        self.write_scaled_config("grok", "grok", memsearch=True)
+        self.write_scaled_config("codex", "codex", memsearch=True)
 
-        returncode, output = self.run_on_tty("\n", "welcome", "--reset")
+        # 已启用 MemSearch, 把大小任务 Agent 都改成 Grok 后直接保存.
+        returncode, output = self.run_on_tty("1\n3\n3\n\n", "welcome", "--reset")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("当前执行 Agent 不支持 MemSearch 集成", output)

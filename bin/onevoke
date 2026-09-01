@@ -1262,8 +1262,10 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         elif action == "10":
             edit_language(config)
 
-    if config["memsearch"]["enabled"] and os.name != "nt":
-        # 执行 Agent 可能在菜单 1 被改过: 保存前按最终配置补装新增 Agent, 全部不受支持时关闭.
+    agents_changed = execution_agents_in_use(config) != execution_agents_in_use(existing)
+    if config["memsearch"]["enabled"] and agents_changed and os.name != "nt":
+        # 执行 Agent 在菜单 1 被改过: 保存前按最终配置补装新增 Agent, 全部不受支持时关闭.
+        # 未改 Agent 的既有配置原样保留, 空回车不改变用户已有取值.
         if not reconcile_memsearch(config, memsearch_covered):
             config["memsearch"]["enabled"] = False
             warning(t("MemSearch 已关闭: 当前配置的执行 Agent 都没有集成.", "MemSearch has been disabled: none of the configured execution Agents has an integration."))
