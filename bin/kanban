@@ -2364,12 +2364,8 @@ def notify_instruction(entry: Entry, message_path: Path, marker: str) -> str:
 def herdr_direct_notify(
     herdr: str, pane_id: str, instruction: str, marker: str, timeout: float
 ) -> tuple[bool, str]:
-    result = herdr_capture(herdr, "pane", "send-keys", pane_id, instruction, "Enter")
-    if result.returncode != 0:
-        raise KanbanError(t(
-            f"herdr 直投失败: {herdr_failure_detail(result)}",
-            f"herdr direct notification failed: {herdr_failure_detail(result)}",
-        ))
+    # send-keys 只接受 Enter/C-c 等按键名; pane run 才会送字面文本并提交 Enter.
+    herdr_pane_run(herdr, pane_id, instruction)
     print(t("已投递, 等待回执: 通道=herdr-direct", "delivered; waiting for acknowledgement: channel=herdr-direct"), flush=True)
     result = herdr_capture(
         herdr,

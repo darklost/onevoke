@@ -288,6 +288,10 @@ fi
 if [ "$1" = "pane" ] && [ "$2" = "send-keys" ]; then
     printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.send"
     printf '%s\\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ "$#" -ne 4 ] || [ "$4" != "Enter" ]; then
+        printf '%s\\n' "unsupported key ${4:-}" >&2
+        exit 1
+    fi
     if [ "${KANBAN_HERDR_SEND_FAIL:-}" = "1" ]; then
         printf '%s\\n' 'fake herdr send-keys failure' >&2
         exit 1
@@ -1022,11 +1026,12 @@ exit 1
         self.assertIn("通道=herdr-direct", result.stdout)
         self.assertIn("回执=已确认", result.stdout)
         self.assertEqual(["pane", "get", "w1:p9"], self.herdr_arguments("get"))
-        sent = self.herdr_arguments("send")
-        self.assertEqual(["pane", "send-keys", "w1:p9"], sent[:3])
+        sent = self.herdr_arguments("run")
+        self.assertEqual(["pane", "run", "w1:p9"], sent[:3])
+        self.assertEqual(4, len(sent))
         self.assertTrue(sent[3].startswith("# onevoke-notify:"), sent[3])
         self.assertNotIn("QA finding", sent[3])
-        self.assertEqual("Enter", sent[4])
+        self.assertFalse((self.root / "herdr.log.send").exists())
         waited = self.herdr_arguments("wait")
         self.assertEqual("recent", waited[waited.index("--source") + 1])
         self.assertRegex(waited[waited.index("--regex") + 1], r"^\(\?m\)\^ONEVOKE\\-NOTIFY\\-ACK:")
@@ -1260,12 +1265,11 @@ exit 1
             encoding="utf-8",
         )
         before = review.read_text(encoding="utf-8")
-        self.env["KANBAN_HERDR_SEND_FAIL"] = "1"
         self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
 
         result = self.run_command("notify", task_id, "--message", "x", "--timeout", "0.05", succeeds=False)
 
-        self.assertIn("herdr 直投失败", result.stderr)
+        self.assertIn("herdr pane run 失败", result.stderr)
         self.assertEqual(before, review.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / review.name).exists())
 
