@@ -148,6 +148,18 @@ class KanbanCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    @staticmethod
+    def set_prerequisites(path: Path, value: str) -> None:
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            text.replace(
+                "## 讨论与决策\n\n",
+                f"## 讨论与决策\n\n```text\n前置任务: {value}\n```\n\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
     def read_process_json(
         self, process: subprocess.Popen, *, timeout: float = 5.0
     ) -> dict:
@@ -1874,6 +1886,79 @@ exit 1
         result = self.run_command("check")
 
         self.assertEqual("通过: 1 个任务\n", result.stdout)
+
+    def test_dependencies_parse_classify_and_expand_groups(self) -> None:
+        source_id, source = self.make_todo("dependency-source")
+        internal_id, internal = self.make_todo("dependency-internal")
+        external_id, external = self.make_todo("dependency-external")
+        group_first_id, group_first = self.make_todo("dependency-group-first")
+        group_second_id, group_second = self.make_todo("dependency-group-second")
+        source_group = "20260901-source-group"
+        expanded_group = "20260901-expanded-group"
+        for task in (source, internal):
+            self.set_task_group(task, source_group)
+        self.set_task_group(external, "20260901-external-group")
+        for task in (group_first, group_second):
+            self.set_task_group(task, expanded_group)
+        self.set_prerequisites(
+            source,
+            f"{internal_id}, {external_id}, {expanded_group}",
+        )
+        self.set_prerequisites(internal, "N/A")
+
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_dependencies")
+        finally:
+            sys.path.pop(0)
+        board = kanban["scan"](self.root)
+        dependencies = kanban["task_dependencies"](
+            board.entries[source_id], board
+        )
+
+        self.assertEqual(
+            (internal_id, external_id, expanded_group),
+            dependencies.prerequisite_ids,
+        )
+        self.assertEqual((internal_id,), dependencies.internal_tasks)
+        self.assertEqual((external_id,), dependencies.external_tasks)
+        self.assertEqual((expanded_group,), dependencies.task_groups)
+        self.assertEqual(
+            (internal_id, external_id, group_first_id, group_second_id),
+            dependencies.expanded_task_ids,
+        )
+        # 前置均未完成是正常中间态; 缺行旧卡和 N/A 也都按无依赖处理.
+        self.assertEqual("通过: 5 个任务\n", self.run_command("check").stdout)
+
+    def test_check_rejects_missing_prerequisite_and_invalid_syntax(self) -> None:
+        missing_id, missing = self.make_todo("dependency-missing")
+        invalid_id, invalid = self.make_todo("dependency-invalid")
+        task_group = "20260901-validation-group"
+        self.set_task_group(missing, task_group)
+        self.set_task_group(invalid, task_group)
+        self.set_prerequisites(missing, "20260901-does-not-exist-task")
+        self.set_prerequisites(invalid, "20260901-bad-task，N/A")
+
+        missing_result = self.run_command("check", missing_id, succeeds=False)
+        invalid_result = self.run_command("check", invalid_id, succeeds=False)
+
+        self.assertIn(missing_id, missing_result.stderr)
+        self.assertIn("20260901-does-not-exist-task", missing_result.stderr)
+        self.assertIn(invalid_id, invalid_result.stderr)
+        self.assertIn("前置任务语法非法", invalid_result.stderr)
+
+    def test_check_detects_cross_group_dependency_cycle(self) -> None:
+        first_id, first = self.make_todo("dependency-cycle-first")
+        second_id, second = self.make_todo("dependency-cycle-second")
+        self.set_task_group(first, "20260901-cycle-first-group")
+        self.set_task_group(second, "20260901-cycle-second-group")
+        self.set_prerequisites(first, second_id)
+        self.set_prerequisites(second, first_id)
+
+        result = self.run_command("check", first_id, succeeds=False)
+
+        self.assertIn("依赖成环", result.stderr)
+        self.assertIn(f"{first_id} -> {second_id} -> {first_id}", result.stderr)
 
     def test_targeted_check_ignores_unrelated_invalid_entries(self) -> None:
         first_id, _ = self.make_todo("targeted-clean")

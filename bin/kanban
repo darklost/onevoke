@@ -120,6 +120,17 @@ class Problem:
     message: str
 
 
+@dataclass(frozen=True)
+class TaskDependencies:
+    """一张任务卡的机器可读前置依赖及任务组展开结果."""
+
+    prerequisite_ids: tuple[str, ...]
+    internal_tasks: tuple[str, ...]
+    external_tasks: tuple[str, ...]
+    task_groups: tuple[str, ...]
+    expanded_task_ids: tuple[str, ...]
+
+
 def git_main_worktree(directory: Path) -> Optional[Path]:
     try:
         git = subprocess.run(
@@ -676,6 +687,179 @@ def task_group_from(text: str) -> str:
         return ""
     match = re.search(r"(?m)^任务组:[ \t]*(.*?)[ \t]*$", discussion)
     return match.group(1) if match else ""
+
+
+def prerequisite_ids_from(text: str, task_id: str) -> tuple[str, ...]:
+    """读取讨论章节开头的 `前置任务` 行; 旧卡缺行时返回空列表."""
+    discussion = section_body(text, "讨论与决策")
+    if not discussion:
+        return ()
+    lines = discussion.splitlines()
+    positions = [
+        index for index, line in enumerate(lines)
+        if line.strip().startswith("前置任务")
+    ]
+    if not positions:
+        return ()
+    expected = 1 if lines[0].strip() in ("```", "```text") else 0
+    if len(positions) != 1 or positions[0] != expected:
+        raise KanbanError(t(
+            f"任务 {task_id} 的前置任务语法非法: 必须位于讨论与决策开头",
+            f"Task {task_id} has invalid prerequisite syntax: it must start the discussion section",
+        ))
+    if expected == 1 and (len(lines) < 3 or lines[2].strip() != "```"):
+        raise KanbanError(t(
+            f"任务 {task_id} 的前置任务语法非法: 代码块必须在该行后结束",
+            f"Task {task_id} has invalid prerequisite syntax: close the code block after the line",
+        ))
+    match = re.fullmatch(r"前置任务[ \t]*:[ \t]*(.*?)[ \t]*", lines[expected].strip())
+    if match is None or not match.group(1):
+        raise KanbanError(t(
+            f"任务 {task_id} 的前置任务语法非法: 无依赖时写 N/A",
+            f"Task {task_id} has invalid prerequisite syntax: use N/A for no dependencies",
+        ))
+    value = match.group(1)
+    if value == "N/A":
+        return ()
+    values = tuple(part.strip() for part in value.split(","))
+    if any(not part for part in values) or any(
+        not (TASK_ID_RE.fullmatch(part) or TASK_GROUP_RE.fullmatch(part))
+        for part in values
+    ):
+        raise KanbanError(t(
+            f"任务 {task_id} 的前置任务语法非法: {value}",
+            f"Task {task_id} has invalid prerequisite syntax: {value}",
+        ))
+    return values
+
+
+def task_dependencies(
+    entry: Entry,
+    board: Board,
+    documents: Optional[Dict[str, str]] = None,
+) -> TaskDependencies:
+    """解析并分类依赖; 任务组引用展开为该组当前全部成员卡."""
+    texts = documents if documents is not None else {
+        task_id: read_document(candidate)
+        for task_id, candidate in board.entries.items()
+    }
+    source_group = task_group_from(texts[entry.task_id])
+    if not source_group:
+        return TaskDependencies((), (), (), (), ())
+
+    prerequisite_ids = prerequisite_ids_from(texts[entry.task_id], entry.task_id)
+    group_members: Dict[str, list[str]] = {}
+    for task_id, text in texts.items():
+        task_group = task_group_from(text)
+        if task_group:
+            group_members.setdefault(task_group, []).append(task_id)
+
+    internal_tasks: list[str] = []
+    external_tasks: list[str] = []
+    task_groups: list[str] = []
+    expanded: list[str] = []
+    for prerequisite_id in prerequisite_ids:
+        if TASK_GROUP_RE.fullmatch(prerequisite_id):
+            members = group_members.get(prerequisite_id)
+            if not members:
+                raise KanbanError(t(
+                    f"任务 {entry.task_id} 引用了不存在的前置 ID: {prerequisite_id}",
+                    f"Task {entry.task_id} references a missing prerequisite ID: {prerequisite_id}",
+                ))
+            task_groups.append(prerequisite_id)
+            expanded.extend(sorted(members))
+            continue
+        prerequisite = board.entries.get(prerequisite_id)
+        if prerequisite is None:
+            raise KanbanError(t(
+                f"任务 {entry.task_id} 引用了不存在的前置 ID: {prerequisite_id}",
+                f"Task {entry.task_id} references a missing prerequisite ID: {prerequisite_id}",
+            ))
+        prerequisite_group = task_group_from(texts.get(prerequisite.task_id, ""))
+        if prerequisite_group == source_group:
+            internal_tasks.append(prerequisite_id)
+        else:
+            external_tasks.append(prerequisite_id)
+        expanded.append(prerequisite_id)
+
+    return TaskDependencies(
+        prerequisite_ids,
+        tuple(internal_tasks),
+        tuple(external_tasks),
+        tuple(task_groups),
+        tuple(dict.fromkeys(expanded)),
+    )
+
+
+def dependency_problems(board: Board, selected: Optional[set[str]] = None) -> list[Problem]:
+    """校验依赖引用与环; 定向检查只遍历所选任务可达的依赖图."""
+    documents: Dict[str, str] = {}
+    document_errors: Dict[str, KanbanError] = {}
+    for task_id, entry in board.entries.items():
+        try:
+            documents[task_id] = read_document(entry)
+        except KanbanError as error:
+            document_errors[task_id] = error
+
+    resolved: Dict[str, TaskDependencies] = {}
+    resolution_errors: Dict[str, KanbanError] = {}
+
+    def resolve(task_id: str) -> Optional[TaskDependencies]:
+        if task_id in resolved:
+            return resolved[task_id]
+        if task_id in resolution_errors:
+            return None
+        if task_id in document_errors:
+            resolution_errors[task_id] = document_errors[task_id]
+            return None
+        try:
+            value = task_dependencies(board.entries[task_id], board, documents)
+        except KanbanError as error:
+            resolution_errors[task_id] = error
+            return None
+        resolved[task_id] = value
+        return value
+
+    roots = sorted(selected if selected is not None else board.entries)
+    problems: list[Problem] = []
+    reported_errors: set[str] = set()
+    reported_cycles: set[tuple[str, ...]] = set()
+    visiting: list[str] = []
+    visited: set[str] = set()
+
+    def visit(task_id: str) -> None:
+        if task_id in visited:
+            return
+        if task_id in visiting:
+            start = visiting.index(task_id)
+            cycle = tuple(visiting[start:] + [task_id])
+            if cycle not in reported_cycles:
+                reported_cycles.add(cycle)
+                source = board.entries[visiting[-1]]
+                problems.append(Problem(source.path, t(
+                    f"依赖成环: {' -> '.join(cycle)}",
+                    f"Dependency cycle: {' -> '.join(cycle)}",
+                )))
+            return
+        visiting.append(task_id)
+        dependencies = resolve(task_id)
+        if dependencies is None:
+            if task_id not in reported_errors:
+                reported_errors.add(task_id)
+                problems.append(Problem(
+                    board.entries[task_id].path,
+                    str(resolution_errors[task_id]),
+                ))
+        else:
+            for prerequisite_id in dependencies.expanded_task_ids:
+                visit(prerequisite_id)
+        visiting.pop()
+        visited.add(task_id)
+
+    for root in roots:
+        if root in board.entries:
+            visit(root)
+    return problems
 
 
 def completion_metadata(text: str) -> str:
@@ -2153,13 +2337,17 @@ def command_tui(args: argparse.Namespace, root: Path) -> None:
 
 def command_check(args: argparse.Namespace, root: Path) -> int:
     board = scan_targets(root, args.tasks) if args.tasks else scan(root)
-    for problem in board.problems:
+    all_problems = list(board.problems)
+    dependency_board = scan(root) if args.tasks else board
+    selected = set(board.entries) if args.tasks else None
+    all_problems.extend(dependency_problems(dependency_board, selected))
+    for problem in all_problems:
         print(t(f"无效: {problem.message}", f"invalid: {problem.message}"), file=sys.stderr)
-    if board.problems:
+    if all_problems:
         print(
             t(
-                f"已检查: {len(board.entries)} 个有效, {len(board.problems)} 个无效",
-                f"checked: {len(board.entries)} valid, {len(board.problems)} invalid",
+                f"已检查: {len(board.entries)} 个有效, {len(all_problems)} 个无效",
+                f"checked: {len(board.entries)} valid, {len(all_problems)} invalid",
             )
         )
         return 1
