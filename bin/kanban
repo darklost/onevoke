@@ -1498,9 +1498,9 @@ def resolve_project_session(tmux: str, project: Path) -> tuple[str, bool]:
 
 
 def tmux_launch(
-    tmux: str, session: str, create: bool, cwd: str, name: str, command: str
+    tmux: str, session: str, create: bool, cwd: str, name: str
 ) -> subprocess.CompletedProcess:
-    """在目标 session 里建任务 window; create 为真时连 session 一起建, 输出新 window id."""
+    """只创建任务 window; Agent 要等投递地址持久化后再进入 pane."""
     return tmux_capture(
         tmux,
         "new-session" if create else "new-window",
@@ -1513,8 +1513,25 @@ def tmux_launch(
         cwd,
         "-n",
         name,
-        command,
     )
+
+
+def tmux_start_pane(tmux: str, pane: str, command: str) -> None:
+    """用已持久化地址的 pane 替换占位 shell, 避免 Agent 先于卡片元数据运行."""
+    result = tmux_capture(tmux, "respawn-pane", "-k", "-t", pane, command)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit {result.returncode}"
+        raise KanbanError(t(f"tmux 启动 Agent 失败: {detail}", f"tmux failed to start Agent: {detail}"))
+
+
+def tmux_close_window(tmux: str, window: Optional[str]) -> Optional[str]:
+    if not window:
+        return None
+    result = tmux_capture(tmux, "kill-window", "-t", window)
+    if result.returncode == 0:
+        return None
+    detail = result.stderr.strip() or f"exit {result.returncode}"
+    return t(f"关闭 tmux window 失败: {detail}", f"failed to close tmux window: {detail}")
 
 
 def window_name(entry: Entry, text: str) -> str:
@@ -1934,6 +1951,7 @@ def launch_agent(
 ) -> LaunchOutcome:
     """按 plan 启动 Agent; 六种 launcher 的 cwd 都是项目根. 失败抛 LaunchFailure."""
     created_tab = None
+    created_window = None
     try:
         if plan.launcher == "foreground":
             try:
@@ -1967,11 +1985,11 @@ def launch_agent(
             herdr_pane_run(plan.herdr_bin, pane_id, command)
             return outcome
         create = plan.launcher == "tmux-session" and not plan.session_exists
-        result = tmux_launch(plan.tmux, plan.session, create, str(root.parent), name, command)
+        result = tmux_launch(plan.tmux, plan.session, create, str(root.parent), name)
         if create and result.returncode != 0 and session_owner(plan.tmux, plan.session) in ("", str(plan.project)):
             # 与另一次 start 抢建同一个 session 时改为在已建好的 session 里开 window.
             create = False
-            result = tmux_launch(plan.tmux, plan.session, create, str(root.parent), name, command)
+            result = tmux_launch(plan.tmux, plan.session, create, str(root.parent), name)
         if result.returncode != 0:
             subcommand = "new-session" if create else "new-window"
             detail = result.stderr.strip() or f"exit {result.returncode}"
@@ -1983,15 +2001,20 @@ def launch_agent(
                 "tmux launch failed: window/pane id was not returned",
             ))
         window, pane = location
+        created_window = window
         if create:
             # 标记项目归属供后续复用校验; 写失败不影响本次启动, 未标记的 session 仍会被复用.
             tmux_capture(plan.tmux, "set-option", "-t", plan.session, PROJECT_SESSION_OPTION, str(plan.project))
         outcome = LaunchOutcome(window=window, pane=pane)
         if location_callback is not None:
             location_callback(outcome)
+        tmux_start_pane(plan.tmux, pane, command)
         return outcome
     except (KanbanError, OSError, UnicodeError, ValueError) as error:
-        close_error = herdr_close_tab(plan.herdr_bin, created_tab) if created_tab is not None else None
+        if created_tab is not None:
+            close_error = herdr_close_tab(plan.herdr_bin, created_tab)
+        else:
+            close_error = tmux_close_window(plan.tmux, created_window) if plan.tmux else None
         raise LaunchFailure(error, close_error) from error
 
 
@@ -2329,32 +2352,32 @@ def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
 
 
 def write_notify_message(message: str) -> Path:
-    directory = Path(tempfile.mkdtemp(prefix="onevoke-notify-"))
-    try:
-        os.chmod(directory, 0o700)
-        path = directory / "message.txt"
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    for _attempt in range(128):
+        directory = temporary_root / f"onevoke-notify-{uuid.uuid4().hex}"
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-                descriptor = -1
-                stream.write(message)
-                stream.write("\n")
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-        os.chmod(path, 0o600)
-        return path.resolve()
-    except BaseException:
-        shutil.rmtree(directory, ignore_errors=True)
-        raise
+            create_private_directory_nofollow(temporary_root, directory)
+        except FileExistsError:
+            continue
+        path = directory / "message.txt"
+        try:
+            write_text_atomic_nofollow(directory, path, message + "\n", replace=False)
+            return path
+        except BaseException:
+            try:
+                directory.rmdir()
+            except OSError as cleanup_error:
+                raise KanbanError(t(
+                    f"创建通知消息失败且临时目录清理失败: {cleanup_error}",
+                    f"Failed to create notification message and clean up its temporary directory: {cleanup_error}",
+                )) from cleanup_error
+            raise
+    raise KanbanError(t("无法分配通知消息目录", "Unable to allocate a notification message directory"))
 
 
 def remove_notify_message(path: Path) -> None:
-    try:
-        path.unlink()
-        path.parent.rmdir()
-    except OSError:
-        pass
+    path.unlink(missing_ok=True)
+    path.parent.rmdir()
 
 
 def notify_instruction(entry: Entry, message_path: Path, marker: str) -> str:
@@ -2375,8 +2398,8 @@ def herdr_direct_notify(
         "pane",
         "wait-output",
         pane_id,
-        "--regex",
-        rf"(?m)^{re.escape(marker)}$",
+        "--match",
+        marker,
         "--source",
         "recent",
         "--timeout",
@@ -2442,7 +2465,7 @@ def validate_resumed_agent(plan: LaunchPlan, outcome: LaunchOutcome, session: Ag
                 if (
                     pane.get("agent") == session.agent
                     and reference == session.reference
-                    and pane.get("agent_status") not in (None, "", "unknown")
+                    and pane.get("agent_status") in ("idle", "working", "blocked")
                 ):
                     return
             else:
@@ -2488,8 +2511,8 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
             f"只能直投 {' 或 '.join(RESUME_STATES)} 中的任务; {entry.task_id} 在 {entry.state}",
             f"Only tasks in {' or '.join(RESUME_STATES)} can be notified; {entry.task_id} is in {entry.state}",
         ))
-    if not math.isfinite(args.timeout) or args.timeout <= 0:
-        raise KanbanError(t("notify 超时必须是大于 0 的有限秒数", "notify timeout must be a finite number greater than 0"))
+    if not math.isfinite(args.timeout) or args.timeout <= 60:
+        raise KanbanError(t("notify 超时必须是大于 60 的有限秒数", "notify timeout must be a finite number greater than 60"))
     message = read_task_message(args, "notify")
     text = read_document(entry)
     window = metadata_from(text, WINDOW_FIELD)
@@ -2501,9 +2524,6 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
     window_written = False
     try:
         session = resolved_task_session(entry, text)
-        marker = f"ONEVOKE-NOTIFY-ACK:{uuid.uuid4()}"
-        message_path = write_notify_message(message)
-        instruction = notify_instruction(entry, message_path, marker)
         herdr_match = HERDR_WINDOW_RE.fullmatch(window)
         tmux_match = TMUX_WINDOW_RE.fullmatch(window)
         target_window = ""
@@ -2541,9 +2561,14 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
             direct_kind = "herdr"
         else:
             raise KanbanError(t(f"无可用直投地址: {window or 'N/A'}", f"No direct notification address: {window or 'N/A'}"))
+        if os.name == "nt":
+            raise KanbanError(t("Windows 当前没有终端直投通道", "Windows currently has no terminal direct-delivery channel"))
         if target_window and target_window != window:
             write_text_atomic(entry.document, window_metadata(text, target_window), entry=entry)
             window_written = True
+        marker = f"ONEVOKE-NOTIFY-ACK:{uuid.uuid4()}"
+        message_path = write_notify_message(message)
+        instruction = notify_instruction(entry, message_path, marker)
         if direct_kind == "herdr":
             confirmed, acknowledgement_detail = herdr_direct_notify(
                 herdr, pane_id, instruction, marker, args.timeout
@@ -2566,7 +2591,13 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
                     f"notify direct delivery and window rollback failed: direct={direct_error}; rollback={rollback_error}",
                 )) from rollback_error
         if message_path is not None:
-            remove_notify_message(message_path)
+            try:
+                remove_notify_message(message_path)
+            except OSError as cleanup_error:
+                raise KanbanError(t(
+                    f"notify 直投失败且消息清理失败: 直投={direct_error}; 清理={cleanup_error}",
+                    f"notify direct delivery failed and message cleanup failed: direct={direct_error}; cleanup={cleanup_error}",
+                )) from cleanup_error
         try:
             notify_via_resume(entry, text, message, root, args.timeout)
         except (KanbanError, OSError, UnicodeError, ValueError, LaunchFailure) as resume_error:
