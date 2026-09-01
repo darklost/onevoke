@@ -1455,6 +1455,7 @@ def tmux_session_id(tmux: str) -> str:
 
 
 PROJECT_SESSION_OPTION = "@onevoke_project"
+PANE_SESSION_OPTION = "@onevoke_session"
 PROJECT_SESSION_CANDIDATES = 9
 
 
@@ -1524,6 +1525,19 @@ def tmux_start_pane(tmux: str, pane: str, command: str) -> None:
     if result.returncode != 0:
         detail = result.stderr.strip() or f"exit {result.returncode}"
         raise KanbanError(t(f"tmux 启动 Agent 失败: {detail}", f"tmux failed to start Agent: {detail}"))
+
+
+def tmux_set_pane_session(tmux: str, pane: str, session: str) -> None:
+    """给 pane 记录执行 Agent 会话; 这是防误投标记, 不是跨用户安全边界."""
+    result = tmux_capture(
+        tmux, "set-option", "-p", "-t", pane, PANE_SESSION_OPTION, session
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit {result.returncode}"
+        raise KanbanError(t(
+            f"tmux 写入 pane 会话失败: {detail}",
+            f"tmux failed to record the pane session: {detail}",
+        ))
 
 
 def tmux_close_window(tmux: str, window: Optional[str]) -> Optional[str]:
@@ -1684,6 +1698,7 @@ HERDR_WINDOW_RE = re.compile(r"^herdr:([^:\s]+:[^:\s]+):([^:\s]+:[^:\s]+)$")
 TMUX_WINDOW_RE = re.compile(r"^(tmux|tmux-session):([^:\s]+):([^:\s]+):([^:\s]+)$")
 NOTIFY_DEFAULT_TIMEOUT = 120.0
 NOTIFY_POLL_INTERVAL = 0.1
+START_SESSION_DISCOVERY_TIMEOUT = 10.0
 
 
 @dataclass(frozen=True)
@@ -1956,6 +1971,7 @@ def launch_agent(
     name: str,
     agent_argv: list[str],
     location_callback: Optional[Callable[[LaunchOutcome], None]] = None,
+    pane_session_callback: Optional[Callable[[], AgentSession]] = None,
 ) -> LaunchOutcome:
     """按 plan 启动 Agent; 六种 launcher 的 cwd 都是项目根. 失败抛 LaunchFailure."""
     created_tab = None
@@ -2017,6 +2033,9 @@ def launch_agent(
         if location_callback is not None:
             location_callback(outcome)
         tmux_start_pane(plan.tmux, pane, command)
+        if pane_session_callback is not None:
+            pane_session = pane_session_callback()
+            tmux_set_pane_session(plan.tmux, pane, pane_session.reference)
         return outcome
     except (KanbanError, OSError, UnicodeError, ValueError) as error:
         if created_tab is not None:
@@ -2120,6 +2139,12 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "start")
     agent = resolve_agent_binary(agent_name)
     session = new_agent_session(agent_name, agent)
+    previous_codex_session = ""
+    if agent_name == "codex" and plan.launcher in ("tmux", "tmux-session"):
+        try:
+            previous_codex_session = find_codex_session(entry.task_id)
+        except KanbanError:
+            pass
 
     original = read_document(entry)
     updated = start_metadata(
@@ -2144,6 +2169,25 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             window_metadata(updated, location),
             entry=moved,
         )
+
+    def started_tmux_session() -> AgentSession:
+        if session.reference:
+            return session
+        deadline = time.monotonic() + START_SESSION_DISCOVERY_TIMEOUT
+        while True:
+            try:
+                candidate = resolved_task_session(moved, read_document(moved))
+                if candidate.reference != previous_codex_session:
+                    return candidate
+                error = KanbanError(t(
+                    "尚未发现本次新建的 Codex 会话",
+                    "The newly started Codex session has not appeared yet",
+                ))
+            except KanbanError as resolve_error:
+                error = resolve_error
+            if time.monotonic() >= deadline:
+                raise error
+            time.sleep(NOTIFY_POLL_INTERVAL)
     try:
         write_text_atomic(moved.document, updated, entry=moved)
         outcome = launch_agent(
@@ -2152,6 +2196,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             name,
             agent_argv,
             record_terminal_location if plan.launcher in ("herdr", "tmux", "tmux-session") else None,
+            started_tmux_session if plan.launcher in ("tmux", "tmux-session") else None,
         )
     except LaunchFailure as failure:
         rollback_launch(root, moved, entry.state, failure, original)
@@ -2230,7 +2275,15 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
     agent_argv = [*agent_command(session.agent, agent, model_entry, entry.kind, session, resume=True), prompt]
     moved = move_entry(entry, root, "working") if entry.state != "working" else entry
     try:
-        outcome = launch_agent(plan, root, window_name(entry, text), agent_argv)
+        outcome = launch_agent(
+            plan,
+            root,
+            window_name(entry, text),
+            agent_argv,
+            pane_session_callback=(lambda: session)
+            if plan.launcher in ("tmux", "tmux-session")
+            else None,
+        )
     except LaunchFailure as failure:
         rollback_launch(root, moved, entry.state, failure, text)
         raise
@@ -2382,6 +2435,20 @@ def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
         raise KanbanError(t(
             f"tmux 前台进程不匹配: 期望={expected}, 实际={command or 'N/A'}",
             f"tmux foreground process mismatch: expected={expected}, actual={command or 'N/A'}",
+        ))
+    identity = tmux_capture(
+        tmux, "show-options", "-p", "-v", "-t", pane_id, PANE_SESSION_OPTION
+    )
+    actual_session = identity.stdout.strip() if identity.returncode == 0 else ""
+    if not actual_session:
+        raise KanbanError(t(
+            f"tmux pane 缺少会话标记: {pane_id}",
+            f"tmux pane has no session marker: {pane_id}",
+        ))
+    if actual_session != session.reference:
+        raise KanbanError(t(
+            f"tmux 会话不匹配: 卡片={session.reference}, pane={actual_session}",
+            f"tmux session mismatch: task={session.reference}, pane={actual_session}",
         ))
 
 
@@ -2599,7 +2666,15 @@ def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout
     model_entry = config["models"]["kanban"][session.agent]
     prompt = notify_resume_prompt(entry.task_id, message, current_install_paths())
     agent_argv = [*agent_command(session.agent, agent, model_entry, entry.kind, session, resume=True), prompt]
-    outcome = launch_agent(plan, root, window_name(entry, text), agent_argv)
+    outcome = launch_agent(
+        plan,
+        root,
+        window_name(entry, text),
+        agent_argv,
+        pane_session_callback=(lambda: session)
+        if plan.launcher in ("tmux", "tmux-session")
+        else None,
+    )
     try:
         validate_resumed_agent(plan, outcome, session, timeout)
     except (KanbanError, OSError, UnicodeError, ValueError) as liveness_error:

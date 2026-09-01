@@ -197,12 +197,32 @@ if [ "$1" = "has-session" ]; then
     exit 1
 fi
 if [ "$1" = "show-options" ]; then
+    if [ "${2:-}" = "-p" ]; then
+        [ "${KANBAN_TMUX_PANE_SESSION_MISSING:-}" != "1" ] || exit 1
+        if [ -n "${KANBAN_TMUX_PANE_SESSION:-}" ]; then
+            printf '%s\\n' "$KANBAN_TMUX_PANE_SESSION"
+        elif [ -f "$KANBAN_TMUX_LOG.pane-session" ]; then
+            sed -n '1p' "$KANBAN_TMUX_LOG.pane-session"
+        else
+            exit 1
+        fi
+        exit 0
+    fi
     # 真实 tmux 对未设置的用户选项返回非零并报 invalid option.
     [ -n "${KANBAN_TMUX_PROJECT:-}" ] || exit 1
     printf '%s\\n' "$KANBAN_TMUX_PROJECT"
     exit 0
 fi
 if [ "$1" = "set-option" ]; then
+    if [ "${2:-}" = "-p" ]; then
+        printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.pane-setopt"
+        if [ "${KANBAN_TMUX_PANE_SETOPT_FAIL:-}" = "1" ]; then
+            printf '%s\\n' 'fake pane set-option failure' >&2
+            exit 1
+        fi
+        printf '%s\\n' "$6" > "$KANBAN_TMUX_LOG.pane-session"
+        exit 0
+    fi
     printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.setopt"
     exit 0
 fi
@@ -230,6 +250,18 @@ if [ "$1" = "respawn-pane" ]; then
     printf '%s\\n' "$5" > "$KANBAN_TMUX_LOG.command"
     current=${5%% *}
     printf '%s\\n' "${current##*/}" > "$KANBAN_TMUX_LOG.current"
+    if [ "${current##*/}" = "codex" ]; then
+        task=$(printf '%s\\n' "$5" | grep -Eo '[0-9]{8}-[a-z0-9-]+-task' | head -n 1)
+        if [ -n "$task" ]; then
+            session_dir="$HOME/.codex/sessions/fake"
+            mkdir -p "$session_dir"
+            printf '%s\\n' \
+                '{"type":"session_meta","payload":{"id":"fake-codex-session"}}' \
+                > "$session_dir/rollout-$task.jsonl"
+            printf '{"type":"event_msg","payload":{"type":"user_message","message":"执行 Kanban 任务 %s."}}\\n' \
+                "$task" >> "$session_dir/rollout-$task.jsonl"
+        fi
+    fi
     if [ -n "${KANBAN_TMUX_MUTATE_CARD:-}" ]; then
         printf '%s\\n' '# agent mutation' >> "$KANBAN_TMUX_MUTATE_CARD"
     fi
@@ -1181,11 +1213,18 @@ exit 1
         message_path.unlink()
         message_path.parent.rmdir()
 
-    def test_notify_delivers_to_tmux_after_weak_probe_and_ack(self) -> None:
+    def test_notify_delivers_to_tmux_after_identity_probe_and_ack(self) -> None:
         self.install_fake_launchers()
         task_id, task = self.make_todo("notify-tmux")
         self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
         working = self.root / "working" / task.name
+        session_id = re.search(
+            r"(?m)^- 会话: claude (\S+)$", working.read_text(encoding="utf-8")
+        ).group(1)
+        self.assertEqual(
+            ["set-option", "-p", "-t", "%9", "@onevoke_session", session_id],
+            (self.root / "tmux.log.pane-setopt").read_text(encoding="utf-8").splitlines(),
+        )
         self.set_branch(working, "notify-tmux")
         self.run_command("move", task_id, "review")
         self.env["KANBAN_TMUX_CURRENT_COMMAND"] = "claude"
@@ -1206,6 +1245,33 @@ exit 1
         self.assertEqual("tmux finding\n", message_path.read_text(encoding="utf-8"))
         message_path.unlink()
         message_path.parent.rmdir()
+
+    def test_notify_tmux_identity_mismatch_and_missing_marker_use_fallback(self) -> None:
+        for slug, variable, value, expected in (
+            ("notify-tmux-mismatch", "KANBAN_TMUX_PANE_SESSION", "wrong-session", "tmux 会话不匹配"),
+            ("notify-tmux-missing", "KANBAN_TMUX_PANE_SESSION_MISSING", "1", "tmux pane 缺少会话标记"),
+        ):
+            with self.subTest(expected=expected):
+                self.install_fake_launchers()
+                task_id, task = self.make_todo(slug)
+                self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
+                review = self.root / "working" / task.name
+                self.set_branch(review, slug)
+                self.run_command("move", task_id, "review")
+                review = self.root / "review" / task.name
+                before = review.read_text(encoding="utf-8")
+                self.env[variable] = value
+                self.env["KANBAN_TMUX_RESPAWN_FAIL"] = "1"
+
+                result = self.run_command(
+                    "notify", task_id, "--message", "x", "--timeout", "61", succeeds=False
+                )
+
+                self.assertIn(expected, result.stderr)
+                self.assertIn("恢复=", result.stderr)
+                self.assertEqual(before, review.read_text(encoding="utf-8"))
+                self.env.pop(variable, None)
+                self.env.pop("KANBAN_TMUX_RESPAWN_FAIL", None)
 
     def test_notify_tmux_ack_timeout_warns_without_resuming(self) -> None:
         self.install_fake_launchers()
@@ -2159,6 +2225,42 @@ exit 1
         self.assertIn("tmux new-window 失败", result.stderr)
         self.assertEqual(original, task.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_tmux_pane_session_write_failure_closes_window_and_restores_todo(self) -> None:
+        task_id, task = self.make_todo("pane-session-rollback")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_launchers()
+        self.env["KANBAN_TMUX_PANE_SETOPT_FAIL"] = "1"
+
+        result = self.run_command(
+            "start", "--launcher", "tmux", "--agent", "claude", task_id, succeeds=False
+        )
+
+        self.assertIn("tmux 写入 pane 会话失败", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+        self.assertEqual(
+            ["kill-window", "-t", "@9"],
+            (self.root / "tmux.log.kill").read_text(encoding="utf-8").splitlines(),
+        )
+
+    def test_tmux_start_records_the_resolved_codex_session(self) -> None:
+        task_id, _task = self.make_todo("pane-codex-session")
+        self.install_fake_launchers()
+
+        self.run_command("start", "--launcher", "tmux", "--agent", "codex", task_id)
+
+        self.assertEqual(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                "%9",
+                "@onevoke_session",
+                "fake-codex-session",
+            ],
+            (self.root / "tmux.log.pane-setopt").read_text(encoding="utf-8").splitlines(),
+        )
 
     def test_start_outside_tmux_does_not_claim_task(self) -> None:
         task_id, task = self.make_todo("no-tmux")
@@ -6822,6 +6924,10 @@ if [ "$1" = "display-message" ]; then
 fi
 if [ "$1" = "respawn-pane" ]; then
     printf '%s\\n' "$5" > "$KANBAN_TMUX_LOG.command"
+    exit 0
+fi
+if [ "$1" = "set-option" ] && [ "${2:-}" = "-p" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.pane-setopt"
     exit 0
 fi
 printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG"
