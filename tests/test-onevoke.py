@@ -447,7 +447,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("配置的执行 Agent 不可用: grok", result.stderr)
         self.assertNotIn("配置的执行 Agent 不可用: codex", result.stderr)
 
-    def write_scaled_config(self, large: str, small: str) -> None:
+    def write_scaled_config(self, large: str, small: str, *, memsearch: bool = False) -> None:
         existing = {
             "schema_version": 1,
             "welcome_complete": True,
@@ -455,7 +455,7 @@ class OnevokeCommandTest(unittest.TestCase):
             "kanban_agents": {"large": large, "small": small},
             "launcher": "tmux",
             "reviewers": {role: "codex" for role in ROLES},
-            "memsearch": {"enabled": False},
+            "memsearch": {"enabled": memsearch},
         }
         self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(json.dumps(existing), encoding="utf-8")
@@ -495,6 +495,49 @@ class OnevokeCommandTest(unittest.TestCase):
         returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
         self.assertEqual(0, returncode, output)
         self.assertIn("当前执行 Agent 不支持 MemSearch 集成", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
+
+    def test_welcome_reconciles_memsearch_when_agents_change_after_enablement(self) -> None:
+        self.install_fake_environment(tmux=True)
+        git_log, bash_log = self.install_fake_memsearch_tools()
+        self.write_scaled_config("codex", "codex", memsearch=True)
+
+        # 已启用 MemSearch 且只有 Codex; 把小任务 Agent 改成 Claude 后直接保存.
+        returncode, output = self.run_on_tty("1\n1\n2\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("/plugin install memsearch", output)
+        # Codex 已覆盖, 不重复克隆安装.
+        self.assertFalse(git_log.exists())
+        self.assertFalse(bash_log.exists())
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual({"large": "codex", "small": "claude"}, config["kanban_agents"])
+        self.assertTrue(config["memsearch"]["enabled"])
+
+        # 已启用时改成不受支持的 Grok: 保存前告警, 仍保持启用 (Codex 仍被覆盖).
+        returncode, output = self.run_on_tty("1\n1\n3\n\n", "welcome", "--reset")
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 不覆盖执行 Agent Grok", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertTrue(config["memsearch"]["enabled"])
+
+        # 已启用但菜单 8 再次确认时, 同样对账: Grok 告警, Codex 不重装.
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 不覆盖执行 Agent Grok", output)
+        self.assertFalse(git_log.exists())
+
+    def test_welcome_disables_memsearch_when_no_configured_agent_is_supported(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.install_fake_memsearch_tools()
+        self.write_scaled_config("grok", "grok", memsearch=True)
+
+        returncode, output = self.run_on_tty("\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("当前执行 Agent 不支持 MemSearch 集成", output)
+        self.assertIn("MemSearch 已关闭", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertFalse(config["memsearch"]["enabled"])
 

@@ -953,6 +953,32 @@ def install_memsearch_for(agent: str) -> None:
         warning(t(f"MemSearch 安装命令无法执行: {error}", f"Could not run the MemSearch installation commands: {error}"))
 
 
+def reconcile_memsearch(config: dict[str, Any], covered: set[str]) -> bool:
+    """按当前在用执行 Agent 对账 MemSearch 覆盖面.
+
+    受支持且尚未覆盖的 Agent 执行安装或给出提示并记入 covered; 不受支持的逐个告警;
+    没有任何受支持 Agent 时返回 False, 调用方据此拒绝启用. 菜单确认与保存前都调用,
+    因此已启用后再改执行 Agent 也会补装, 不依赖 false -> true 的一次性转换.
+    """
+    in_use = execution_agents_in_use(config)
+    memory_agents = [agent for agent in in_use if agent in MEMSEARCH_AGENTS]
+    if not memory_agents:
+        warning(t("当前执行 Agent 不支持 MemSearch 集成.", "The current execution Agent does not support MemSearch integration."))
+        return False
+    for agent in in_use:
+        if agent not in MEMSEARCH_AGENTS:
+            warning(t(
+                f"MemSearch 不覆盖执行 Agent {AGENT_LABELS[agent]}: 该 Agent 没有集成, 由它执行的任务不会写入记忆.",
+                f"MemSearch does not cover execution Agent {AGENT_LABELS[agent]}: it has no integration, so tasks it runs will not be recorded.",
+            ))
+    for agent in memory_agents:
+        if agent in covered:
+            continue
+        install_memsearch_for(agent)
+        covered.add(agent)
+    return True
+
+
 def install_tmux() -> bool:
     managers = (
         ("brew", ["brew", "install", "tmux"]),
@@ -1186,6 +1212,12 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
             )
         )
     config["memsearch"]["enabled"] = existing["memsearch"]["enabled"]
+    # 既有配置已启用时, 其在用的受支持 Agent 视为已覆盖; 之后新增的 Agent 才需要补装.
+    memsearch_covered = (
+        {agent for agent in execution_agents_in_use(existing) if agent in MEMSEARCH_AGENTS}
+        if existing["memsearch"]["enabled"]
+        else set()
+    )
     config["review_stages"] = dict(existing["review_stages"])
     if config_valid:
         stored_language = configured_language()
@@ -1214,9 +1246,6 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         elif action == "7":
             edit_models(config)
         elif action == "8":
-            in_use = execution_agents_in_use(config)
-            memory_agents = [agent for agent in in_use if agent in MEMSEARCH_AGENTS]
-            uncovered = [agent for agent in in_use if agent not in MEMSEARCH_AGENTS]
             enabled = ask_yes_no(t("使用 MemSearch?", "Use MemSearch?"), config["memsearch"]["enabled"])
             if os.name == "nt" and enabled:
                 warning(t(
@@ -1224,23 +1253,20 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
                     "The upstream MemSearch installer currently requires Bash; this integration is not enabled on native Windows yet.",
                 ))
                 continue
-            if enabled and not config["memsearch"]["enabled"]:
-                if not memory_agents:
-                    warning(t("当前执行 Agent 不支持 MemSearch 集成.", "The current execution Agent does not support MemSearch integration."))
-                    continue
-                # 大小任务 Agent 不同时逐个安装; 不支持的 Agent 明确告警, 不假装已覆盖.
-                for agent in uncovered:
-                    warning(t(
-                        f"MemSearch 不覆盖执行 Agent {AGENT_LABELS[agent]}: 该 Agent 没有集成, 由它执行的任务不会写入记忆.",
-                        f"MemSearch does not cover execution Agent {AGENT_LABELS[agent]}: it has no integration, so tasks it runs will not be recorded.",
-                    ))
-                for agent in memory_agents:
-                    install_memsearch_for(agent)
+            if enabled and not reconcile_memsearch(config, memsearch_covered):
+                config["memsearch"]["enabled"] = False
+                continue
             config["memsearch"]["enabled"] = enabled
         elif action == "9":
             edit_review_stages(config)
         elif action == "10":
             edit_language(config)
+
+    if config["memsearch"]["enabled"] and os.name != "nt":
+        # 执行 Agent 可能在菜单 1 被改过: 保存前按最终配置补装新增 Agent, 全部不受支持时关闭.
+        if not reconcile_memsearch(config, memsearch_covered):
+            config["memsearch"]["enabled"] = False
+            warning(t("MemSearch 已关闭: 当前配置的执行 Agent 都没有集成.", "MemSearch has been disabled: none of the configured execution Agents has an integration."))
 
     entry = rules_entry()
     for selected_agent in execution_agents_in_use(config):
