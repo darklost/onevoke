@@ -55,6 +55,8 @@ COMMANDS = (
     MERGE_ENTRYPOINT,
 )
 AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok", "cursor": "Cursor"}
+# 目前只有 Codex 与 Claude 有 MemSearch 集成.
+MEMSEARCH_AGENTS = ("codex", "claude")
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
 REVIEW_STAGE_LABELS = {
     "auto": ("按档案自动", "follow audit profile"),
@@ -1212,10 +1214,9 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         elif action == "7":
             edit_models(config)
         elif action == "8":
-            memory_agent = next(
-                (agent for agent in execution_agents_in_use(config) if agent in ("codex", "claude")),
-                None,
-            )
+            in_use = execution_agents_in_use(config)
+            memory_agents = [agent for agent in in_use if agent in MEMSEARCH_AGENTS]
+            uncovered = [agent for agent in in_use if agent not in MEMSEARCH_AGENTS]
             enabled = ask_yes_no(t("使用 MemSearch?", "Use MemSearch?"), config["memsearch"]["enabled"])
             if os.name == "nt" and enabled:
                 warning(t(
@@ -1224,10 +1225,17 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
                 ))
                 continue
             if enabled and not config["memsearch"]["enabled"]:
-                if memory_agent is None:
+                if not memory_agents:
                     warning(t("当前执行 Agent 不支持 MemSearch 集成.", "The current execution Agent does not support MemSearch integration."))
                     continue
-                install_memsearch_for(memory_agent)
+                # 大小任务 Agent 不同时逐个安装; 不支持的 Agent 明确告警, 不假装已覆盖.
+                for agent in uncovered:
+                    warning(t(
+                        f"MemSearch 不覆盖执行 Agent {AGENT_LABELS[agent]}: 该 Agent 没有集成, 由它执行的任务不会写入记忆.",
+                        f"MemSearch does not cover execution Agent {AGENT_LABELS[agent]}: it has no integration, so tasks it runs will not be recorded.",
+                    ))
+                for agent in memory_agents:
+                    install_memsearch_for(agent)
             config["memsearch"]["enabled"] = enabled
         elif action == "9":
             edit_review_stages(config)

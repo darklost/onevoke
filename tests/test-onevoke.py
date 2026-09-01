@@ -447,6 +447,57 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertIn("配置的执行 Agent 不可用: grok", result.stderr)
         self.assertNotIn("配置的执行 Agent 不可用: codex", result.stderr)
 
+    def write_scaled_config(self, large: str, small: str) -> None:
+        existing = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": large,
+            "kanban_agents": {"large": large, "small": small},
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True, exist_ok=True)
+        self.config.write_text(json.dumps(existing), encoding="utf-8")
+
+    def test_welcome_memsearch_covers_every_supported_execution_agent(self) -> None:
+        self.install_fake_environment(tmux=True)
+        git_log, bash_log = self.install_fake_memsearch_tools()
+        self.write_scaled_config("codex", "claude")
+
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        # Codex 走上游安装脚本, Claude 给出插件安装提示; 两个在用 Agent 都要覆盖.
+        self.assertIn("MemSearch 安装命令已执行", output)
+        self.assertIn("/plugin install memsearch", output)
+        self.assertTrue(git_log.exists())
+        self.assertTrue(bash_log.exists())
+        self.assertNotIn("不覆盖执行 Agent", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertTrue(config["memsearch"]["enabled"])
+
+    def test_welcome_memsearch_warns_about_uncovered_execution_agents(self) -> None:
+        self.install_fake_environment(tmux=True)
+        self.install_fake_memsearch_tools()
+        self.write_scaled_config("codex", "grok")
+
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
+
+        self.assertEqual(0, returncode, output)
+        self.assertIn("MemSearch 不覆盖执行 Agent Grok", output)
+        self.assertIn("MemSearch 安装命令已执行", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertTrue(config["memsearch"]["enabled"])
+
+        # 全部在用 Agent 都不支持时拒绝启用.
+        self.write_scaled_config("grok", "grok")
+        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome", "--reset")
+        self.assertEqual(0, returncode, output)
+        self.assertIn("当前执行 Agent 不支持 MemSearch 集成", output)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["memsearch"]["enabled"])
+
     def test_doctor_fails_without_any_agent_or_reviewer(self) -> None:
         for name in (
             "onevoke",

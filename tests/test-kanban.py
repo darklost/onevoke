@@ -873,6 +873,106 @@ exit 1
         self.assertTrue((self.root / "working" / task.name).exists())
         self.assertRegex(self.last_launch_command(), r"--resume [0-9a-f-]{36}")
 
+    def test_start_prompt_for_group_cards_stops_at_review(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("group-prompt")
+        self.set_task_group(task, "20260901-demo-group")
+        single_id, _ = self.make_todo("single-prompt")
+
+        self.run_command("start", task_id)
+        group_command = self.last_launch_command()
+        self.run_command("start", single_id)
+        single_command = self.last_launch_command()
+
+        self.assertIn(f"kanban move {task_id} review", group_command)
+        self.assertIn("汇入组集成分支", group_command)
+        self.assertIn("由任务组主控负责", group_command)
+        self.assertNotIn("审核、集成和看板收尾.", group_command)
+        self.assertIn("审核、集成和看板收尾", single_command)
+        self.assertNotIn("review", single_command)
+
+    def test_resume_relaunches_cursor_with_its_chat(self) -> None:
+        fake_bin = self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-cursor")
+        self.env["KANBAN_CURSOR_CHAT_ID"] = "chat-resume-77"
+        self.run_command("start", "--agent", "cursor", task_id)
+        working = self.root / "working" / task.name
+        self.assertIn("- 会话: cursor chat-resume-77\n", working.read_text(encoding="utf-8"))
+        self.set_branch(working, "resume-cursor")
+        self.run_command("move", task_id, "review")
+        # resume 不得再建新 chat: 即使 create-chat 现在会失败也必须复用记录的 chat id.
+        self.env["KANBAN_CURSOR_CHAT_FAIL"] = "1"
+
+        result = self.run_command("resume", task_id, "--message", "QA finding: 修复空指针")
+
+        self.assertIn("Agent=cursor", result.stdout)
+        command = self.last_launch_command()
+        self.assertIn(str(fake_bin / "cursor-agent"), command)
+        self.assertIn("--resume chat-resume-77", command)
+        self.assertIn("--model cursor-grok-4.6-high", command)
+        self.assertIn("--trust", command)
+        self.assertIn("--force", command)
+        self.assertIn("QA finding: 修复空指针", command)
+        self.assertTrue(working.exists())
+
+    def load_kanban_module(self):
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            loader = SourceFileLoader("kanban_rollback_test", str(COMMAND))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            if spec is None:
+                self.fail(f"unable to load {COMMAND}")
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+        return module
+
+    def test_rollback_keeps_the_card_in_working_when_the_document_cannot_be_restored(self) -> None:
+        kanban_mod = self.load_kanban_module()
+        task_id, task = self.make_todo("rollback-restore")
+        original = task.read_text(encoding="utf-8")
+        self.run_command("move", task_id, "working")
+        working = self.root / "working" / task.name
+        working.write_text(original.replace("- 负责人:\n", "- 负责人: codex\n", 1), encoding="utf-8")
+        moved = kanban_mod.Entry(task_id, "working", working, working, "small")
+        failure = kanban_mod.LaunchFailure(kanban_mod.KanbanError("tmux new-window 失败"), None)
+
+        def refuse_write(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        with mock.patch.object(kanban_mod, "write_text_atomic", refuse_write):
+            with self.assertRaises(kanban_mod.KanbanError) as raised:
+                kanban_mod.rollback_launch(self.root, moved, "todo", failure, original)
+
+        message = str(raised.exception)
+        self.assertIn("卡片保留在 working", message)
+        self.assertIn("恢复文档失败", message)
+        self.assertTrue(working.exists(), "文档未恢复时不得迁回 todo")
+        self.assertFalse(task.exists())
+        self.assertIn("- 负责人: codex\n", working.read_text(encoding="utf-8"))
+
+    def test_rollback_restores_the_document_and_moves_the_card_back(self) -> None:
+        kanban_mod = self.load_kanban_module()
+        task_id, task = self.make_todo("rollback-ok")
+        original = task.read_text(encoding="utf-8")
+        self.run_command("move", task_id, "working")
+        working = self.root / "working" / task.name
+        working.write_text(original.replace("- 负责人:\n", "- 负责人: codex\n", 1), encoding="utf-8")
+        moved = kanban_mod.Entry(task_id, "working", working, working, "small")
+        failure = kanban_mod.LaunchFailure(kanban_mod.KanbanError("tmux new-window 失败"), None)
+
+        with self.assertRaises(kanban_mod.KanbanError) as raised:
+            kanban_mod.rollback_launch(self.root, moved, "todo", failure, original)
+
+        self.assertEqual("tmux new-window 失败", str(raised.exception))
+        self.assertTrue(task.exists())
+        self.assertFalse(working.exists())
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+
     def test_start_moves_task_and_launches_agent_window(self) -> None:
         task_id, task = self.make_todo("start-direct")
         fake_bin = self.install_fake_launchers()
