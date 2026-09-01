@@ -6,6 +6,10 @@
 未安装 memsearch 时 worktree 里没有该目录, 本脚本报告无事可做并以 0 退出,
 不创建任何目录, 集成流程可以无条件调用它.
 
+POSIX 合并成功后安全核验来源 `.memsearch/.watch.pid`, 并在返回成功前终止
+监控该来源 memory 的 MemSearch watcher. 无法确认进程身份或等待退出失败时
+拒绝成功, 让调用方保留 worktree; `--dry-run` 只报告而不发送信号.
+
 全程按字节处理. 记忆文件由 hook 自动追加, 历史数据可能含非法 UTF-8 序列;
 先解码再处理会丢字节或直接抛错, 因此切分, 归一化和哈希都在 bytes 上完成.
 新合并条目在写入前丢弃非法 UTF-8; 不对可能仍被追加的目标整文件 rewrite
@@ -21,6 +25,8 @@ import argparse
 import hashlib
 import os
 import re
+import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -71,6 +77,9 @@ SOURCE_MARKER = re.compile(rb"^<!-- merged-worktree-memory source:.* -->$")
 # 协议才能绝对消除, 本脚本只能 fail-closed 本进程可观测窗口; 见任务范围.
 SOURCE_STABLE_ATTEMPTS = 5
 SOURCE_STABLE_DELAY_SECONDS = 0.1
+WATCH_STOP_TIMEOUT_SECONDS = 5.0
+WATCH_STOP_POLL_SECONDS = 0.05
+WATCH_PID = re.compile(rb"[1-9][0-9]*")
 
 
 class SourceSnapshots(dict[Path, bytes]):
@@ -553,6 +562,207 @@ def assert_source_unchanged(
             )
 
 
+def read_watch_pid(source_root: str) -> int | None:
+    pid_path = Path(source_root) / ".memsearch" / ".watch.pid"
+    data = read_regular_file_if_exists_nofollow(Path(source_root), pid_path)
+    if data is None:
+        return None
+    stripped = data.strip()
+    if not WATCH_PID.fullmatch(stripped):
+        die_both(
+            f"MemSearch watcher PID 文件无效: {pid_path}",
+            f"invalid MemSearch watcher PID file: {pid_path}",
+        )
+    pid = int(stripped)
+    if pid <= 1 or pid == os.getpid():
+        die_both(
+            f"MemSearch watcher PID 不安全: {pid}",
+            f"unsafe MemSearch watcher PID: {pid}",
+        )
+    return pid
+
+
+def linux_process_snapshot(pid: int) -> tuple[str, str, list[str]] | None:
+    process_dir = Path("/proc") / str(pid)
+    try:
+        owner = process_dir.stat().st_uid
+        stat_data = (process_dir / "stat").read_text(encoding="ascii")
+        command_data = (process_dir / "cmdline").read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        die_both(
+            f"无法核验 MemSearch watcher PID {pid}: {error}",
+            f"cannot verify MemSearch watcher PID {pid}: {error}",
+        )
+    if owner != os.geteuid():
+        die_both(
+            f"MemSearch watcher PID {pid} 不属于当前用户",
+            f"MemSearch watcher PID {pid} is not owned by the current user",
+        )
+    try:
+        stat_fields = stat_data.rsplit(")", 1)[1].split()
+        state = stat_fields[0]
+        start_time = stat_fields[19]
+    except IndexError:
+        die_both(
+            f"无法解析 MemSearch watcher PID {pid} 的进程状态",
+            f"cannot parse process state for MemSearch watcher PID {pid}",
+        )
+    args = [os.fsdecode(part) for part in command_data.split(b"\0") if part]
+    return state, start_time, args
+
+
+def portable_process_snapshot(pid: int) -> tuple[str, str, list[str]] | None:
+    try:
+        result = subprocess.run(
+            [
+                "ps", "-ww", "-p", str(pid),
+                "-o", "uid=", "-o", "stat=", "-o", "lstart=", "-o", "args=",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        die_both(
+            f"无法核验 MemSearch watcher PID {pid}: {error}",
+            f"cannot verify MemSearch watcher PID {pid}: {error}",
+        )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    fields = result.stdout.strip().split(None, 7)
+    if len(fields) != 8:
+        die_both(
+            f"无法解析 MemSearch watcher PID {pid} 的进程状态",
+            f"cannot parse process state for MemSearch watcher PID {pid}",
+        )
+    uid, state, weekday, month, day, clock, year, command = fields
+    try:
+        owner = int(uid)
+        args = shlex.split(command)
+    except (ValueError, OverflowError) as error:
+        die_both(
+            f"无法解析 MemSearch watcher PID {pid} 的进程信息: {error}",
+            f"cannot parse process information for MemSearch watcher PID {pid}: {error}",
+        )
+    if owner != os.geteuid():
+        die_both(
+            f"MemSearch watcher PID {pid} 不属于当前用户",
+            f"MemSearch watcher PID {pid} is not owned by the current user",
+        )
+    return state, " ".join((weekday, month, day, clock, year)), args
+
+
+def process_snapshot(pid: int) -> tuple[str, str, list[str]] | None:
+    if sys.platform.startswith("linux") and Path("/proc").is_dir():
+        return linux_process_snapshot(pid)
+    return portable_process_snapshot(pid)
+
+
+def watcher_matches_memory(args: list[str], source_memory: Path, pid: int) -> bool:
+    expected = os.path.realpath(source_memory)
+    for index in range(1, len(args) - 1):
+        if args[index] != "watch" or Path(args[index - 1]).name != "memsearch":
+            continue
+        watched = args[index + 1]
+        if not os.path.isabs(watched):
+            try:
+                watched = os.path.join(os.readlink(f"/proc/{pid}/cwd"), watched)
+            except OSError:
+                return False
+        if os.path.realpath(watched) == expected:
+            return True
+    return False
+
+
+def stop_memsearch_watcher(source_root: str, dry_run: bool) -> None:
+    pid = read_watch_pid(source_root)
+    if pid is None:
+        return
+    source_memory = Path(source_root) / ".memsearch" / "memory"
+    snapshot = process_snapshot(pid)
+    if snapshot is None or snapshot[0].startswith("Z"):
+        print(
+            t(
+                f"MemSearch watcher 已停止: pid={pid}",
+                f"MemSearch watcher already stopped: pid={pid}",
+            )
+        )
+        return
+    _, start_time, args = snapshot
+    if not watcher_matches_memory(args, source_memory, pid):
+        die_both(
+            f"PID {pid} 不是监控来源 memory 的 MemSearch watcher; 拒绝终止进程",
+            f"PID {pid} is not the MemSearch watcher for the source memory; refusing to terminate it",
+        )
+    if dry_run:
+        print(
+            t(
+                f"将停止 MemSearch watcher: pid={pid}",
+                f"Would stop MemSearch watcher: pid={pid}",
+            )
+        )
+        return
+
+    current = process_snapshot(pid)
+    if current is None or current[0].startswith("Z"):
+        print(
+            t(
+                f"MemSearch watcher 已停止: pid={pid}",
+                f"MemSearch watcher already stopped: pid={pid}",
+            )
+        )
+        return
+    if current[1] != start_time or current[2] != args:
+        die_both(
+            f"核验期间 PID {pid} 被复用; 拒绝终止进程",
+            f"PID {pid} was reused during verification; refusing to terminate it",
+        )
+
+    try:
+        process_group = os.getpgid(pid)
+        if process_group == pid:
+            os.killpg(process_group, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        print(
+            t(
+                f"MemSearch watcher 已停止: pid={pid}",
+                f"MemSearch watcher already stopped: pid={pid}",
+            )
+        )
+        return
+    except OSError as error:
+        die_both(
+            f"无法停止 MemSearch watcher PID {pid}: {error}",
+            f"cannot stop MemSearch watcher PID {pid}: {error}",
+        )
+
+    deadline = time.monotonic() + WATCH_STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        current = process_snapshot(pid)
+        if current is None or current[0].startswith("Z"):
+            print(
+                t(
+                    f"已停止 MemSearch watcher: pid={pid}",
+                    f"Stopped MemSearch watcher: pid={pid}",
+                )
+            )
+            return
+        if current[1] != start_time:
+            die_both(
+                f"等待退出时 PID {pid} 被复用",
+                f"PID {pid} was reused while waiting for watcher exit",
+            )
+        time.sleep(WATCH_STOP_POLL_SECONDS)
+    die_both(
+        f"MemSearch watcher PID {pid} 在 {WATCH_STOP_TIMEOUT_SECONDS:g} 秒内未退出",
+        f"MemSearch watcher PID {pid} did not exit within {WATCH_STOP_TIMEOUT_SECONDS:g} seconds",
+    )
+
+
 def git_output(directory: str, *args: str) -> str | None:
     try:
         result = subprocess.run(
@@ -776,7 +986,7 @@ def merge_files(
         assert_source_unchanged(source_memory, snapshots, source_identity)
 
 
-def merge(source_root: str, target_root: str, dry_run: bool) -> None:
+def merge(source_root: str, target_root: str, dry_run: bool) -> bool:
     source_memory = Path(source_root) / ".memsearch" / "memory"
 
     # git 返回物理路径而 --target 可能是逻辑路径, 同一目录的两种写法要判等.
@@ -794,7 +1004,7 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         roots_are_equal = os.path.realpath(source_root) == os.path.realpath(target_root)
     if roots_are_equal:
         print(t("来源即主 worktree; 无需合并 memory.", "Source is the main worktree; no memory merge needed."))
-        return
+        return False
 
     # 源 worktree 没有 .memsearch/memory 时是正常空操作: 常见于未装 memsearch,
     # 或已装但本 worktree 尚未产生记忆. 不创建任何目录, 以 0 退出.
@@ -822,7 +1032,7 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
                 f"Nothing to merge: {source_memory} does not exist",
             )
         )
-        return
+        return True
 
     source_identity = source_memory_identity(source_memory)
     # 目录已存在时即使当前为空也要做稳定快照: 避免 Stop hook 稍后才创建首个文件
@@ -837,7 +1047,7 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
                     f"Nothing to merge: no memory files in {source_memory}",
                 )
             )
-            return
+            return True
         assert_source_unchanged(source_memory, snapshots, source_identity)
         print(
             t(
@@ -845,13 +1055,13 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
                 f"Nothing to merge: no memory files in {source_memory}",
             )
         )
-        return
+        return True
 
     if dry_run:
         merge_files(
             source_root, target_root, source_memory, snapshots, True, source_identity
         )
-        return
+        return True
 
     state_dir = Path(target_root) / ".memsearch"
     if os.name == "nt":
@@ -877,10 +1087,11 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
                         f"Nothing to merge: no memory files in {source_memory}",
                     )
                 )
-                return
+                return True
             merge_files(
                 source_root, target_root, source_memory, snapshots, False, source_identity
             )
+    return True
 
 
 def main() -> int:
@@ -892,10 +1103,12 @@ def main() -> int:
     parser = LocalizedArgumentParser(
         description=t(
             "把任务 worktree 的 .memsearch/memory 条目并入主 worktree. "
-            "新条目写入前清理非法 UTF-8; 目标既有文件只扫描, 在仍可能被追加时不改写.",
+            "新条目写入前清理非法 UTF-8; 目标既有文件只扫描, 在仍可能被追加时不改写. "
+            "POSIX 成功后停止经核验的来源 MemSearch watcher.",
             "Merge .memsearch/memory entries from a task worktree into the "
             "main worktree. New entries are UTF-8 cleaned on write; existing target "
-            "files are scanned but not rewritten while they may still receive appends.",
+            "files are scanned but not rewritten while they may still receive appends. "
+            "On POSIX, a verified source MemSearch watcher is stopped after success.",
         )
     )
     parser.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
@@ -915,7 +1128,9 @@ def main() -> int:
 
     source_root, target_root = resolve_roots(args)
     try:
-        merge(source_root, target_root, args.dry_run)
+        should_stop_watcher = merge(source_root, target_root, args.dry_run)
+        if should_stop_watcher and os.name != "nt":
+            stop_memsearch_watcher(source_root, args.dry_run)
     except OSError as error:
         die_both(
             f"安全文件操作失败: {error}",

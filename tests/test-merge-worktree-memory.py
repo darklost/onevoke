@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -202,6 +203,40 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(0, acl.returncode, acl.stderr)
         self.assertNotIn("(I)", acl.stdout, acl.stdout)
         self.assertEqual(1, acl.stdout.count("(F)"), acl.stdout)
+
+    def start_fake_watcher(self, watched_memory: Path) -> subprocess.Popen:
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir(exist_ok=True)
+        executable = fake_bin / "memsearch"
+        executable.write_text(
+            "#!/usr/bin/env python3\n"
+            "import signal\n"
+            "import time\n"
+            "def stop(*_):\n"
+            "    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            "while True:\n"
+            "    time.sleep(0.1)\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o700)
+        process = subprocess.Popen(
+            [str(executable), "watch", str(watched_memory)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        def stop_process() -> None:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+
+        self.addCleanup(stop_process)
+        (self.source / ".memsearch" / ".watch.pid").write_text(
+            f"{process.pid}\n", encoding="ascii"
+        )
+        return process
 
     def test_merges_then_skips_on_second_run(self) -> None:
         self.write_source("a.md", GOLDEN_SOURCE)
@@ -483,6 +518,54 @@ class MergeTest(unittest.TestCase):
         self.assertIn("Would scan invalid UTF-8", result.stdout)
         self.assertIn("without rewriting live files", result.stdout)
         self.assertFalse((self.target_memory / "a.md").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX MemSearch watcher lifecycle")
+    def test_successful_merge_stops_matching_memsearch_watcher(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- stop watcher\n")
+        watcher = self.start_fake_watcher(self.source_memory)
+
+        result = self.run_merger()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        watcher.wait(timeout=5)
+        self.assertIn(f"Stopped MemSearch watcher: pid={watcher.pid}", result.stdout)
+
+    @unittest.skipIf(os.name == "nt", "POSIX MemSearch watcher lifecycle")
+    def test_dry_run_does_not_stop_memsearch_watcher(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- dry run watcher\n")
+        watcher = self.start_fake_watcher(self.source_memory)
+
+        result = self.run_merger("--dry-run")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIsNone(watcher.poll())
+        self.assertIn(f"Would stop MemSearch watcher: pid={watcher.pid}", result.stdout)
+
+    @unittest.skipIf(os.name == "nt", "POSIX MemSearch watcher lifecycle")
+    def test_watcher_pid_for_another_memory_is_rejected_without_killing(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- wrong watcher\n")
+        other_memory = self.root / "other" / ".memsearch" / "memory"
+        other_memory.mkdir(parents=True)
+        watcher = self.start_fake_watcher(other_memory)
+
+        result = self.run_merger()
+
+        self.assertEqual(1, result.returncode)
+        self.assertIsNone(watcher.poll())
+        self.assertIn("is not the MemSearch watcher for the source memory", result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX MemSearch watcher lifecycle")
+    def test_stale_watcher_pid_is_a_clean_noop(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- stale watcher\n")
+        stale_pid = 999_999_999
+        (self.source / ".memsearch" / ".watch.pid").write_text(
+            f"{stale_pid}\n", encoding="ascii"
+        )
+
+        result = self.run_merger()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(f"MemSearch watcher already stopped: pid={stale_pid}", result.stdout)
 
     def test_source_equal_to_target_is_a_noop(self) -> None:
         result = subprocess.run(
