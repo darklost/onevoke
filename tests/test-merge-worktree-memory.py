@@ -861,6 +861,37 @@ class MergeTest(unittest.TestCase):
         self.assertIn(signal.SIGSTOP, [call.args[1] for call in sent.call_args_list])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_group_is_not_signaled_when_leader_exits_before_safe_stop(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- leader exits before stop\n")
+        watcher = self.start_fake_watcher(self.source_memory)
+        source_identity = merger.source_memory_identity(self.source_memory)
+
+        with (
+            mock.patch.object(
+                merger.signal,
+                "pidfd_send_signal",
+                side_effect=ProcessLookupError,
+            ),
+            mock.patch.object(
+                merger,
+                "linux_process_group_members",
+                return_value={watcher.pid},
+            ),
+            mock.patch.object(merger.os, "killpg") as kill_group,
+            self.assertRaises(SystemExit),
+        ):
+            merger.stop_memsearch_watcher_pidfd(
+                self.source_memory,
+                watcher.pid,
+                -1,
+                False,
+                source_identity,
+            )
+
+        kill_group.assert_not_called()
+        self.assertIsNone(watcher.poll())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
     def test_stop_timeout_fails_closed_and_leaves_watcher_running(self) -> None:
         self.write_source("a.md", b"### 09:30\n- timeout\n")
         ready = self.source_memory / "timeout.ready"

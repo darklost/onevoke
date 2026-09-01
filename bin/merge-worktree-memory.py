@@ -987,7 +987,15 @@ def stop_memsearch_watcher_pidfd(
             stopped_snapshot = None
         else:
             stopped_snapshot = wait_for_stopped_watcher(pid, pidfd, snapshot)
-        if stopped_snapshot is None and not independent_group:
+        if stopped_snapshot is None:
+            if independent_group and linux_process_group_members(process_group):
+                die_both(
+                    f"MemSearch watcher 组长 PID {pid} 在安全暂停前退出，"
+                    "但数字进程组仍有成员；拒绝信号以避免 PID/PGID 复用误杀",
+                    f"MemSearch watcher group leader PID {pid} exited before safe "
+                    "suspension while the numeric process group still has members; "
+                    "refusing to signal it to avoid PID/PGID reuse",
+                )
             print(
                 t(
                     f"MemSearch watcher 已停止: pid={pid}",
@@ -995,7 +1003,7 @@ def stop_memsearch_watcher_pidfd(
                 )
             )
             return True
-        suspended = stopped_snapshot is not None
+        suspended = True
         assert_stop_source_identity(source_memory, expected_source_identity)
 
         if independent_group:
