@@ -875,8 +875,8 @@ class MergeTest(unittest.TestCase):
             mock.patch.object(
                 merger,
                 "linux_process_group_members",
-                return_value={watcher.pid},
-            ),
+                return_value=set(),
+            ) as group_members,
             mock.patch.object(merger.os, "killpg") as kill_group,
             self.assertRaises(SystemExit),
         ):
@@ -889,6 +889,7 @@ class MergeTest(unittest.TestCase):
             )
 
         kill_group.assert_not_called()
+        group_members.assert_not_called()
         self.assertIsNone(watcher.poll())
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
