@@ -2211,6 +2211,7 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
             f"只能唤醒 {' 或 '.join(RESUME_STATES)} 中的任务; {entry.task_id} 在 {entry.state}",
             f"Only tasks in {' or '.join(RESUME_STATES)} can be resumed; {entry.task_id} is in {entry.state}",
         ))
+    validate_liveness_timeout(args.timeout, "resume")
     message = read_task_message(args, "resume")
     text = read_document(entry)
     session = session_from(text)
@@ -2231,7 +2232,29 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
     try:
         outcome = launch_agent(plan, root, window_name(entry, text), agent_argv)
     except LaunchFailure as failure:
-        rollback_launch(root, moved, entry.state, failure)
+        rollback_launch(root, moved, entry.state, failure, text)
+        raise
+    try:
+        validate_resumed_agent(plan, outcome, session, args.timeout)
+    except (KanbanError, OSError, UnicodeError, ValueError) as liveness_error:
+        detail = resumed_agent_failure_output(plan, outcome)
+        if detail:
+            liveness_error = KanbanError(t(
+                f"{liveness_error}; Agent 输出:\n{detail}",
+                f"{liveness_error}; Agent output:\n{detail}",
+            ))
+        cleanup_error = None
+        try:
+            cleanup_failed_resume(plan, outcome)
+        except (KanbanError, OSError) as error:
+            cleanup_error = str(error)
+        rollback_launch(
+            root,
+            moved,
+            entry.state,
+            LaunchFailure(liveness_error, cleanup_error),
+            text,
+        )
         raise
     report_launch(t("已唤醒", "resumed"), moved, session.agent, plan, outcome)
 
@@ -2477,6 +2500,14 @@ def notify_resume_prompt(task_id: str, message: str, paths: InstallPaths) -> str
     )
 
 
+def validate_liveness_timeout(timeout: float, command: str) -> None:
+    if not math.isfinite(timeout) or timeout <= 60:
+        raise KanbanError(t(
+            f"{command} 超时必须是大于 60 的有限秒数",
+            f"{command} timeout must be a finite number greater than 60",
+        ))
+
+
 def validate_resumed_agent(plan: LaunchPlan, outcome: LaunchOutcome, session: AgentSession, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while True:
@@ -2511,6 +2542,26 @@ def validate_resumed_agent(plan: LaunchPlan, outcome: LaunchOutcome, session: Ag
         if remaining <= 0:
             raise KanbanError(t("恢复 Agent 存活校验超时", "Resumed Agent liveness check timed out"))
         time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
+
+
+RESUME_FAILURE_OUTPUT_LIMIT = 8192
+
+
+def resumed_agent_failure_output(plan: LaunchPlan, outcome: LaunchOutcome) -> str:
+    """存活校验失败时保留可寻址终端里的原始退出文本."""
+    try:
+        if plan.launcher == "herdr" and outcome.pane:
+            result = herdr_capture(plan.herdr_bin, "pane", "read", outcome.pane)
+        elif plan.launcher in ("tmux", "tmux-session") and outcome.pane:
+            result = tmux_capture(plan.tmux, "capture-pane", "-p", "-t", outcome.pane)
+        else:
+            return ""
+    except (KanbanError, OSError, UnicodeError, ValueError):
+        return ""
+    output = (result.stdout or result.stderr).rstrip()
+    if len(output) > RESUME_FAILURE_OUTPUT_LIMIT:
+        output = output[-RESUME_FAILURE_OUTPUT_LIMIT:]
+    return output
 
 
 def cleanup_failed_resume(plan: LaunchPlan, outcome: LaunchOutcome) -> None:
@@ -2568,8 +2619,7 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
             f"只能直投 {' 或 '.join(RESUME_STATES)} 中的任务; {entry.task_id} 在 {entry.state}",
             f"Only tasks in {' or '.join(RESUME_STATES)} can be notified; {entry.task_id} is in {entry.state}",
         ))
-    if not math.isfinite(args.timeout) or args.timeout <= 60:
-        raise KanbanError(t("notify 超时必须是大于 60 的有限秒数", "notify timeout must be a finite number greater than 60"))
+    validate_liveness_timeout(args.timeout, "notify")
     message = read_task_message(args, "notify")
     text = read_document(entry)
     window = metadata_from(text, WINDOW_FIELD)
@@ -3125,6 +3175,13 @@ def parser() -> argparse.ArgumentParser:
         "--launcher",
         choices=LAUNCHERS,
         help=t("覆盖本次启动方式, 不修改配置", "override the launcher for this run without changing the configuration"),
+    )
+    resume_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=NOTIFY_DEFAULT_TIMEOUT,
+        metavar=t("秒", "seconds"),
+        help=t("等待恢复存活的超时秒数, 默认 120", "seconds to wait for resumed-agent liveness; default 120"),
     )
 
     notify_parser = commands.add_parser(

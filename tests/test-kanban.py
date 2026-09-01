@@ -180,7 +180,11 @@ class KanbanCommandTest(unittest.TestCase):
             """#!/bin/sh
 if [ "$1" = "display-message" ]; then
     if [ "${5:-}" = '#{pane_current_command}\t#{pane_in_mode}\t#{pane_dead}' ]; then
-        printf '%s\t%s\t%s\\n' "${KANBAN_TMUX_CURRENT_COMMAND:-codex}" "${KANBAN_TMUX_IN_MODE:-0}" "${KANBAN_TMUX_DEAD:-0}"
+        current="${KANBAN_TMUX_CURRENT_COMMAND:-}"
+        if [ -z "$current" ] && [ -f "$KANBAN_TMUX_LOG.current" ]; then
+            current=$(sed -n '1p' "$KANBAN_TMUX_LOG.current")
+        fi
+        printf '%s\t%s\t%s\\n' "${current:-codex}" "${KANBAN_TMUX_IN_MODE:-0}" "${KANBAN_TMUX_DEAD:-0}"
         exit 0
     fi
     printf '%s\\n' '$42'
@@ -224,6 +228,8 @@ if [ "$1" = "kill-window" ]; then
 fi
 if [ "$1" = "respawn-pane" ]; then
     printf '%s\\n' "$5" > "$KANBAN_TMUX_LOG.command"
+    current=${5%% *}
+    printf '%s\\n' "${current##*/}" > "$KANBAN_TMUX_LOG.current"
     if [ -n "${KANBAN_TMUX_MUTATE_CARD:-}" ]; then
         printf '%s\\n' '# agent mutation' >> "$KANBAN_TMUX_MUTATE_CARD"
     fi
@@ -332,6 +338,10 @@ if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
     fi
     printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"w1:t9","agent":"%s","agent_status":"%s","agent_session":{"value":"%s"}}}}\n' \
         "$3" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_STATUS:-idle}" "${KANBAN_HERDR_SESSION:-}"
+    exit 0
+fi
+if [ "$1" = "pane" ] && [ "$2" = "read" ]; then
+    printf '%s\n' "${KANBAN_HERDR_OUTPUT:-}"
     exit 0
 fi
 if [ "$1" = "pane" ] && [ "$2" = "list" ]; then
@@ -878,10 +888,14 @@ exit 1
         neither = self.run_command("resume", task_id, succeeds=False)
         both = self.run_command("resume", task_id, "--message", "x", "--message-file", "y", succeeds=False)
         empty = self.run_command("resume", task_id, "--message", "  ", succeeds=False)
+        bad_timeout = self.run_command("resume", task_id, "--message", "x", "--timeout", "nan", succeeds=False)
+        short_timeout = self.run_command("resume", task_id, "--message", "x", "--timeout", "60", succeeds=False)
 
         for result in (neither, both):
             self.assertIn("--message", result.stderr)
         self.assertIn("不得为空", empty.stderr)
+        self.assertIn("超时", bad_timeout.stderr)
+        self.assertIn("大于 60", short_timeout.stderr)
         self.assertTrue((self.root / "review" / task.name).exists())
 
     def test_resume_finds_the_codex_session_from_rollouts(self) -> None:
@@ -970,6 +984,95 @@ exit 1
         self.assertIn("tmux new-window 失败", result.stderr)
         self.assertFalse(working.exists())
         self.assertEqual(before, (self.root / "review" / task.name).read_text(encoding="utf-8"))
+
+    def test_resume_herdr_immediate_exit_reports_output_and_restores_review(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, review = self.make_herdr_review("resume-herdr-exit")
+        before = review.read_text(encoding="utf-8")
+        self.env["KANBAN_HERDR_STATUS"] = "done"
+        self.env["KANBAN_HERDR_OUTPUT"] = "thread already has an active writer (code -32600)"
+        args = argparse.Namespace(
+            task=task_id,
+            message="x",
+            message_file=None,
+            launcher="herdr",
+            timeout=61,
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 62.0)):
+                with mock.patch.object(kanban.time, "sleep"):
+                    with self.assertRaisesRegex(kanban.KanbanError, "active writer"):
+                        kanban.command_resume(args, self.root)
+
+        self.assertEqual(before, review.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / review.name).exists())
+        self.assertEqual(["tab", "close", "w1:t9"], self.herdr_arguments("close"))
+
+    def test_resume_console_immediate_exit_keeps_working_card_in_place(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-console-exit")
+        self.run_command("start", "--agent", "grok", task_id)
+        working = self.root / "working" / task.name
+        before = working.read_text(encoding="utf-8")
+        process = mock.Mock(returncode=17)
+        process.poll.return_value = 17
+        args = argparse.Namespace(
+            task=task_id,
+            message="x",
+            message_file=None,
+            launcher="console",
+            timeout=61,
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(
+                kanban,
+                "prepare_launch",
+                return_value=kanban.LaunchPlan("console", self.root.parent),
+            ):
+                with mock.patch.object(
+                    kanban,
+                    "launch_agent",
+                    return_value=kanban.LaunchOutcome(process=process),
+                ):
+                    with self.assertRaisesRegex(kanban.KanbanError, "exit 17"):
+                        kanban.command_resume(args, self.root)
+
+        self.assertEqual(before, working.read_text(encoding="utf-8"))
+
+    def test_resume_does_not_move_back_when_document_restore_fails(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-restore-fail")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "resume-restore-fail")
+        self.run_command("move", task_id, "review")
+        args = argparse.Namespace(
+            task=task_id,
+            message="x",
+            message_file=None,
+            launcher="tmux",
+            timeout=61,
+        )
+
+        def mutate_then_fail(_plan, _outcome, _session, _timeout):
+            moved = self.root / "working" / task.name
+            moved.write_text(moved.read_text(encoding="utf-8") + "\nAgent mutation\n", encoding="utf-8")
+            raise kanban.KanbanError("liveness failed")
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "launch_agent", return_value=kanban.LaunchOutcome()):
+                with mock.patch.object(kanban, "validate_resumed_agent", side_effect=mutate_then_fail):
+                    with mock.patch.object(kanban, "cleanup_failed_resume"):
+                        with mock.patch.object(kanban, "write_text_atomic", side_effect=OSError("restore denied")):
+                            with self.assertRaisesRegex(kanban.KanbanError, "卡片保留在 working"):
+                                kanban.command_resume(args, self.root)
+
+        self.assertFalse((self.root / "review" / task.name).exists())
+        self.assertIn("Agent mutation", (self.root / "working" / task.name).read_text(encoding="utf-8"))
 
     def test_resume_of_a_working_card_does_not_move_it(self) -> None:
         self.install_fake_launchers()
