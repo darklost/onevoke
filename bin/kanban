@@ -2900,10 +2900,12 @@ def watched_task_ids(root: Path, values: list[str], member_ids: list[str]) -> li
     group_members: Dict[str, tuple[str, ...]] = {}
     if group_values:
         board = scan(root)
-        documents = {
-            task_id: read_document(entry)
-            for task_id, entry in board.entries.items()
-        }
+        documents: Dict[str, str] = {}
+        for task_id, entry in board.entries.items():
+            try:
+                documents[task_id] = read_document(entry)
+            except KanbanError:
+                continue
         group_members = task_group_members(documents)
     member_set = set(member_ids)
     watched: list[str] = []
