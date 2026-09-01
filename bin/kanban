@@ -356,20 +356,28 @@ def command_init(args: argparse.Namespace) -> None:
         root.mkdir(parents=True, exist_ok=True)
         ensure_windows_lexical_path_safe(root)
     for state in STATES:
-        path = root / state
-        ensure_windows_lexical_path_safe(path)
-        if path.exists() and not path.is_dir():
-            raise KanbanError(t(f"状态路径不是目录: {path}", f"State path is not a directory: {path}"))
-        if os.name == "nt":
-            ensure_private_board_directory(path)
-        else:
-            path.mkdir(exist_ok=True)
-            ensure_windows_lexical_path_safe(path)
+        create_state_directory(root / state)
     exclude = add_git_exclude(root)
     print(t(f"已初始化: {root}", f"initialized: {root}"))
     if exclude:
         print(t(f"Git 排除文件: {exclude}", f"git exclude: {exclude}"))
     print(t(f"规则: {rules_path()}", f"rules: {rules_path()}"))
+
+
+def create_state_directory(path: Path) -> None:
+    """幂等创建一个状态目录; Windows 在创建时应用私有 DACL, 既有目录只迁移 ACL."""
+    ensure_windows_lexical_path_safe(path)
+    if path.exists() and not path.is_dir():
+        raise KanbanError(t(f"状态路径不是目录: {path}", f"State path is not a directory: {path}"))
+    if os.name == "nt":
+        ensure_private_board_directory(path)
+    else:
+        path.mkdir(exist_ok=True)
+        ensure_windows_lexical_path_safe(path)
+
+
+# review 是后加的状态: 旧看板只有这 6 个目录.
+LEGACY_STATES = tuple(state for state in STATES if state != "review")
 
 
 def ensure_layout(root: Path) -> None:
@@ -380,8 +388,17 @@ def ensure_layout(root: Path) -> None:
         path = root / state
         if is_reparse_point(path):
             raise KanbanError(t(f"状态目录不得是符号链接/重解析点: {path}", f"State directory must not be a symlink/reparse point: {path}"))
-        if not path.is_dir():
-            raise KanbanError(t(f"状态目录不存在: {path}", f"State directory does not exist: {path}"))
+        if path.is_dir():
+            continue
+        if path.exists():
+            raise KanbanError(t(f"状态路径不是目录: {path}", f"State path is not a directory: {path}"))
+        if state == "review" and all(
+            (root / legacy).is_dir() and not is_reparse_point(root / legacy) for legacy in LEGACY_STATES
+        ):
+            # 旧版看板升级: 其余 6 个目录齐全时自动补建 review, 不要求用户重跑 init.
+            create_state_directory(path)
+            continue
+        raise KanbanError(t(f"状态目录不存在: {path}", f"State directory does not exist: {path}"))
 
 
 def scan(root: Path) -> Board:

@@ -2265,6 +2265,45 @@ N/A
         self.assertIn("符号链接", str(raised.exception))
         self.assertEqual("keep-me\n", outside.read_text(encoding="utf-8"))
 
+    def test_missing_review_directory_is_created_on_first_use(self) -> None:
+        task_id, task = self.make_todo("legacy-board")
+        review = self.root / "review"
+        shutil.rmtree(review)
+
+        listed = self.run_command("list")
+
+        self.assertTrue(review.is_dir(), "旧看板缺 review/ 时应自动补建")
+        self.assertIn(task_id, listed.stdout)
+        self.assertEqual("ok: 1 tasks\n", self.run_command("--lang", "en", "check").stdout)
+        if os.name == "posix":
+            self.assertTrue(os.access(review, os.W_OK))
+
+    def test_other_missing_state_directories_still_fail(self) -> None:
+        self.make_todo("broken-board")
+        shutil.rmtree(self.root / "review")
+        shutil.rmtree(self.root / "archived")
+
+        result = self.run_command("list", succeeds=False)
+
+        self.assertIn("状态目录不存在", result.stderr)
+        self.assertFalse((self.root / "review").exists(), "其他目录缺失时不得补建 review")
+
+    def test_review_path_occupied_by_a_file_or_symlink_is_rejected(self) -> None:
+        self.make_todo("occupied-review")
+        review = self.root / "review"
+        shutil.rmtree(review)
+        review.write_text("", encoding="utf-8")
+        as_file = self.run_command("list", succeeds=False)
+        review.unlink()
+        outside = self.root / "outside-review"
+        outside.mkdir()
+        review.symlink_to(outside)
+        as_link = self.run_command("list", succeeds=False)
+
+        self.assertIn("状态路径不是目录", as_file.stderr)
+        self.assertIn("状态目录不得是符号链接", as_link.stderr)
+        self.assertEqual([], list(outside.iterdir()))
+
     def test_state_directory_symlink_is_rejected_by_check_and_start(self) -> None:
         task_id, task = self.make_todo("state-link")
         outside = self.root / "evil-working-outside"
