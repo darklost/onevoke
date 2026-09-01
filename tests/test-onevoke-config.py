@@ -326,6 +326,43 @@ class CursorAgentConfigTest(unittest.TestCase):
         self.assertEqual("", validated["models"]["kanban"]["cursor"]["small_model"])
         self.assertEqual("", validated["models"]["review"]["cursor"]["model"])
 
+    def test_kanban_agents_default_to_the_single_kanban_agent(self) -> None:
+        payload = self._payload({})
+        payload["kanban_agent"] = "codex"
+
+        validated = self.config.validate_config(payload)
+
+        self.assertEqual({"large": "codex", "small": "codex"}, validated["kanban_agents"])
+        self.assertEqual("codex", self.config.kanban_agent_for(validated, "large"))
+        self.assertEqual("codex", self.config.kanban_agent_for(validated, "small"))
+        self.assertEqual(["codex"], self.config.execution_agents_in_use(validated))
+        self.assertEqual(
+            {"large": "codex", "small": "codex"},
+            self.config.default_config()["kanban_agents"],
+        )
+
+    def test_kanban_agents_select_the_agent_by_scale(self) -> None:
+        payload = self._payload({})
+        payload["kanban_agent"] = "codex"
+        payload["kanban_agents"] = {"small": "cursor"}
+
+        validated = self.config.validate_config(payload)
+
+        # 缺失的规模回落到 kanban_agent, 给出的规模按配置生效.
+        self.assertEqual({"large": "codex", "small": "cursor"}, validated["kanban_agents"])
+        self.assertEqual("cursor", self.config.kanban_agent_for(validated, "small"))
+        self.assertEqual("codex", self.config.kanban_agent_for(validated, "large"))
+        self.assertEqual(["codex", "cursor"], self.config.execution_agents_in_use(validated))
+        with self.assertRaises(self.config.ConfigError):
+            self.config.kanban_agent_for(validated, "medium")
+
+    def test_kanban_agents_reject_unknown_scales_and_agents(self) -> None:
+        for bad in ({"medium": "codex"}, {"large": "vim"}, ["codex"], {"small": None}):
+            payload = self._payload({})
+            payload["kanban_agents"] = bad
+            with self.assertRaises(self.config.ConfigError, msg=repr(bad)):
+                self.config.validate_config(payload)
+
     def test_cursor_rejects_unknown_model_fields(self) -> None:
         with self.assertRaises(self.config.ConfigError) as error:
             self.config.validate_config(
