@@ -204,33 +204,81 @@ class MergeTest(unittest.TestCase):
         self.assertNotIn("(I)", acl.stdout, acl.stdout)
         self.assertEqual(1, acl.stdout.count("(F)"), acl.stdout)
 
-    def start_fake_watcher(self, watched_memory: Path) -> subprocess.Popen:
+    def start_fake_watcher(
+        self,
+        watched_memory: Path,
+        *,
+        program: str | None = None,
+        executable_name: str = "memsearch",
+        arguments: list[str] | None = None,
+        trust_executable: bool = True,
+    ) -> subprocess.Popen:
         fake_bin = self.root / "fake-bin"
         fake_bin.mkdir(exist_ok=True)
-        executable = fake_bin / "memsearch"
+        executable = fake_bin / executable_name
         executable.write_text(
-            "#!/usr/bin/env python3\n"
-            "import signal\n"
-            "import time\n"
-            "def stop(*_):\n"
-            "    raise SystemExit(0)\n"
-            "signal.signal(signal.SIGTERM, stop)\n"
-            "while True:\n"
-            "    time.sleep(0.1)\n",
+            program
+            or (
+                "#!/usr/bin/env python3\n"
+                "import signal\n"
+                "import time\n"
+                "def stop(*_):\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "while True:\n"
+                "    time.sleep(0.1)\n"
+            ),
             encoding="utf-8",
         )
         executable.chmod(0o700)
+        if executable_name == "memsearch" and trust_executable:
+            original_path = os.environ.get("PATH")
+            os.environ["PATH"] = os.pathsep.join(
+                [str(fake_bin), original_path or os.defpath]
+            )
+
+            def restore_path() -> None:
+                if original_path is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = original_path
+
+            self.addCleanup(restore_path)
         process = subprocess.Popen(
-            [str(executable), "watch", str(watched_memory)],
+            [
+                str(executable),
+                *(arguments or ["watch", str(watched_memory)]),
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        effective_arguments = arguments or ["watch", str(watched_memory)]
+        if (
+            sys.platform.startswith("linux")
+            and executable_name == "memsearch"
+            and effective_arguments[0] == "watch"
+        ):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                snapshot = merger.process_snapshot(process.pid)
+                if snapshot is not None:
+                    invocation = merger.watcher_invocation_arguments(snapshot[2])
+                    if invocation is not None and Path(invocation[0]) == executable:
+                        break
+                time.sleep(0.01)
+            else:
+                self.fail("fake MemSearch watcher did not finish exec")
 
         def stop_process() -> None:
-            if process.poll() is None:
+            try:
                 os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if process.poll() is None:
                 process.wait(timeout=5)
+            else:
+                process.wait()
 
         self.addCleanup(stop_process)
         (self.source / ".memsearch" / ".watch.pid").write_text(
@@ -519,7 +567,7 @@ class MergeTest(unittest.TestCase):
         self.assertIn("without rewriting live files", result.stdout)
         self.assertFalse((self.target_memory / "a.md").exists())
 
-    @unittest.skipIf(os.name == "nt", "POSIX MemSearch watcher lifecycle")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
     def test_successful_merge_stops_matching_memsearch_watcher(self) -> None:
         self.write_source("a.md", b"### 09:30\n- stop watcher\n")
         watcher = self.start_fake_watcher(self.source_memory)
@@ -530,7 +578,7 @@ class MergeTest(unittest.TestCase):
         watcher.wait(timeout=5)
         self.assertIn(f"Stopped MemSearch watcher: pid={watcher.pid}", result.stdout)
 
-    @unittest.skipIf(os.name == "nt", "POSIX MemSearch watcher lifecycle")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
     def test_dry_run_does_not_stop_memsearch_watcher(self) -> None:
         self.write_source("a.md", b"### 09:30\n- dry run watcher\n")
         watcher = self.start_fake_watcher(self.source_memory)
@@ -541,7 +589,7 @@ class MergeTest(unittest.TestCase):
         self.assertIsNone(watcher.poll())
         self.assertIn(f"Would stop MemSearch watcher: pid={watcher.pid}", result.stdout)
 
-    @unittest.skipIf(os.name == "nt", "POSIX MemSearch watcher lifecycle")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
     def test_watcher_pid_for_another_memory_is_rejected_without_killing(self) -> None:
         self.write_source("a.md", b"### 09:30\n- wrong watcher\n")
         other_memory = self.root / "other" / ".memsearch" / "memory"
@@ -566,6 +614,217 @@ class MergeTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn(f"MemSearch watcher already stopped: pid={stale_pid}", result.stdout)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_stop_hook_final_append_is_merged_after_watcher_exit(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- before stop\n")
+        watcher = self.start_fake_watcher(
+            self.source_memory,
+            program=(
+                "#!/usr/bin/env python3\n"
+                "import signal\n"
+                "import sys\n"
+                "import time\n"
+                "from pathlib import Path\n"
+                "def stop(*_):\n"
+                "    with (Path(sys.argv[2]) / 'a.md').open('ab') as handle:\n"
+                "        handle.write(b'### 10:00\\n- appended while stopping\\n')\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "while True:\n"
+                "    time.sleep(0.1)\n"
+            ),
+        )
+
+        result = self.run_merger()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        watcher.wait(timeout=5)
+        merged = (self.target_memory / "a.md").read_bytes()
+        self.assertIn(b"- before stop", merged)
+        self.assertIn(b"- appended while stopping", merged)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_misleading_argv_is_rejected_without_killing(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- misleading argv\n")
+        watcher = self.start_fake_watcher(
+            self.source_memory,
+            executable_name="worker",
+            arguments=["memsearch", "watch", str(self.source_memory)],
+        )
+
+        result = self.run_merger()
+
+        self.assertEqual(1, result.returncode)
+        self.assertIsNone(watcher.poll())
+        self.assertIn("is not the MemSearch watcher", result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_untrusted_executable_named_memsearch_is_rejected_without_killing(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- fake executable\n")
+        watcher = self.start_fake_watcher(
+            self.source_memory,
+            trust_executable=False,
+        )
+
+        result = self.run_merger()
+
+        self.assertEqual(1, result.returncode)
+        self.assertIsNone(watcher.poll())
+        self.assertIn("is not the MemSearch watcher", result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_source_memory_symlink_swap_is_rejected_before_signal(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- original source\n")
+        expected_identity = merger.source_memory_identity(self.source_memory)
+        watcher = self.start_fake_watcher(self.source_memory)
+        original_memory = self.source / ".memsearch" / "memory-original"
+        other_memory = self.root / "other-memory"
+        other_memory.mkdir()
+        self.source_memory.rename(original_memory)
+        self.source_memory.symlink_to(other_memory, target_is_directory=True)
+
+        try:
+            with self.assertRaises(SystemExit):
+                merger.stop_memsearch_watcher(
+                    str(self.source), False, expected_identity
+                )
+            self.assertIsNone(watcher.poll())
+        finally:
+            self.source_memory.unlink()
+            original_memory.rename(self.source_memory)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_symlink_watch_pid_is_rejected_without_killing(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- pid symlink\n")
+        watcher = self.start_fake_watcher(self.source_memory)
+        pid_path = self.source / ".memsearch" / ".watch.pid"
+        alternate = self.root / "attacker-watch.pid"
+        alternate.write_text(f"{watcher.pid}\n", encoding="ascii")
+        pid_path.unlink()
+        pid_path.symlink_to(alternate)
+
+        result = self.run_merger()
+
+        self.assertEqual(1, result.returncode)
+        self.assertIsNone(watcher.poll())
+        self.assertIn("secure file operation failed", result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_merge_failure_does_not_signal_watcher(self) -> None:
+        real = self.write_source("real.md", b"### 09:30\n- must remain\n")
+        (self.source_memory / "linked.md").symlink_to(real.name)
+        watcher = self.start_fake_watcher(self.source_memory)
+
+        result = self.run_merger()
+
+        self.assertEqual(1, result.returncode)
+        self.assertIsNone(watcher.poll())
+        self.assertIn("must not be a symlink", result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_stop_waits_for_all_non_zombie_process_group_members(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- group child\n")
+        ready = self.source_memory / "child.ready"
+        watcher = self.start_fake_watcher(
+            self.source_memory,
+            program=(
+                "#!/usr/bin/env python3\n"
+                "import signal\n"
+                "import subprocess\n"
+                "import sys\n"
+                "import time\n"
+                "from pathlib import Path\n"
+                "ready = Path(sys.argv[2]) / 'child.ready'\n"
+                "code = \"import os,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(0.8)\"\n"
+                "subprocess.Popen([sys.executable, '-c', code, str(ready)])\n"
+                "while not ready.exists():\n"
+                "    time.sleep(0.01)\n"
+                "def stop(*_):\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "while True:\n"
+                "    time.sleep(0.1)\n"
+            ),
+        )
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(ready.exists())
+
+        result = self.run_merger()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        watcher.wait(timeout=5)
+        self.assertEqual(set(), merger.linux_process_group_members(watcher.pid))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_stop_uses_pidfd_and_never_sends_a_signal_by_pid(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- pidfd\n")
+        watcher = self.start_fake_watcher(self.source_memory)
+        source_identity = merger.source_memory_identity(self.source_memory)
+
+        with (
+            mock.patch.object(merger.os, "pidfd_open", wraps=os.pidfd_open) as opened,
+            mock.patch.object(
+                merger.signal,
+                "pidfd_send_signal",
+                wraps=signal.pidfd_send_signal,
+            ) as sent,
+            mock.patch.object(
+                merger.os,
+                "kill",
+                side_effect=AssertionError("PID signal is forbidden"),
+            ),
+        ):
+            merger.stop_memsearch_watcher(str(self.source), False, source_identity)
+
+        watcher.wait(timeout=5)
+        opened.assert_called_once_with(watcher.pid, 0)
+        self.assertIn(signal.SIGSTOP, [call.args[1] for call in sent.call_args_list])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_stop_timeout_fails_closed_and_leaves_watcher_running(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- timeout\n")
+        ready = self.source_memory / "timeout.ready"
+        watcher = self.start_fake_watcher(
+            self.source_memory,
+            program=(
+                "#!/usr/bin/env python3\n"
+                "import signal\n"
+                "import sys\n"
+                "import time\n"
+                "from pathlib import Path\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "(Path(sys.argv[2]) / 'timeout.ready').write_text('ready')\n"
+                "while True:\n"
+                "    time.sleep(0.1)\n"
+            ),
+        )
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(ready.exists())
+        source_identity = merger.source_memory_identity(self.source_memory)
+
+        with (
+            mock.patch.object(merger, "WATCH_STOP_TIMEOUT_SECONDS", 0.1),
+            self.assertRaises(SystemExit),
+        ):
+            merger.stop_memsearch_watcher(str(self.source), False, source_identity)
+
+        self.assertIsNone(watcher.poll())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process ownership")
+    def test_process_owned_by_another_uid_is_rejected(self) -> None:
+        foreign = mock.Mock(st_uid=os.geteuid() + 1)
+
+        with (
+            mock.patch.object(merger.Path, "stat", return_value=foreign),
+            self.assertRaises(SystemExit),
+        ):
+            merger.linux_process_snapshot(os.getpid())
 
     def test_source_equal_to_target_is_a_noop(self) -> None:
         result = subprocess.run(
