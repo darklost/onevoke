@@ -1632,6 +1632,56 @@ exit 1
                 )
         sleeper.assert_not_called()
 
+    def test_validate_resumed_agent_herdr_liveness_identity_policy(self) -> None:
+        kanban = self.load_kanban_module()
+        plan = kanban.LaunchPlan("herdr", self.root.parent, herdr_bin="herdr")
+        outcome = kanban.LaunchOutcome(tab="w1:t9", pane="w1:p9")
+        session = kanban.AgentSession("cursor", "expected-session")
+
+        absent_identities = (
+            {},
+            {"agent_session": None},
+            {"agent_session": "invalid"},
+            {"agent_session": {}},
+            {"agent_session": {"value": ""}},
+            {"agent_session": {"value": 42}},
+        )
+        for status in ("idle", "working", "blocked"):
+            for identity in absent_identities:
+                with self.subTest(case="absent identity", status=status, identity=identity):
+                    pane = {"agent": "cursor", "agent_status": status, **identity}
+                    with mock.patch.object(kanban, "herdr_pane_info", return_value=pane):
+                        with mock.patch.object(kanban.time, "monotonic", return_value=0.0):
+                            kanban.validate_resumed_agent(plan, outcome, session, 61)
+
+        for status in ("done", "unknown"):
+            with self.subTest(case="absent identity invalid status", status=status):
+                pane = {"agent": "cursor", "agent_status": status}
+                with mock.patch.object(kanban, "herdr_pane_info", return_value=pane):
+                    with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 62.0)):
+                        with self.assertRaisesRegex(kanban.KanbanError, "存活校验超时"):
+                            kanban.validate_resumed_agent(plan, outcome, session, 61)
+
+        matching = {
+            "agent": "cursor",
+            "agent_status": "idle",
+            "agent_session": {"value": "expected-session"},
+        }
+        with mock.patch.object(kanban, "herdr_pane_info", return_value=matching):
+            with mock.patch.object(kanban.time, "monotonic", return_value=0.0):
+                kanban.validate_resumed_agent(plan, outcome, session, 61)
+
+        rejected = (
+            ("session mismatch", {**matching, "agent_session": {"value": "other-session"}}),
+            ("agent mismatch", {**matching, "agent": "codex"}),
+        )
+        for case, pane in rejected:
+            with self.subTest(case=case):
+                with mock.patch.object(kanban, "herdr_pane_info", return_value=pane):
+                    with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 62.0)):
+                        with self.assertRaisesRegex(kanban.KanbanError, "存活校验超时"):
+                            kanban.validate_resumed_agent(plan, outcome, session, 61)
+
     def test_failed_resume_cleanup_reports_herdr_and_tmux_failures(self) -> None:
         kanban = self.load_kanban_module()
         cases = (

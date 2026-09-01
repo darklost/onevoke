@@ -2358,6 +2358,12 @@ def herdr_pane_info(herdr: str, pane_id: str) -> dict:
     return pane
 
 
+def herdr_session_reference(pane: dict) -> str | None:
+    agent_session = pane.get("agent_session")
+    reference = agent_session.get("value") if isinstance(agent_session, dict) else None
+    return reference if isinstance(reference, str) and reference else None
+
+
 def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None:
     pane = herdr_pane_info(herdr, pane_id)
     actual_agent = pane.get("agent")
@@ -2612,11 +2618,10 @@ def validate_resumed_agent(plan: LaunchPlan, outcome: LaunchOutcome, session: Ag
         try:
             if plan.launcher == "herdr":
                 pane = herdr_pane_info(plan.herdr_bin, outcome.pane)
-                agent_session = pane.get("agent_session")
-                reference = agent_session.get("value") if isinstance(agent_session, dict) else None
+                reference = herdr_session_reference(pane)
                 if (
                     pane.get("agent") == session.agent
-                    and reference == session.reference
+                    and (reference is None or reference == session.reference)
                     and pane.get("agent_status") in ("idle", "working", "blocked")
                 ):
                     return
