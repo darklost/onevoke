@@ -526,7 +526,8 @@ exit 1
             "- 完成时间: ",
             (self.root / "done" / large_id / "spec.md").read_text(encoding="utf-8"),
         )
-        self.assertEqual("通过: 2 个任务\n", self.run_command("check").stdout)
+        self.assertEqual("通过: 0 个任务\n", self.run_command("check").stdout)
+        self.assertEqual("通过: 2 个任务\n", self.run_command("check", "--all").stdout)
 
     def test_new_templates_include_optional_task_group_metadata(self) -> None:
         today = datetime.now().strftime("%Y%m%d")
@@ -3073,6 +3074,78 @@ exit 1
         os.mkfifo(large / "spec.md")
         result = self.run_command("check", task_id, succeeds=False, timeout=5)
         self.assertIn("spec.md 不是普通文件", result.stderr)
+
+    def test_check_skips_done_and_archived_unless_all(self) -> None:
+        (self.root / "done" / "notes.md").write_text("旧笔记", encoding="utf-8")
+        (self.root / "archived" / "notes.md").write_text("归档笔记", encoding="utf-8")
+
+        result = self.run_command("check")
+        self.assertEqual("通过: 0 个任务\n", result.stdout)
+        self.assertEqual("", result.stderr)
+
+        full = self.run_command("check", "--all", succeeds=False)
+        self.assertEqual(1, full.returncode)
+        self.assertIn("notes.md", full.stderr)
+        self.assertIn("已检查: 0 个有效, 2 个无效", full.stdout)
+
+    def test_check_still_reports_trash_invalid_entries(self) -> None:
+        (self.root / "done" / "notes.md").write_text("旧笔记", encoding="utf-8")
+        (self.root / "trash" / "notes.md").write_text("垃圾笔记", encoding="utf-8")
+
+        result = self.run_command("check", succeeds=False)
+        self.assertIn(f"{os.sep}trash{os.sep}notes.md", result.stderr)
+        self.assertNotIn(f"{os.sep}done{os.sep}notes.md", result.stderr)
+
+    def test_check_ignores_done_prerequisite_errors_unless_all(self) -> None:
+        task_id, task = self.make_todo("old-done-prereq")
+        active_id, active = self.make_todo("active-done-prereq")
+        group = "20260901-old-done-group"
+        self.set_task_group(task, group)
+        self.set_task_group(active, group)
+        self.run_command("move", task_id, "working")
+        working = self.root / "working" / task.name
+        self.complete(working)
+        self.run_command("move", task_id, "done")
+        self.set_prerequisites(self.root / "done" / task.name, "20260901-bad-task，N/A")
+        self.set_prerequisites(active, task_id)
+
+        result = self.run_command("check")
+        self.assertEqual("通过: 1 个任务\n", result.stdout)
+        self.assertEqual("通过: 1 个任务\n", self.run_command("check", active_id).stdout)
+
+        targeted = self.run_command("check", task_id, succeeds=False)
+        self.assertIn("前置任务语法非法", targeted.stderr)
+
+        full = self.run_command("check", "--all", succeeds=False)
+        self.assertIn("前置任务语法非法", full.stderr)
+
+    def test_check_accepts_done_prerequisites_of_active_cards(self) -> None:
+        done_id, done_task = self.make_todo("done-prereq-target")
+        active_id, active = self.make_todo("active-with-done-prereq")
+        group = "20260901-done-prereq-group"
+        self.set_task_group(done_task, group)
+        self.set_task_group(active, group)
+        self.run_command("move", done_id, "working")
+        working = self.root / "working" / done_task.name
+        self.complete(working)
+        self.run_command("move", done_id, "done")
+        self.set_prerequisites(active, done_id)
+
+        result = self.run_command("check")
+        self.assertEqual("通过: 1 个任务\n", result.stdout)
+        self.assertEqual("通过: 1 个任务\n", self.run_command("check", active_id).stdout)
+
+    def test_check_reports_duplicate_id_across_done_and_active(self) -> None:
+        task_id, task = self.make_todo("dup-done")
+        self.run_command("move", task_id, "working")
+        working = self.root / "working" / task.name
+        self.complete(working)
+        self.run_command("move", task_id, "done")
+        duplicate = self.root / "working" / task.name
+        duplicate.write_bytes((self.root / "done" / task.name).read_bytes())
+
+        result = self.run_command("check", succeeds=False)
+        self.assertIn("重复任务 ID", result.stderr)
 
     def test_targeted_scan_retries_a_concurrent_forward_move(self) -> None:
         task_id, task = self.make_todo("target-race")

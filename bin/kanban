@@ -64,6 +64,7 @@ argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 
 
 STATES = ("backlog", "todo", "working", "review", "done", "archived", "trash")
+DEFERRED_CHECK_STATES = frozenset({"done", "archived"})
 TRANSITIONS = {
     "backlog": {"todo", "archived", "trash"},
     "todo": {"working", "archived", "trash"},
@@ -120,6 +121,7 @@ class Board:
 class Problem:
     path: Path
     message: str
+    related_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -420,8 +422,13 @@ def scan(root: Path) -> Board:
     blocked: Dict[str, str] = {}
     problems: list[Problem] = []
 
-    def reject(path: Path, message: str, task_id: Optional[str] = None) -> None:
-        problems.append(Problem(path, message))
+    def reject(
+        path: Path,
+        message: str,
+        task_id: Optional[str] = None,
+        related_paths: tuple[Path, ...] = (),
+    ) -> None:
+        problems.append(Problem(path, message, related_paths))
         if task_id:
             blocked[task_id] = message
             entries.pop(task_id, None)
@@ -458,7 +465,13 @@ def scan(root: Path) -> Board:
                 problems.append(Problem(path, t(f"任务 ID 存在冲突: {task_id}", f"Task ID conflict: {task_id}")))
                 continue
             if task_id in entries:
-                reject(path, t(f"重复任务 ID: {entries[task_id].path} 与 {path}", f"Duplicate task ID: {entries[task_id].path} and {path}"), task_id)
+                existing = entries[task_id]
+                reject(
+                    path,
+                    t(f"重复任务 ID: {existing.path} 与 {path}", f"Duplicate task ID: {existing.path} and {path}"),
+                    task_id,
+                    (existing.path,),
+                )
                 continue
             entries[task_id] = Entry(task_id, state, path, document, kind)
     return Board(entries, blocked, problems)
@@ -805,7 +818,33 @@ def task_group_members(documents: Dict[str, str]) -> Dict[str, tuple[str, ...]]:
     }
 
 
-def dependency_problems(board: Board, selected: Optional[set[str]] = None) -> list[Problem]:
+def board_path_state(root: Path, path: Path) -> Optional[str]:
+    """返回看板路径所属状态栏; 不在状态栏下则返回 None."""
+    root_parts = root.parts
+    path_parts = path.parts
+    if path_parts[:len(root_parts)] != root_parts:
+        return None
+    if len(path_parts) <= len(root_parts):
+        return None
+    state = path_parts[len(root_parts)]
+    return state if state in STATES else None
+
+
+def problem_in_check_scope(root: Path, problem: Problem, include_all: bool) -> bool:
+    """默认检查忽略仅落在 done/archived 的问题; 与活跃栏冲突仍保留."""
+    if include_all:
+        return True
+    for candidate in (problem.path, *problem.related_paths):
+        if board_path_state(root, candidate) not in DEFERRED_CHECK_STATES:
+            return True
+    return False
+
+
+def dependency_problems(
+    board: Board,
+    selected: Optional[set[str]] = None,
+    skip_states: Optional[set[str]] = None,
+) -> list[Problem]:
     """校验依赖引用与环; 定向检查只遍历所选任务可达的依赖图."""
     documents: Dict[str, str] = {}
     document_errors: Dict[str, KanbanError] = {}
@@ -834,7 +873,19 @@ def dependency_problems(board: Board, selected: Optional[set[str]] = None) -> li
         resolved[task_id] = value
         return value
 
+    skipped = skip_states or set()
     roots = sorted(selected if selected is not None else board.entries)
+    if skipped:
+        roots = [
+            task_id
+            for task_id in roots
+            if task_id in board.entries
+            and (
+                board.entries[task_id].state not in skipped
+                or (selected is not None and task_id in selected)
+            )
+        ]
+    must_check = set(roots)
     problems: list[Problem] = []
     reported_errors: set[str] = set()
     reported_cycles: set[tuple[str, ...]] = set()
@@ -842,6 +893,10 @@ def dependency_problems(board: Board, selected: Optional[set[str]] = None) -> li
     visited: set[str] = set()
 
     def visit(task_id: str) -> None:
+        entry = board.entries.get(task_id)
+        if entry is not None and entry.state in skipped and task_id not in must_check:
+            visited.add(task_id)
+            return
         if task_id in visited:
             return
         if task_id in visiting:
@@ -3072,22 +3127,39 @@ def command_tui(args: argparse.Namespace, root: Path) -> None:
 
 
 def command_check(args: argparse.Namespace, root: Path) -> int:
+    include_all = args.all
+    skip_states = set() if include_all else set(DEFERRED_CHECK_STATES)
     board = scan_targets(root, args.tasks) if args.tasks else scan(root)
-    all_problems = list(board.problems)
+    if args.tasks:
+        all_problems = list(board.problems)
+    else:
+        all_problems = [
+            problem
+            for problem in board.problems
+            if problem_in_check_scope(root, problem, include_all)
+        ]
     dependency_board = scan(root) if args.tasks else board
     selected = set(board.entries) if args.tasks else None
-    all_problems.extend(dependency_problems(dependency_board, selected))
+    all_problems.extend(dependency_problems(dependency_board, selected, skip_states))
+    if args.tasks or include_all:
+        checked = len(board.entries)
+    else:
+        checked = sum(
+            1
+            for entry in board.entries.values()
+            if entry.state not in DEFERRED_CHECK_STATES
+        )
     for problem in all_problems:
         print(t(f"无效: {problem.message}", f"invalid: {problem.message}"), file=sys.stderr)
     if all_problems:
         print(
             t(
-                f"已检查: {len(board.entries)} 个有效, {len(all_problems)} 个无效",
-                f"checked: {len(board.entries)} valid, {len(all_problems)} invalid",
+                f"已检查: {checked} 个有效, {len(all_problems)} 个无效",
+                f"checked: {checked} valid, {len(all_problems)} invalid",
             )
         )
         return 1
-    print(t(f"通过: {len(board.entries)} 个任务", f"ok: {len(board.entries)} tasks"))
+    print(t(f"通过: {checked} 个任务", f"ok: {checked} tasks"))
     return 0
 
 
@@ -3306,6 +3378,11 @@ def parser() -> argparse.ArgumentParser:
     )
 
     check_parser = commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
+    check_parser.add_argument(
+        "--all",
+        action="store_true",
+        help=t("同时检查 done 与 archived 中的卡片", "also check cards in done and archived"),
+    )
     check_parser.add_argument(
         "tasks",
         nargs="*",
