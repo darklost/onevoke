@@ -13,7 +13,7 @@
 
 看板任务组 (见 `KANBAN-RULES.md`「任务组编排」) 用一条短命的组集成分支承接组内全部卡片, 审核和合回 `develop` 都以它为单位. 它是任务分支的组级形态, 不是新的长期分支; 单卡任务不使用.
 
-- 主控在首卡启动前创建 `group/<task-group-id>`: 有 `origin` 且用户未要求仅本地时先 fetch, 基于最新 `origin/develop` 创建并 `git push -u origin group/<task-group-id>`; 否则基于本地 `develop` 创建并报告未同步远端. 创建时所基于的 `develop` 完整 SHA 是组分支的创建锚点和首批审核 base, 记入主控的组级记录; 组结束前不 rebase 组分支 (集成流程内的 rebase 除外), 后续审核批次的 base 按 `REVIEW-RULES.md`「任务组的组级审核」推进到上一批通过的组分支 commit, 不回退到创建锚点.
+- 主控先按 `KANBAN-RULES.md`「启动与订阅」解析全组的组外依赖; 有未满足项时不创建组分支. 组外卡进入 `done/`, 任务组引用展开后的全部成员卡进入 `done/`, 才表示其改动已进入 `develop` 并满足依赖. 全部组外依赖满足后, 主控才在首卡启动前创建 `group/<task-group-id>`: 有 `origin` 且用户未要求仅本地时先 fetch, 基于当时最新的 `origin/develop` 创建并 `git push -u origin group/<task-group-id>`; 否则基于当时最新的本地 `develop` 创建并报告未同步远端. 创建时所基于的 `develop` 完整 SHA 是组分支的创建锚点和首批审核 base, 记入主控的组级记录; 组结束前不 rebase 组分支 (集成流程内的 rebase 除外), 后续审核批次的 base 按 `REVIEW-RULES.md`「任务组的组级审核」推进到上一批通过的组分支 commit, 不回退到创建锚点.
 - 组内卡的任务分支和 `<仓库根目录>/worktrees/<task-name>/` worktree 基于组分支当前头创建 (远端路径先 fetch `origin/group/<id>`), 不基于 `develop`; 其他要求同「分支与 worktree」.
 - 执行 Agent 开发, 验证并按关注点提交 push 任务分支后, 先 rebase 到组分支最新头并重跑验证, 再 ff 进组分支: 远端路径用非 force 的 `git push origin <任务分支最终 commit>:refs/heads/group/<id>`, 本地路径在组分支 worktree 或主树用 `git merge --ff-only`; 被 non-fast-forward 拒绝时 fetch 后重新 rebase 重试. 任何路径不产生 merge commit. rebase 冲突由该卡的执行 Agent 解决, 主控不代解.
 - 组级审核在组分支的专用 worktree 上进行, `CWD` 为该 worktree, commit 为组分支 HEAD; 首批 base 为组分支创建时所基于的 `develop` commit, 后续批次 base 为上一批通过的组分支 commit. 修复轮次由执行 Agent 在各自任务分支完成并再次 ff 进组分支, 批次与增量复审见 `REVIEW-RULES.md`「任务组的组级审核」.
