@@ -2857,12 +2857,23 @@ def watched_task_ids(root: Path, values: list[str], member_ids: list[str]) -> li
     """把外部任务或任务组引用解析为不重复的当前任务 ID."""
     if not values:
         return []
-    board = scan(root)
-    documents = {
-        task_id: read_document(entry)
-        for task_id, entry in board.entries.items()
-    }
-    group_members = task_group_members(documents)
+    direct_ids = [
+        normalize_task_id(value)
+        for value in values
+        if not TASK_GROUP_RE.fullmatch(value)
+    ]
+    direct_board = scan_targets(root, dict.fromkeys(direct_ids))
+    if direct_board.problems:
+        raise KanbanError(direct_board.problems[0].message)
+    group_values = [value for value in values if TASK_GROUP_RE.fullmatch(value)]
+    group_members: Dict[str, tuple[str, ...]] = {}
+    if group_values:
+        board = scan(root)
+        documents = {
+            task_id: read_document(entry)
+            for task_id, entry in board.entries.items()
+        }
+        group_members = task_group_members(documents)
     member_set = set(member_ids)
     watched: list[str] = []
     watched_set: set[str] = set()
@@ -2875,7 +2886,7 @@ def watched_task_ids(root: Path, values: list[str], member_ids: list[str]) -> li
                     f"Watched task group has no members: {value}",
                 ))
         else:
-            expanded = (locate(board, value).task_id,)
+            expanded = (normalize_task_id(value),)
         for task_id in expanded:
             if task_id in member_set:
                 raise KanbanError(t(

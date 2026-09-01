@@ -2698,6 +2698,39 @@ exit 1
             process.terminate()
             process.communicate(timeout=5)
 
+    def test_direct_watch_ignores_unrelated_invalid_document(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-watch-isolation-group"
+        member_id, member = self.make_todo("watch-isolation-member")
+        external_id, _ = self.make_todo("watch-isolation-external")
+        _, unrelated = self.make_todo("watch-isolation-invalid")
+        self.set_task_group(member, group_id)
+        unrelated.write_bytes(b"\xff")
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "subscribe",
+                group_id,
+                member_id,
+                "--watch",
+                external_id,
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            snapshot = self.read_process_json(process)
+            self.assertEqual(
+                {member_id: "todo", external_id: "todo"}, snapshot["tasks"]
+            )
+            self.assertEqual([external_id], snapshot["watched"])
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
     def test_subscribe_expands_watched_task_group(self) -> None:
         group_id = f"{datetime.now().strftime('%Y%m%d')}-watch-source-group"
         watched_group = f"{datetime.now().strftime('%Y%m%d')}-watched-group"
