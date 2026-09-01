@@ -1406,8 +1406,18 @@ def start_metadata(text: str, agent: str, session: "AgentSession", window: str) 
 
 def window_metadata(text: str, value: str) -> str:
     lines = re.findall(rf"(?m)^- {WINDOW_FIELD}:.*$", text)
-    if len(lines) != 1:
+    if len(lines) > 1:
         raise KanbanError(t(f"任务文档缺少唯一元数据字段: {WINDOW_FIELD}", f"Task document must contain exactly one metadata field: {WINDOW_FIELD}"))
+    if not lines:
+        session_lines = re.findall(rf"(?m)^- {SESSION_FIELD}:.*$", text)
+        if len(session_lines) != 1:
+            raise KanbanError(t(f"任务文档缺少唯一元数据字段: {SESSION_FIELD}", f"Task document must contain exactly one metadata field: {SESSION_FIELD}"))
+        return re.sub(
+            rf"(?m)^(- {SESSION_FIELD}:.*)$",
+            lambda match: f"{match.group(1)}\n- {WINDOW_FIELD}: {value}",
+            text,
+            count=1,
+        )
     return re.sub(
         rf"(?m)^- {WINDOW_FIELD}:.*$",
         lambda _match: f"- {WINDOW_FIELD}: {value}",
@@ -2238,6 +2248,53 @@ def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None
         ))
 
 
+def herdr_reverse_lookup(herdr: str, session: AgentSession) -> tuple[str, str]:
+    result = herdr_capture(herdr, "pane", "list")
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"herdr pane list 失败: {herdr_failure_detail(result)}",
+            f"herdr pane list failed: {herdr_failure_detail(result)}",
+        ))
+    data = herdr_json_result(result, "pane list")
+    panes = data.get("panes")
+    if not isinstance(panes, list):
+        raise KanbanError(t("herdr pane list 响应缺少 panes", "herdr pane list response has no panes"))
+    matches: list[tuple[str, str]] = []
+    for pane in panes:
+        if not isinstance(pane, dict):
+            continue
+        agent_session = pane.get("agent_session")
+        reference = agent_session.get("value") if isinstance(agent_session, dict) else None
+        if pane.get("agent") != session.agent or reference != session.reference:
+            continue
+        tab_id = herdr_public_id(pane.get("tab_id"))
+        pane_id = herdr_public_id(pane.get("pane_id"))
+        if tab_id and pane_id:
+            matches.append((tab_id, pane_id))
+    if not matches:
+        raise KanbanError(t(
+            f"herdr 会话反查无匹配: {session.reference}",
+            f"herdr session lookup found no match: {session.reference}",
+        ))
+    if len(matches) != 1:
+        raise KanbanError(t(
+            f"herdr 会话反查匹配不唯一: {session.reference}: {len(matches)} 个 pane",
+            f"herdr session lookup is ambiguous: {session.reference}: {len(matches)} panes",
+        ))
+    return matches[0]
+
+
+def herdr_explicit_target(herdr: str, pane_id: str) -> tuple[str, str]:
+    pane = herdr_pane_info(herdr, pane_id)
+    tab_id = herdr_public_id(pane.get("tab_id"))
+    if not tab_id:
+        raise KanbanError(t(
+            f"pane 缺少可用 tab id: {pane_id}",
+            f"pane has no usable tab id: {pane_id}",
+        ))
+    return tab_id, pane_id
+
+
 def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
     result = tmux_capture(
         tmux,
@@ -2304,13 +2361,16 @@ def notify_instruction(entry: Entry, message_path: Path, marker: str) -> str:
     )
 
 
-def herdr_direct_notify(herdr: str, pane_id: str, instruction: str, marker: str, timeout: float) -> None:
+def herdr_direct_notify(
+    herdr: str, pane_id: str, instruction: str, marker: str, timeout: float
+) -> tuple[bool, str]:
     result = herdr_capture(herdr, "pane", "send-keys", pane_id, instruction, "Enter")
     if result.returncode != 0:
         raise KanbanError(t(
             f"herdr 直投失败: {herdr_failure_detail(result)}",
             f"herdr direct notification failed: {herdr_failure_detail(result)}",
         ))
+    print(t("已投递, 等待回执: 通道=herdr-direct", "delivered; waiting for acknowledgement: channel=herdr-direct"), flush=True)
     result = herdr_capture(
         herdr,
         "pane",
@@ -2324,13 +2384,13 @@ def herdr_direct_notify(herdr: str, pane_id: str, instruction: str, marker: str,
         str(max(1, int(timeout * 1000))),
     )
     if result.returncode != 0:
-        raise KanbanError(t(
-            f"herdr 回执超时: {marker}: {herdr_failure_detail(result)}",
-            f"herdr acknowledgement timed out: {marker}: {herdr_failure_detail(result)}",
-        ))
+        return False, herdr_failure_detail(result)
+    return True, ""
 
 
-def tmux_direct_notify(tmux: str, pane_id: str, instruction: str, marker: str, timeout: float) -> None:
+def tmux_direct_notify(
+    tmux: str, pane_id: str, instruction: str, marker: str, timeout: float
+) -> tuple[bool, str]:
     for arguments in (
         ("send-keys", "-t", pane_id, "-l", instruction),
         ("send-keys", "-t", pane_id, "Enter"),
@@ -2341,19 +2401,17 @@ def tmux_direct_notify(tmux: str, pane_id: str, instruction: str, marker: str, t
                 f"tmux 直投失败: {result.stderr.strip() or f'exit {result.returncode}'}",
                 f"tmux direct notification failed: {result.stderr.strip() or f'exit {result.returncode}'}",
             ))
+    print(t("已投递, 等待回执: 通道=tmux-direct", "delivered; waiting for acknowledgement: channel=tmux-direct"), flush=True)
     deadline = time.monotonic() + timeout
     while True:
         result = tmux_capture(tmux, "capture-pane", "-p", "-t", pane_id)
         if result.returncode != 0:
-            raise KanbanError(t(
-                f"tmux 读取回执失败: {result.stderr.strip() or f'exit {result.returncode}'}",
-                f"tmux acknowledgement read failed: {result.stderr.strip() or f'exit {result.returncode}'}",
-            ))
+            return False, result.stderr.strip() or f"exit {result.returncode}"
         if any(line.strip() == marker for line in result.stdout.splitlines()):
-            return
+            return True, ""
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise KanbanError(t(f"tmux 回执超时: {marker}", f"tmux acknowledgement timed out: {marker}"))
+            return False, t(f"回执超时: {marker}", f"acknowledgement timed out: {marker}")
         time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
 
 
@@ -2438,7 +2496,10 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
     window = metadata_from(text, WINDOW_FIELD)
     direct_error = t("任务卡没有 `窗口` 记录", "Task has no `窗口` metadata")
     direct_channel = ""
+    acknowledgement = "N/A"
+    acknowledgement_detail = ""
     message_path = None
+    window_written = False
     try:
         session = resolved_task_session(entry, text)
         marker = f"ONEVOKE-NOTIFY-ACK:{uuid.uuid4()}"
@@ -2446,26 +2507,65 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
         instruction = notify_instruction(entry, message_path, marker)
         herdr_match = HERDR_WINDOW_RE.fullmatch(window)
         tmux_match = TMUX_WINDOW_RE.fullmatch(window)
-        if herdr_match:
+        target_window = ""
+        direct_kind = ""
+        pane_id = ""
+        if args.pane:
+            herdr = shutil.which("herdr")
+            if not herdr:
+                raise KanbanError(t("herdr 不在 PATH", "herdr is not in PATH"))
+            tab_id, pane_id = herdr_explicit_target(herdr, args.pane)
+            herdr_notify_target(herdr, pane_id, session)
+            target_window = f"herdr:{tab_id}:{pane_id}"
+            direct_kind = "herdr"
+        elif herdr_match:
             _tab_id, pane_id = herdr_match.groups()
             herdr = shutil.which("herdr")
             if not herdr:
                 raise KanbanError(t("herdr 不在 PATH", "herdr is not in PATH"))
             herdr_notify_target(herdr, pane_id, session)
-            herdr_direct_notify(herdr, pane_id, instruction, marker, args.timeout)
-            direct_channel = "herdr-direct"
+            direct_kind = "herdr"
         elif tmux_match:
             _launcher, _tmux_session, _window_id, pane_id = tmux_match.groups()
             tmux = shutil.which("tmux")
             if not tmux:
                 raise KanbanError(t("tmux 不在 PATH", "tmux is not in PATH"))
             tmux_notify_target(tmux, pane_id, session)
-            tmux_direct_notify(tmux, pane_id, instruction, marker, args.timeout)
-            direct_channel = "tmux-direct"
+            direct_kind = "tmux"
+        elif not window:
+            herdr = shutil.which("herdr")
+            if not herdr:
+                raise KanbanError(t("herdr 不在 PATH, 无法反查 pane", "herdr is not in PATH; cannot look up a pane"))
+            tab_id, pane_id = herdr_reverse_lookup(herdr, session)
+            herdr_notify_target(herdr, pane_id, session)
+            target_window = f"herdr:{tab_id}:{pane_id}"
+            direct_kind = "herdr"
         else:
             raise KanbanError(t(f"无可用直投地址: {window or 'N/A'}", f"No direct notification address: {window or 'N/A'}"))
+        if target_window and target_window != window:
+            write_text_atomic(entry.document, window_metadata(text, target_window), entry=entry)
+            window_written = True
+        if direct_kind == "herdr":
+            confirmed, acknowledgement_detail = herdr_direct_notify(
+                herdr, pane_id, instruction, marker, args.timeout
+            )
+            direct_channel = "herdr-direct"
+        else:
+            confirmed, acknowledgement_detail = tmux_direct_notify(
+                tmux, pane_id, instruction, marker, args.timeout
+            )
+            direct_channel = "tmux-direct"
+        acknowledgement = t("已确认", "confirmed") if confirmed else t("未确认", "unconfirmed")
     except (KanbanError, OSError, UnicodeError, ValueError) as error:
         direct_error = str(error)
+        if window_written:
+            try:
+                write_text_atomic(entry.document, text, entry=entry)
+            except (KanbanError, OSError, UnicodeError) as rollback_error:
+                raise KanbanError(t(
+                    f"notify 直投失败且窗口回滚失败: 直投={direct_error}; 回滚={rollback_error}",
+                    f"notify direct delivery and window rollback failed: direct={direct_error}; rollback={rollback_error}",
+                )) from rollback_error
         if message_path is not None:
             remove_notify_message(message_path)
         try:
@@ -2478,14 +2578,21 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
         channel = "resume"
     else:
         channel = direct_channel
+        if acknowledgement_detail:
+            print(t(
+                f"警告: 已投递, 未在超时内确认: {acknowledgement_detail}",
+                f"warning: delivered but not confirmed within the timeout: {acknowledgement_detail}",
+            ), file=sys.stderr)
     moved = move_entry(entry, root, "working") if entry.state != "working" else entry
     if channel == "resume":
         output_path = "N/A"
+        channel_detail = t(f"\t直投原因={direct_error}", f"\tdirect-reason={direct_error}")
     else:
         output_path = str(message_path)
+        channel_detail = ""
     print(t(
-        f"已通知: {moved.task_id}\t通道={channel}\t消息文件={output_path}",
-        f"notified: {moved.task_id}\tchannel={channel}\tmessage-file={output_path}",
+        f"已通知: {moved.task_id}\t通道={channel}\t回执={acknowledgement}\t消息文件={output_path}{channel_detail}",
+        f"notified: {moved.task_id}\tchannel={channel}\tacknowledgement={acknowledgement}\tmessage-file={output_path}{channel_detail}",
     ))
 
 
@@ -2915,6 +3022,10 @@ def parser() -> argparse.ArgumentParser:
     notify_parser.add_argument("task", metavar=t("任务", "task"))
     notify_parser.add_argument("--message", help=t("交给执行 Agent 处理的事项", "the items for the execution Agent to handle"))
     notify_parser.add_argument("--message-file", help=t("从 UTF-8 文件读取事项", "read the items from a UTF-8 file"))
+    notify_parser.add_argument(
+        "--pane",
+        help=t("覆盖自动解析的 herdr pane id, 仍执行完整身份校验", "override the resolved herdr pane id; full identity validation still applies"),
+    )
     notify_parser.add_argument(
         "--timeout",
         type=float,
