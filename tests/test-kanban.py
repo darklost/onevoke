@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import runpy
@@ -417,7 +418,12 @@ exit 1
         return (self.root / f"herdr.log.{suffix}").read_text(encoding="utf-8").splitlines()
 
     @contextmanager
-    def fake_herdr_socket(self, response_type: str = "ok"):
+    def fake_herdr_socket(
+        self,
+        response_type: str = "ok",
+        response_chunks: int = 1,
+        chunk_delay: float = 0.0,
+    ):
         socket_path = self.root / "herdr.sock"
         requests = []
         stop = threading.Event()
@@ -447,7 +453,15 @@ exit 1
                         "id": request["id"],
                         "result": {"type": response_type},
                     }
-                    connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
+                    encoded = (json.dumps(response) + "\n").encode("utf-8")
+                    chunk_size = max(1, math.ceil(len(encoded) / response_chunks))
+                    try:
+                        for offset in range(0, len(encoded), chunk_size):
+                            if chunk_delay:
+                                time.sleep(chunk_delay)
+                            connection.sendall(encoded[offset:offset + chunk_size])
+                    except OSError:
+                        pass
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
@@ -2729,6 +2743,23 @@ exit 1
         self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
         self.assertIn("响应不是 ok", result.stderr)
         self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_session_report_slow_fragments_respect_total_budget(self) -> None:
+        task_id, task = self.make_todo("herdr-report-slow-response")
+        self.install_fake_herdr()
+        started = time.monotonic()
+
+        with self.fake_herdr_socket(response_chunks=8, chunk_delay=0.15):
+            result = self.run_command(
+                "start", "--launcher", "herdr", "--agent", "cursor", task_id
+            )
+
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
+        self.assertIn("timed out", result.stderr)
+        self.assertTrue((self.root / "working" / task.name).exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
 
     def test_herdr_session_report_readback_mismatch_only_warns(self) -> None:
         task_id, task = self.make_todo("herdr-report-mismatch")

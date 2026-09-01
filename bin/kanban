@@ -1681,8 +1681,17 @@ def send_herdr_agent_session(
     socket_path: str,
     pane_id: str,
     session: "AgentSession",
-    timeout: float,
+    deadline: float,
 ) -> None:
+    def operation_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise KanbanError(t(
+                "herdr socket 响应超出上报预算",
+                "herdr socket response exceeded the report budget",
+            ))
+        return min(HERDR_SESSION_REPORT_SOCKET_TIMEOUT, remaining)
+
     seq = next_herdr_session_report_seq()
     request_id = f"onevoke:{session.agent}:{seq}"
     request = {
@@ -1697,13 +1706,15 @@ def send_herdr_agent_session(
         },
     }
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(timeout)
+        client.settimeout(operation_timeout())
         client.connect(socket_path)
+        client.settimeout(operation_timeout())
         client.sendall(
             (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
         )
         response_bytes = b""
         while b"\n" not in response_bytes and len(response_bytes) < 65536:
+            client.settimeout(operation_timeout())
             chunk = client.recv(4096)
             if not chunk:
                 break
@@ -1746,13 +1757,12 @@ def report_herdr_agent_session(
         "herdr session identity report budget exhausted",
     ))
     while time.monotonic() < deadline:
-        remaining = deadline - time.monotonic()
         try:
             send_herdr_agent_session(
                 socket_path,
                 pane_id,
                 session,
-                min(HERDR_SESSION_REPORT_SOCKET_TIMEOUT, remaining),
+                deadline,
             )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
