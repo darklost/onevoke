@@ -748,11 +748,7 @@ def task_dependencies(
         return TaskDependencies((), (), (), (), ())
 
     prerequisite_ids = prerequisite_ids_from(texts[entry.task_id], entry.task_id)
-    group_members: Dict[str, list[str]] = {}
-    for task_id, text in texts.items():
-        task_group = task_group_from(text)
-        if task_group:
-            group_members.setdefault(task_group, []).append(task_id)
+    group_members = task_group_members(texts)
 
     internal_tasks: list[str] = []
     external_tasks: list[str] = []
@@ -767,7 +763,7 @@ def task_dependencies(
                     f"Task {entry.task_id} references a missing prerequisite ID: {prerequisite_id}",
                 ))
             task_groups.append(prerequisite_id)
-            expanded.extend(sorted(members))
+            expanded.extend(members)
             continue
         prerequisite = board.entries.get(prerequisite_id)
         if prerequisite is None:
@@ -789,6 +785,19 @@ def task_dependencies(
         tuple(task_groups),
         tuple(dict.fromkeys(expanded)),
     )
+
+
+def task_group_members(documents: Dict[str, str]) -> Dict[str, tuple[str, ...]]:
+    """按任务组索引当前成员, 供依赖解析和只读监控共同使用."""
+    members: Dict[str, list[str]] = {}
+    for task_id, text in documents.items():
+        task_group = task_group_from(text)
+        if task_group:
+            members.setdefault(task_group, []).append(task_id)
+    return {
+        task_group: tuple(sorted(task_ids))
+        for task_group, task_ids in members.items()
+    }
 
 
 def dependency_problems(board: Board, selected: Optional[set[str]] = None) -> list[Problem]:
@@ -2369,6 +2378,60 @@ def emit_group_event(payload: dict) -> None:
     )
 
 
+def watched_task_ids(root: Path, values: list[str], member_ids: list[str]) -> list[str]:
+    """把外部任务或任务组引用解析为不重复的当前任务 ID."""
+    if not values:
+        return []
+    board = scan(root)
+    documents = {
+        task_id: read_document(entry)
+        for task_id, entry in board.entries.items()
+    }
+    group_members = task_group_members(documents)
+    member_set = set(member_ids)
+    watched: list[str] = []
+    watched_set: set[str] = set()
+    for value in values:
+        if TASK_GROUP_RE.fullmatch(value):
+            expanded = group_members.get(value)
+            if not expanded:
+                raise KanbanError(t(
+                    f"外部监控任务组没有成员: {value}",
+                    f"Watched task group has no members: {value}",
+                ))
+        else:
+            expanded = (locate(board, value).task_id,)
+        for task_id in expanded:
+            if task_id in member_set:
+                raise KanbanError(t(
+                    f"外部监控目标与成员任务重复: {task_id}",
+                    f"Watched target duplicates a member task: {task_id}",
+                ))
+            if task_id in watched_set:
+                raise KanbanError(t(
+                    f"外部监控任务 ID 不得重复: {task_id}",
+                    f"Watched task IDs must not be repeated: {task_id}",
+                ))
+            watched.append(task_id)
+            watched_set.add(task_id)
+    return watched
+
+
+def subscription_event(
+    event: str,
+    group_id: str,
+    tasks: dict[str, str],
+    watched: list[str],
+    changed: Optional[list[dict[str, str]]] = None,
+) -> dict:
+    payload = {"event": event, "group_id": group_id, "tasks": tasks}
+    if changed is not None:
+        payload["changed"] = changed
+    if watched:
+        payload["watched"] = watched
+    return payload
+
+
 def command_subscribe(args: argparse.Namespace, root: Path) -> None:
     if not TASK_GROUP_RE.fullmatch(args.group):
         raise KanbanError(t(
@@ -2383,7 +2446,9 @@ def command_subscribe(args: argparse.Namespace, root: Path) -> None:
     task_ids = [normalize_task_id(value) for value in args.tasks]
     if len(task_ids) != len(set(task_ids)):
         raise KanbanError(t("成员任务 ID 不得重复", "Member task IDs must not be repeated"))
-    board, snapshot = group_state_snapshot(root, task_ids)
+    watched = watched_task_ids(root, args.watch, task_ids)
+    monitored_ids = task_ids + watched
+    board, snapshot = group_state_snapshot(root, monitored_ids)
     for task_id in task_ids:
         actual_group = task_group_from(read_document(board.entries[task_id]))
         if actual_group != args.group:
@@ -2392,29 +2457,28 @@ def command_subscribe(args: argparse.Namespace, root: Path) -> None:
                 f"Task does not belong to the specified group: {task_id} (actual: {actual_group or 'N/A'})",
             ))
 
-    emit_group_event({"event": "snapshot", "group_id": args.group, "tasks": snapshot})
+    emit_group_event(subscription_event("snapshot", args.group, snapshot, watched))
     last_event = time.monotonic()
     try:
         while True:
             heartbeat_remaining = args.heartbeat - (time.monotonic() - last_event)
             time.sleep(min(args.refresh, max(0.0, heartbeat_remaining)))
-            _, current = group_state_snapshot(root, task_ids)
+            _, current = group_state_snapshot(root, monitored_ids)
             changed = [
                 {"from": snapshot[task_id], "task_id": task_id, "to": current[task_id]}
-                for task_id in task_ids
+                for task_id in monitored_ids
                 if current[task_id] != snapshot[task_id]
             ]
             if changed:
-                emit_group_event({
-                    "changed": changed,
-                    "event": "state-change",
-                    "group_id": args.group,
-                    "tasks": current,
-                })
+                emit_group_event(subscription_event(
+                    "state-change", args.group, current, watched, changed
+                ))
                 snapshot = current
                 last_event = time.monotonic()
             elif time.monotonic() - last_event >= args.heartbeat:
-                emit_group_event({"event": "heartbeat", "group_id": args.group, "tasks": current})
+                emit_group_event(subscription_event(
+                    "heartbeat", args.group, current, watched
+                ))
                 last_event = time.monotonic()
     except KeyboardInterrupt:
         return
@@ -2489,6 +2553,17 @@ def parser() -> argparse.ArgumentParser:
     )
     subscribe_parser.add_argument("group", metavar=t("任务组", "task-group"))
     subscribe_parser.add_argument("tasks", nargs="+", metavar=t("任务", "task"))
+    subscribe_parser.add_argument(
+        "--watch",
+        action="extend",
+        nargs="+",
+        default=[],
+        metavar=t("外部任务或任务组", "external-task-or-group"),
+        help=t(
+            "同时监控组外任务或任务组, 可重复指定",
+            "also watch external tasks or task groups; may be repeated",
+        ),
+    )
     subscribe_parser.add_argument(
         "--refresh",
         type=float,

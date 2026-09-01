@@ -2137,9 +2137,131 @@ exit 1
             self.assertEqual("heartbeat", heartbeat["event"])
             self.assertEqual(changed["tasks"], heartbeat["tasks"])
             self.assertNotIn(unrelated_id, heartbeat["tasks"])
+            self.assertNotIn("watched", snapshot)
+            self.assertNotIn("watched", changed)
+            self.assertNotIn("watched", heartbeat)
         finally:
             process.terminate()
             process.communicate(timeout=5)
+
+    def test_subscribe_watches_external_task_changes_and_heartbeat(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-watch-events-group"
+        member_id, member = self.make_todo("watch-member")
+        external_id, external = self.make_todo("watch-external")
+        self.set_task_group(member, group_id)
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "subscribe",
+                group_id,
+                member_id,
+                "--watch",
+                external_id,
+                "--refresh",
+                "0.2",
+                "--heartbeat",
+                "0.6",
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            snapshot = self.read_process_json(process)
+            self.assertEqual(
+                {member_id: "todo", external_id: "todo"}, snapshot["tasks"]
+            )
+            self.assertEqual([external_id], snapshot["watched"])
+
+            external.rename(self.root / "working" / external.name)
+            changed = self.read_process_json(process)
+            self.assertEqual(
+                [{"from": "todo", "task_id": external_id, "to": "working"}],
+                changed["changed"],
+            )
+            self.assertEqual([external_id], changed["watched"])
+
+            heartbeat = self.read_process_json(process)
+            self.assertEqual("heartbeat", heartbeat["event"])
+            self.assertEqual(changed["tasks"], heartbeat["tasks"])
+            self.assertEqual([external_id], heartbeat["watched"])
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
+    def test_subscribe_expands_watched_task_group(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-watch-source-group"
+        watched_group = f"{datetime.now().strftime('%Y%m%d')}-watched-group"
+        member_id, member = self.make_todo("watch-group-member")
+        first_id, first = self.make_todo("watched-group-first")
+        second_id, second = self.make_todo("watched-group-second")
+        self.set_task_group(member, group_id)
+        self.set_task_group(first, watched_group)
+        self.set_task_group(second, watched_group)
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "subscribe",
+                group_id,
+                member_id,
+                "--watch",
+                watched_group,
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            snapshot = self.read_process_json(process)
+            self.assertEqual([first_id, second_id], snapshot["watched"])
+            self.assertEqual(
+                {member_id: "todo", first_id: "todo", second_id: "todo"},
+                snapshot["tasks"],
+            )
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
+    def test_subscribe_rejects_invalid_watched_targets(self) -> None:
+        date = datetime.now().strftime("%Y%m%d")
+        group_id = f"{date}-watch-reject-group"
+        member_id, member = self.make_todo("watch-reject-member")
+        self.set_task_group(member, group_id)
+
+        missing = self.run_command(
+            "subscribe",
+            group_id,
+            member_id,
+            "--watch",
+            f"{date}-missing-watch-task",
+            succeeds=False,
+        )
+        duplicate = self.run_command(
+            "subscribe",
+            group_id,
+            member_id,
+            "--watch",
+            member_id,
+            succeeds=False,
+        )
+        empty_group = self.run_command(
+            "subscribe",
+            group_id,
+            member_id,
+            "--watch",
+            f"{date}-empty-watch-group",
+            succeeds=False,
+        )
+
+        self.assertIn("任务不存在", missing.stderr)
+        self.assertIn("外部监控目标与成员任务重复", duplicate.stderr)
+        self.assertIn("外部监控任务组没有成员", empty_group.stderr)
 
     def test_subscribe_rejects_invalid_group_membership_and_duplicate_members(self) -> None:
         group_id = f"{datetime.now().strftime('%Y%m%d')}-events-group"
