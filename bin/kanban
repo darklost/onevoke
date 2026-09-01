@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ from onevoke_config import (
     bind_effective_language,
     effective_config,
     install_paths,
+    kanban_agent_for,
     language_text,
     load_config,
 )
@@ -59,11 +61,13 @@ t = language_text
 argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 
 
-STATES = ("backlog", "todo", "working", "done", "archived", "trash")
+STATES = ("backlog", "todo", "working", "review", "done", "archived", "trash")
 TRANSITIONS = {
     "backlog": {"todo", "archived", "trash"},
     "todo": {"working", "archived", "trash"},
-    "working": {"done", "archived", "trash"},
+    # review: 开发已完成并 push, 等主控安排组级审核与集成; 修复轮次迁回 working.
+    "working": {"review", "done", "archived", "trash"},
+    "review": {"working", "done", "archived", "trash"},
     "done": {"archived", "trash"},
     "archived": {"trash"},
     "trash": set(),
@@ -775,6 +779,9 @@ def validate_ready(entry: Entry, text: str) -> None:
 def validate_target(entry: Entry, target_state: str, text: str) -> None:
     if target_state == "todo":
         validate_ready(entry, text)
+    elif target_state == "review":
+        if not metadata_from(text, "任务分支"):
+            raise KanbanError(t("移入 review 前必须填写: 任务分支", "Before moving to review, set: 任务分支"))
     elif target_state == "done":
         if result_from(text) != "completed":
             raise KanbanError(t("移入 done 前必须填写: 结果: completed", "Before moving to done, set: 结果: completed"))
@@ -839,6 +846,7 @@ def render_contract(title: str, task_type: str) -> str:
 - 任务组:
 - 创建时间: {created}
 - 负责人:
+- 会话:
 - 开始时间:
 - 完成时间:
 - 任务分支:
@@ -985,8 +993,8 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
     rows = []
     for entry in selected_entries(board.entries, args.state):
         text = read_document(entry)
-        name = "开始时间" if entry.state == "working" else "完成时间"
-        timestamp = metadata_from(text, name) if entry.state in {"working", "done"} else ""
+        name = "开始时间" if entry.state in {"working", "review"} else "完成时间"
+        timestamp = metadata_from(text, name) if entry.state in {"working", "review", "done"} else ""
         if entry.state == "done" and not timestamp:
             timestamp = datetime.fromtimestamp(entry.document.stat().st_mtime).strftime(
                 "%Y-%m-%d %H:%M"
@@ -1022,13 +1030,13 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
     light_background = os.environ.get("COLORFGBG", "").rsplit(";", 1)[-1] in {"7", "15"}
     palette = (
         {
-            "backlog": "30", "todo": "33", "working": "34", "done": "32",
+            "backlog": "30", "todo": "33", "working": "34", "review": "35", "done": "32",
             "archived": "35", "trash": "31", "small": "30", "large": "1;35",
             "task": "34", "title": "35",
         }
         if light_background
         else {
-            "backlog": "90", "todo": "93", "working": "96", "done": "92",
+            "backlog": "90", "todo": "93", "working": "96", "review": "95", "done": "92",
             "archived": "94", "trash": "91", "small": "90", "large": "1;95",
             "task": "96", "title": "95",
         }
@@ -1150,7 +1158,7 @@ def command_pick(args: argparse.Namespace, root: Path) -> None:
     print(move_entry(entry, root, "todo").path)
 
 
-def start_metadata(text: str, agent: str) -> str:
+def start_metadata(text: str, agent: str, session: "AgentSession") -> str:
     for name, value in (
         ("负责人", agent),
         ("开始时间", datetime.now().strftime("%Y-%m-%d %H:%M")),
@@ -1159,7 +1167,14 @@ def start_metadata(text: str, agent: str) -> str:
         if len(re.findall(pattern, text)) != 1:
             raise KanbanError(t(f"任务文档缺少唯一元数据字段: {name}", f"Task document must contain exactly one metadata field: {name}"))
         text = re.sub(pattern, f"- {name}: {value}", text, count=1)
-    return text
+    # 会话字段是后加的: 旧模板没有该行时插在负责人之后, 不要求用户改写旧卡.
+    session_lines = re.findall(rf"(?m)^- {SESSION_FIELD}:.*$", text)
+    if len(session_lines) > 1:
+        raise KanbanError(t(f"任务文档缺少唯一元数据字段: {SESSION_FIELD}", f"Task document must contain exactly one metadata field: {SESSION_FIELD}"))
+    rendered = f"- {SESSION_FIELD}: {session.render()}"
+    if session_lines:
+        return re.sub(rf"(?m)^- {SESSION_FIELD}:.*$", lambda _match: rendered, text, count=1)
+    return re.sub(r"(?m)^(- 负责人: .*)$", lambda match: f"{match.group(1)}\n{rendered}", text, count=1)
 
 
 TMUX_SESSION_HINT = "tmux new -A -s onevoke"
@@ -1391,41 +1406,169 @@ def resolve_start_launcher(launcher: str) -> str:
     ))
 
 
-def agent_command(agent: str, binary: str, model_entry: Dict[str, str], kind: str) -> list[str]:
-    """按 Onevoke 配置的模型档位拼 Agent 的 YOLO 启动参数. model 为空时用 CLI 默认模型."""
+SESSION_FIELD = "会话"
+SESSION_REFERENCE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+@dataclass(frozen=True)
+class AgentSession:
+    """执行 Agent 的会话标识, 写进任务卡供 `resume` 带上下文唤醒.
+
+    claude 与 grok 在启动时预分配 UUID; cursor 先用 create-chat 预建 chat;
+    codex 无法在启动时指定会话 id, reference 留空, resume 时按任务 ID 在
+    CODEX_HOME 的 rollout 记录里检索.
+    """
+
+    agent: str
+    reference: str
+
+    def render(self) -> str:
+        return f"{self.agent} {self.reference}".strip()
+
+
+def cursor_create_chat(binary: str) -> str:
+    try:
+        result = subprocess.run([binary, "create-chat"], text=True, capture_output=True, check=False)
+    except OSError as error:
+        raise KanbanError(t(f"cursor-agent create-chat 失败: {error}", f"cursor-agent create-chat failed: {error}")) from error
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    chat_id = lines[-1] if lines else ""
+    if result.returncode != 0 or not SESSION_REFERENCE_RE.fullmatch(chat_id):
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise KanbanError(t(
+            f"cursor-agent create-chat 未返回可用的 chat id: {detail}",
+            f"cursor-agent create-chat did not return a usable chat id: {detail}",
+        ))
+    return chat_id
+
+
+def new_agent_session(agent: str, binary: str) -> AgentSession:
+    if agent in ("claude", "grok"):
+        return AgentSession(agent, str(uuid.uuid4()))
+    if agent == "cursor":
+        return AgentSession(agent, cursor_create_chat(binary))
+    return AgentSession(agent, "")
+
+
+def session_from(text: str) -> AgentSession:
+    value = metadata_from(text, SESSION_FIELD)
+    if not value:
+        raise KanbanError(t(
+            f"任务卡没有 `{SESSION_FIELD}` 记录, 无法带上下文唤醒; 只有经 kanban start 启动的卡可以 resume",
+            f"Task has no `{SESSION_FIELD}` metadata; only tasks launched by kanban start can be resumed",
+        ))
+    parts = value.split()
+    agent = parts[0]
+    reference = parts[1] if len(parts) > 1 else ""
+    if agent not in AGENT_NAMES or len(parts) > 2 or (reference and not SESSION_REFERENCE_RE.fullmatch(reference)):
+        raise KanbanError(t(f"任务卡的会话记录无效: {value}", f"Task session metadata is invalid: {value}"))
+    return AgentSession(agent, reference)
+
+
+def codex_sessions_root() -> Path:
+    codex_home = os.environ.get("CODEX_HOME", "").strip()
+    return (Path(codex_home) if codex_home else Path.home() / ".codex") / "sessions"
+
+
+def codex_prompt_prefixes(task_id: str) -> tuple[str, ...]:
+    """start/resume 交给执行 Agent 的 prompt 开头; 主控会话里只是提到任务 ID 的消息不算."""
+    return (f"执行 Kanban 任务 {task_id}.", f"继续 Kanban 任务 {task_id}.")
+
+
+def codex_rollout_mentions_task(path: Path, task_id: str) -> Optional[str]:
+    """读 rollout 头部: 返回 session id, 仅当某条用户消息是该任务的 start/resume prompt."""
+    session_id = None
+    mentioned = False
+    prefixes = codex_prompt_prefixes(task_id)
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            for index, line in enumerate(stream):
+                if index >= 64:
+                    break
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if record.get("type") == "session_meta" and isinstance(payload.get("id"), str):
+                    session_id = payload["id"]
+                elif record.get("type") == "response_item" and payload.get("role") == "user":
+                    for item in payload.get("content") or []:
+                        text = item.get("text") if isinstance(item, dict) else None
+                        if isinstance(text, str) and text.startswith(prefixes):
+                            mentioned = True
+                elif record.get("type") == "event_msg" and payload.get("type") == "user_message":
+                    if isinstance(payload.get("message"), str) and payload["message"].startswith(prefixes):
+                        mentioned = True
+                if session_id and mentioned:
+                    return session_id
+    except OSError:
+        return None
+    return None
+
+
+def find_codex_session(task_id: str) -> str:
+    root = codex_sessions_root()
+    if not root.is_dir():
+        raise KanbanError(t(
+            f"找不到 Codex 会话目录: {root}; 无法带上下文唤醒",
+            f"Codex sessions directory not found: {root}; cannot resume with context",
+        ))
+    candidates = sorted(root.rglob("rollout-*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for path in candidates:
+        session_id = codex_rollout_mentions_task(path, task_id)
+        if session_id and SESSION_REFERENCE_RE.fullmatch(session_id):
+            return session_id
+    raise KanbanError(t(
+        f"在 {root} 中找不到以 {task_id} 启动的 Codex 执行会话",
+        f"No Codex execution session started for {task_id} was found under {root}",
+    ))
+
+
+def agent_command(
+    agent: str,
+    binary: str,
+    model_entry: Dict[str, str],
+    kind: str,
+    session: AgentSession,
+    *,
+    resume: bool = False,
+) -> list[str]:
+    """按 Onevoke 配置的模型档位拼 Agent 的 YOLO 启动参数. model 为空时用 CLI 默认模型.
+
+    resume 时改为恢复既有会话: codex 走 `resume <id>`, claude/grok 走 `--resume`,
+    cursor 始终通过预建 chat 的 `--resume` 进入.
+    """
     if agent == "cursor":
         model = model_entry["large_model" if kind == "large" else "small_model"]
         model_args = ["--model", model] if model else []
-        return [binary, *model_args, "--trust", "--force"]
+        return [binary, *model_args, "--trust", "--force", "--resume", session.reference]
     model = model_entry["model"]
     effort = model_entry["large_effort" if kind == "large" else "small_effort"]
     model_args = ["--model", model] if model else []
     if agent == "codex":
-        return [
-            binary,
+        options = [
             *model_args,
             "--config",
             f'model_reasoning_effort="{effort}"',
             "--dangerously-bypass-approvals-and-sandbox",
         ]
+        if resume:
+            return [binary, "resume", *options, session.reference]
+        return [binary, *options]
+    session_args = ["--resume" if resume else "--session-id", session.reference]
     if agent == "claude":
-        return [binary, *model_args, "--effort", effort, "--dangerously-skip-permissions"]
+        return [binary, *model_args, "--effort", effort, "--dangerously-skip-permissions", *session_args]
     if agent == "grok":
-        return [binary, *model_args, "--effort", effort, "--permission-mode", "bypassPermissions"]
+        return [binary, *model_args, "--effort", effort, "--permission-mode", "bypassPermissions", *session_args]
     raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
 
 
-def command_start(args: argparse.Namespace, root: Path) -> None:
-    entry = select_todo(load_board(root), args.task)
-    config = effective_config(load_config())
-    agent_name = args.agent or config["kanban_agent"]
-    launcher = args.launcher or config["launcher"]
-    if os.name == "nt" and launcher in ("auto", "tmux", "tmux-session", "herdr"):
-        raise KanbanError(t(
-            f"Windows 不支持 {launcher} 启动方式; 请使用 console 或 foreground",
-            f"Windows does not support the {launcher} launcher; use console or foreground",
-        ))
-    launcher = resolve_start_launcher(launcher)
+def resolve_agent_binary(agent_name: str) -> str:
     executable_name = agent_executable_name(agent_name)
     agent = shutil.which(executable_name)
     if not agent:
@@ -1438,7 +1581,46 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             f"Windows Agent 必须是原生 .exe, 不会执行可能重解析参数的入口: {agent}",
             f"Windows Agent must be a native .exe; refusing an entry point that can reparse arguments: {agent}",
         ))
-    project = root.parent.resolve()
+    return agent
+
+
+@dataclass(frozen=True)
+class LaunchPlan:
+    """领取前完成的 launcher 前置检查结果; 检查失败不领取."""
+
+    launcher: str
+    project: Path
+    tmux: Optional[str] = None
+    session: Optional[str] = None
+    session_exists: bool = False
+    herdr_bin: Optional[str] = None
+    herdr_workspace: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class LaunchOutcome:
+    process: Optional[subprocess.Popen] = None
+    window: str = ""
+    tab: Optional[str] = None
+    pane: Optional[str] = None
+
+
+class LaunchFailure(KanbanError):
+    """启动失败; herdr 路径附带关闭本次新建 tab 的结果."""
+
+    def __init__(self, error: BaseException, close_error: Optional[str]) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.close_error = close_error
+
+
+def prepare_launch(launcher: str, project: Path, command: str) -> LaunchPlan:
+    if os.name == "nt" and launcher in ("auto", "tmux", "tmux-session", "herdr"):
+        raise KanbanError(t(
+            f"Windows 不支持 {launcher} 启动方式; 请使用 console 或 foreground",
+            f"Windows does not support the {launcher} launcher; use console or foreground",
+        ))
+    launcher = resolve_start_launcher(launcher)
     tmux = None
     session = None
     session_exists = False
@@ -1480,26 +1662,23 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     elif not (sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()):
         fallback = "console" if os.name == "nt" else "tmux"
         raise KanbanError(t(
-            f"前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). 在 CI、管道或无 TTY 环境请改用: kanban start --launcher {fallback} <task-id>",
-            f"Foreground mode requires an interactive terminal (stdin/stdout/stderr must be TTYs). In CI, pipelines, or environments without a TTY, use: kanban start --launcher {fallback} <task-id>",
+            f"前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). 在 CI、管道或无 TTY 环境请改用: kanban {command} --launcher {fallback} <task-id>",
+            f"Foreground mode requires an interactive terminal (stdin/stdout/stderr must be TTYs). In CI, pipelines, or environments without a TTY, use: kanban {command} --launcher {fallback} <task-id>",
         ))
+    return LaunchPlan(launcher, project, tmux, session, session_exists, herdr_bin, herdr_workspace)
 
-    original = read_document(entry)
-    updated = start_metadata(original, agent_name)
-    prompt = start_agent_prompt(entry.task_id, current_install_paths())
-    moved = move_entry(entry, root, "working")
-    name = window_name(entry, original)
-    model_entry = config["models"]["kanban"][agent_name]
-    agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind), prompt]
+
+def launch_agent(plan: LaunchPlan, root: Path, name: str, agent_argv: list[str]) -> LaunchOutcome:
+    """按 plan 启动 Agent; 六种 launcher 的 cwd 都是项目根. 失败抛 LaunchFailure."""
     created_tab = None
     try:
-        write_text_atomic(moved.document, updated, entry=moved)
-        if launcher == "foreground":
+        if plan.launcher == "foreground":
             try:
                 process = subprocess.Popen(agent_argv, cwd=root.parent)
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
-        elif launcher == "console":
+            return LaunchOutcome(process=process)
+        if plan.launcher == "console":
             try:
                 process = subprocess.Popen(
                     agent_argv,
@@ -1512,91 +1691,218 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 )
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
-        elif launcher == "herdr":
-            command = shlex.join(agent_argv)
+            return LaunchOutcome(process=process)
+        command = shlex.join(agent_argv)
+        if plan.launcher == "herdr":
             created_tab, pane_id = herdr_create_tab(
-                herdr_bin, herdr_workspace, str(root.parent), name
+                plan.herdr_bin, plan.herdr_workspace, str(root.parent), name
             )
-            herdr_wait_pane_ready(herdr_bin, pane_id)
-            herdr_pane_run(herdr_bin, pane_id, command)
-        else:
-            command = shlex.join(agent_argv)
-            create = launcher == "tmux-session" and not session_exists
-            result = tmux_launch(tmux, session, create, str(root.parent), name, command)
-            if create and result.returncode != 0 and session_owner(tmux, session) in ("", str(project)):
-                # 与另一次 start 抢建同一个 session 时改为在已建好的 session 里开 window.
-                create = False
-                result = tmux_launch(tmux, session, create, str(root.parent), name, command)
-            if result.returncode != 0:
-                subcommand = "new-session" if create else "new-window"
-                detail = result.stderr.strip() or f"exit {result.returncode}"
-                raise KanbanError(t(f"tmux {subcommand} 失败: {detail}", f"tmux {subcommand} failed: {detail}"))
-            window = result.stdout.strip() or "unknown"
-            if create:
-                # 标记项目归属供后续复用校验; 写失败不影响本次启动, 未标记的 session 仍会被复用.
-                tmux_capture(tmux, "set-option", "-t", session, PROJECT_SESSION_OPTION, str(project))
+            herdr_wait_pane_ready(plan.herdr_bin, pane_id)
+            herdr_pane_run(plan.herdr_bin, pane_id, command)
+            return LaunchOutcome(tab=created_tab, pane=pane_id)
+        create = plan.launcher == "tmux-session" and not plan.session_exists
+        result = tmux_launch(plan.tmux, plan.session, create, str(root.parent), name, command)
+        if create and result.returncode != 0 and session_owner(plan.tmux, plan.session) in ("", str(plan.project)):
+            # 与另一次 start 抢建同一个 session 时改为在已建好的 session 里开 window.
+            create = False
+            result = tmux_launch(plan.tmux, plan.session, create, str(root.parent), name, command)
+        if result.returncode != 0:
+            subcommand = "new-session" if create else "new-window"
+            detail = result.stderr.strip() or f"exit {result.returncode}"
+            raise KanbanError(t(f"tmux {subcommand} 失败: {detail}", f"tmux {subcommand} failed: {detail}"))
+        window = result.stdout.strip() or "unknown"
+        if create:
+            # 标记项目归属供后续复用校验; 写失败不影响本次启动, 未标记的 session 仍会被复用.
+            tmux_capture(plan.tmux, "set-option", "-t", plan.session, PROJECT_SESSION_OPTION, str(plan.project))
+        return LaunchOutcome(window=window)
     except (KanbanError, OSError, UnicodeError, ValueError) as error:
-        close_error = herdr_close_tab(herdr_bin, created_tab) if created_tab is not None else None
-        rollback_errors: list[str] = []
+        close_error = herdr_close_tab(plan.herdr_bin, created_tab) if created_tab is not None else None
+        raise LaunchFailure(error, close_error) from error
+
+
+def rollback_launch(
+    root: Path,
+    moved: Entry,
+    original_state: str,
+    failure: LaunchFailure,
+    original_text: Optional[str] = None,
+) -> None:
+    """启动失败后恢复文档并迁回原状态; 回滚也失败时保留现场并一并报告."""
+    rollback_errors: list[str] = []
+    if original_text is not None:
         try:
-            write_text_atomic(moved.document, original, entry=moved)
+            write_text_atomic(moved.document, original_text, entry=moved)
         except (OSError, UnicodeError, KanbanError) as content_error:
             rollback_errors.append(t(f"恢复文档失败: {content_error}", f"failed to restore document: {content_error}"))
+    if moved.state != original_state:
         try:
-            rename_entry_nofollow(root, moved, entry.state)
+            rename_entry_nofollow(root, moved, original_state)
         except (OSError, UnicodeError, KanbanError) as move_error:
-            rollback_errors.append(t(f"迁回 todo 失败: {move_error}", f"failed to move back to todo: {move_error}"))
-        extras = [item for item in (close_error, *rollback_errors) if item]
-        if rollback_errors:
-            raise KanbanError(
-                t(
-                    f"启动失败且回滚失败; 卡片保留在 working: {error}; ",
-                    f"Start and rollback both failed; task remains in working: {error}; ",
-                )
-                + "; ".join(extras)
-            ) from error
-        if close_error:
-            raise KanbanError(f"{error}; {close_error}") from error
-        raise
-    if launcher == "foreground":
-        print(
+            rollback_errors.append(t(
+                f"迁回 {original_state} 失败: {move_error}",
+                f"failed to move back to {original_state}: {move_error}",
+            ))
+    extras = [item for item in (failure.close_error, *rollback_errors) if item]
+    if rollback_errors:
+        raise KanbanError(
             t(
-                f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=foreground",
-                f"started: {entry.task_id}\tagent={agent_name}\tlauncher=foreground",
-            ),
-            flush=True,
-        )
-        returncode = process.wait()
+                f"启动失败且回滚失败; 卡片保留在 {moved.state}: {failure.error}; ",
+                f"Start and rollback both failed; task remains in {moved.state}: {failure.error}; ",
+            )
+            + "; ".join(extras)
+        ) from failure.error
+    if failure.close_error:
+        raise KanbanError(f"{failure.error}; {failure.close_error}") from failure.error
+    raise failure.error
+
+
+def report_launch(
+    verb: str,
+    entry: Entry,
+    agent_name: str,
+    plan: LaunchPlan,
+    outcome: LaunchOutcome,
+) -> None:
+    """输出实际启动方式与所选 Agent; foreground 还要等 Agent 退出."""
+    scale = t({"large": "大任务", "small": "小任务"}[entry.kind], entry.kind)
+    head = t(
+        f"{verb}: {entry.task_id}\t规模={scale}\tAgent={agent_name}",
+        f"{verb}: {entry.task_id}\tscale={scale}\tagent={agent_name}",
+    )
+    if plan.launcher == "foreground":
+        print(t(f"{head}\t启动方式=foreground", f"{head}\tlauncher=foreground"), flush=True)
+        returncode = outcome.process.wait()
         if returncode != 0:
             raise KanbanError(t(
                 f"Agent 已启动但以非零状态退出: {returncode}; 卡片保留在 working",
                 f"Agent started but exited with status {returncode}; task remains in working",
             ))
         return
-    if launcher == "console":
+    if plan.launcher == "console":
         print(t(
-            f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=console\tPID={process.pid}",
-            f"started: {entry.task_id}\tagent={agent_name}\tlauncher=console\tPID={process.pid}",
+            f"{head}\t启动方式=console\tPID={outcome.process.pid}",
+            f"{head}\tlauncher=console\tPID={outcome.process.pid}",
         ))
         return
-    if launcher == "herdr":
+    if plan.launcher == "herdr":
         print(t(
-            f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=herdr\ttab={created_tab}\tpane={pane_id}",
-            f"started: {entry.task_id}\tagent={agent_name}\tlauncher=herdr\ttab={created_tab}\tpane={pane_id}",
+            f"{head}\t启动方式=herdr\ttab={outcome.tab}\tpane={outcome.pane}",
+            f"{head}\tlauncher=herdr\ttab={outcome.tab}\tpane={outcome.pane}",
         ))
         return
-    if launcher == "tmux-session":
+    if plan.launcher == "tmux-session":
         print(t(
-            f"已启动: {entry.task_id}\tAgent={agent_name}\t会话={session}\t窗口={window}",
-            f"started: {entry.task_id}\tagent={agent_name}\tsession={session}\twindow={window}",
+            f"{head}\t会话={plan.session}\t窗口={outcome.window}",
+            f"{head}\tsession={plan.session}\twindow={outcome.window}",
         ))
-        hint = f"tmux switch-client -t {session}" if os.environ.get("TMUX") else f"tmux attach -t {session}"
+        hint = f"tmux switch-client -t {plan.session}" if os.environ.get("TMUX") else f"tmux attach -t {plan.session}"
         print(t(f"查看: {hint}", f"view: {hint}"))
         return
     print(t(
-        f"已启动: {entry.task_id}\tAgent={agent_name}\t启动方式=tmux\t窗口={window}",
-        f"started: {entry.task_id}\tagent={agent_name}\tlauncher=tmux\twindow={window}",
+        f"{head}\t启动方式=tmux\t窗口={outcome.window}",
+        f"{head}\tlauncher=tmux\twindow={outcome.window}",
     ))
+
+
+def command_start(args: argparse.Namespace, root: Path) -> None:
+    entry = select_todo(load_board(root), args.task)
+    config = effective_config(load_config())
+    agent_name = args.agent or kanban_agent_for(config, entry.kind)
+    plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "start")
+    agent = resolve_agent_binary(agent_name)
+    session = new_agent_session(agent_name, agent)
+
+    original = read_document(entry)
+    updated = start_metadata(original, agent_name, session)
+    prompt = start_agent_prompt(entry.task_id, current_install_paths())
+    moved = move_entry(entry, root, "working")
+    name = window_name(entry, original)
+    model_entry = config["models"]["kanban"][agent_name]
+    agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind, session), prompt]
+    try:
+        write_text_atomic(moved.document, updated, entry=moved)
+        outcome = launch_agent(plan, root, name, agent_argv)
+    except LaunchFailure as failure:
+        rollback_launch(root, moved, entry.state, failure, original)
+        raise
+    except (KanbanError, OSError, UnicodeError, ValueError) as error:
+        rollback_launch(root, moved, entry.state, LaunchFailure(error, None), original)
+        raise
+    report_launch(t("已启动", "started"), moved, agent_name, plan, outcome)
+
+
+RESUME_STATES = ("review", "working")
+
+
+def resume_agent_prompt(task_id: str, message: str, paths: InstallPaths) -> str:
+    """生成 resume 交给原执行 Agent 的说明: 先重读卡片, 再处理主控派回的事项."""
+    if paths.mode == "project":
+        if paths.project_root is None:
+            raise KanbanError(t("项目安装路径缺少主 worktree", "project install paths are missing the main worktree"))
+        kanban_cmd = str(paths.bin_dir / "kanban")
+        agents_md = str(paths.project_root / "AGENTS.md")
+    else:
+        kanban_cmd = "kanban"
+        agents_md = t("目标项目 AGENTS.md", "the target project's AGENTS.md")
+    return (
+        f"继续 Kanban 任务 {task_id}. 卡片已迁回 working. 先运行 {kanban_cmd} rules, 再运行 "
+        f"{kanban_cmd} show {task_id} 重新核对卡片, 然后处理以下事项:\n\n{message}\n\n"
+        f"遵守 {agents_md} 和看板规则; 处理完成后更新任务卡, 提交并 push, 再按规则迁移卡片状态."
+    )
+
+
+def read_resume_message(args: argparse.Namespace) -> str:
+    if bool(args.message) == bool(args.message_file):
+        raise KanbanError(t(
+            "resume 必须且只能提供 --message 或 --message-file 之一",
+            "resume requires exactly one of --message or --message-file",
+        ))
+    if args.message:
+        message = args.message
+    else:
+        path = Path(args.message_file)
+        if is_reparse_point(path):
+            raise KanbanError(t(f"消息文件不得是符号链接/重解析点: {path}", f"Message file must not be a symlink/reparse point: {path}"))
+        try:
+            message = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise KanbanError(t(f"读取消息文件失败: {error}", f"Failed to read message file: {error}")) from error
+    message = message.strip()
+    if not message:
+        raise KanbanError(t("resume 消息不得为空", "resume message must not be empty"))
+    return message
+
+
+def command_resume(args: argparse.Namespace, root: Path) -> None:
+    entry = locate(load_board(root), args.task)
+    if entry.state not in RESUME_STATES:
+        raise KanbanError(t(
+            f"只能唤醒 {' 或 '.join(RESUME_STATES)} 中的任务; {entry.task_id} 在 {entry.state}",
+            f"Only tasks in {' or '.join(RESUME_STATES)} can be resumed; {entry.task_id} is in {entry.state}",
+        ))
+    message = read_resume_message(args)
+    text = read_document(entry)
+    session = session_from(text)
+    config = effective_config(load_config())
+    plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "resume")
+    agent = resolve_agent_binary(session.agent)
+    if session.agent == "codex":
+        session = AgentSession("codex", find_codex_session(entry.task_id))
+    elif not session.reference:
+        raise KanbanError(t(
+            f"任务卡的 {session.agent} 会话缺少 id, 无法唤醒",
+            f"Task session for {session.agent} has no id; cannot resume",
+        ))
+    prompt = resume_agent_prompt(entry.task_id, message, current_install_paths())
+    model_entry = config["models"]["kanban"][session.agent]
+    agent_argv = [*agent_command(session.agent, agent, model_entry, entry.kind, session, resume=True), prompt]
+    moved = move_entry(entry, root, "working") if entry.state != "working" else entry
+    try:
+        outcome = launch_agent(plan, root, window_name(entry, text), agent_argv)
+    except LaunchFailure as failure:
+        rollback_launch(root, moved, entry.state, failure)
+        raise
+    report_launch(t("已唤醒", "resumed"), moved, session.agent, plan, outcome)
 
 
 WEB_STATUS_LABELS = {
@@ -1604,6 +1910,7 @@ WEB_STATUS_LABELS = {
         "backlog": "待办池",
         "todo": "待处理",
         "working": "进行中",
+        "review": "待审核",
         "done": "已完成",
         "archived": "已存档",
         "trash": "回收站",
@@ -1612,6 +1919,7 @@ WEB_STATUS_LABELS = {
         "backlog": "Backlog",
         "todo": "Todo",
         "working": "Working",
+        "review": "Review",
         "done": "Done",
         "archived": "Archived",
         "trash": "Trash",
@@ -1624,7 +1932,7 @@ WEB_SIZE_LABELS = {
 
 
 def task_display_time(entry: Entry, text: str) -> str:
-    if entry.state == "working":
+    if entry.state in ("working", "review"):
         return metadata_from(text, "开始时间") or "-"
     if entry.state == "done":
         timestamp = metadata_from(text, "完成时间")
@@ -1944,6 +2252,19 @@ def parser() -> argparse.ArgumentParser:
         "--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
 
+    resume_parser = commands.add_parser(
+        "resume",
+        help=t("用原会话唤醒 review 或 working 中任务的执行 Agent", "resume the execution Agent of a review or working task with its original session"),
+    )
+    resume_parser.add_argument("task", metavar=t("任务", "task"))
+    resume_parser.add_argument("--message", help=t("交给执行 Agent 处理的事项", "the items for the execution Agent to handle"))
+    resume_parser.add_argument("--message-file", help=t("从 UTF-8 文件读取事项", "read the items from a UTF-8 file"))
+    resume_parser.add_argument(
+        "--launcher",
+        choices=LAUNCHERS,
+        help=t("覆盖本次启动方式, 不修改配置", "override the launcher for this run without changing the configuration"),
+    )
+
     check_parser = commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
     check_parser.add_argument(
         "tasks",
@@ -2056,6 +2377,8 @@ def main() -> int:
             command_pick(args, root)
         elif args.command == "start":
             command_start(args, root)
+        elif args.command == "resume":
+            command_resume(args, root)
         elif args.command == "check":
             return command_check(args, root)
         elif args.command == "subscribe":

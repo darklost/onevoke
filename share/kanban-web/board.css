@@ -23,6 +23,8 @@
   --todo-on: #7a5200;
   --working-container: #e3f2fd;
   --working-on: #1565c0;
+  --review-container: #fff3e0;
+  --review-on: #e65100;
   --done-container: #e8f5e9;
   --done-on: #2e7d32;
   --archived-container: #f3e5f5;
@@ -81,6 +83,8 @@
     --todo-on: #ffe082;
     --working-container: #0d3a66;
     --working-on: #90caf9;
+    --review-container: #5a2e00;
+    --review-on: #ffcc80;
     --done-container: #1b4620;
     --done-on: #a5d6a7;
     --archived-container: #46165e;
@@ -337,6 +341,7 @@ body {
 .column[data-state="backlog"] .column-header h2::before { background: var(--backlog-on); }
 .column[data-state="todo"] .column-header h2::before { background: var(--todo-on); }
 .column[data-state="working"] .column-header h2::before { background: var(--working-on); }
+.column[data-state="review"] .column-header h2::before { background: var(--review-on); }
 .column[data-state="done"] .column-header h2::before { background: var(--done-on); }
 .column[data-state="archived"] .column-header h2::before { background: var(--archived-on); }
 .column[data-state="trash"] .column-header h2::before { background: var(--trash-on); }
@@ -395,6 +400,7 @@ body {
 .task-card[data-state="backlog"] { border-left-color: var(--backlog-on); }
 .task-card[data-state="todo"] { border-left-color: var(--todo-on); }
 .task-card[data-state="working"] { border-left-color: var(--working-on); }
+.task-card[data-state="review"] { border-left-color: var(--review-on); }
 .task-card[data-state="done"] { border-left-color: var(--done-on); }
 .task-card[data-state="archived"] { border-left-color: var(--archived-on); }
 .task-card[data-state="trash"] { border-left-color: var(--trash-on); }
@@ -460,6 +466,11 @@ body {
 .badge.working {
   background: var(--working-container);
   color: var(--working-on);
+}
+
+.badge.review {
+  background: var(--review-container);
+  color: var(--review-on);
 }
 
 .badge.done {

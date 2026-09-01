@@ -55,7 +55,7 @@ def install_env(home: Path, **extra: str) -> dict[str, str]:
 RULES_DIR = PROJECT_ROOT / "rules"
 RULES = RULES_DIR / "KANBAN-RULES.md"
 AGENT_RULES = RULES_DIR / "ONEVOKE-AGENTS.md"
-STATES = ("backlog", "todo", "working", "done", "archived", "trash")
+STATES = ("backlog", "todo", "working", "review", "done", "archived", "trash")
 
 
 @unittest.skipUnless(os.name == "posix", "PTY, flock, tmux, and shell tests require POSIX")
@@ -196,7 +196,20 @@ printf '%s\\n' '@9'
         tmux.chmod(0o755)
         for name in ("codex", "claude", "grok", "cursor-agent"):
             agent = fake_bin / name
-            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            agent.write_text(
+                """#!/bin/sh
+if [ "$1" = "create-chat" ]; then
+    if [ "${KANBAN_CURSOR_CHAT_FAIL:-}" = "1" ]; then
+        printf '%s\\n' 'fake create-chat failure' >&2
+        exit 1
+    fi
+    printf '%s\\n' "${KANBAN_CURSOR_CHAT_ID:-chat-fake-0001}"
+    exit 0
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
             agent.chmod(0o755)
         self.env["PATH"] = str(fake_bin) + os.pathsep + self.env.get("PATH", "")
         self.env["TMUX"] = "/tmp/fake-tmux,1,0"
@@ -313,6 +326,7 @@ exit 1
         *,
         welcome_complete: bool = True,
         models: Optional[dict] = None,
+        kanban_agents: Optional[dict] = None,
     ) -> None:
         config = self.home / ".config" / "onevoke" / "config.json"
         config.parent.mkdir(parents=True)
@@ -331,6 +345,8 @@ exit 1
         }
         if models is not None:
             payload["models"] = models
+        if kanban_agents is not None:
+            payload["kanban_agents"] = kanban_agents
         config.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_small_and_large_lifecycle(self) -> None:
@@ -570,9 +586,9 @@ exit 1
         self.env["COLORFGBG"] = "0;15"
         light = self.run_command("list").stdout
 
-        for state, code in zip(STATES, ("90", "93", "96", "92", "94", "91")):
+        for state, code in zip(STATES, ("90", "93", "96", "95", "92", "94", "91")):
             self.assertIn(f"\033[{code}m{state}", dark)
-        for state, code in zip(STATES, ("30", "33", "34", "32", "35", "31")):
+        for state, code in zip(STATES, ("30", "33", "34", "35", "32", "35", "31")):
             self.assertIn(f"\033[{code}m{state}", light)
         self.assertIn("\033[90msmall", dark)
         self.assertIn(f"\033[96m{today}", dark)
@@ -580,6 +596,282 @@ exit 1
         self.assertIn("\033[30msmall", light)
         self.assertIn(f"\033[34m{today}", light)
         self.assertIn("\033[35m状态", light)
+
+    def make_large_todo(self, slug: str) -> str:
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-{slug}-task"
+        self.run_command("new", "--large", "chore", slug, f"大任务 {slug}")
+        self.make_ready(self.root / "backlog" / task_id / "spec.md")
+        self.run_command("pick", task_id)
+        return task_id
+
+    def last_launch_command(self) -> str:
+        # 假 tmux 逐参数记录; 命令是 -n <name> 之后的最后一个参数, resume 的 prompt 可能多行.
+        lines = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
+        return "\n".join(lines[lines.index("-n") + 2:])
+
+    @staticmethod
+    def set_branch(path: Path, branch: str) -> None:
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("- 任务分支:\n", f"- 任务分支: {branch}\n", 1), encoding="utf-8")
+
+    def test_new_template_includes_session_field(self) -> None:
+        task_id, task = self.make_todo("template-session")
+        text = task.read_text(encoding="utf-8")
+        self.assertIn("- 负责人:\n- 会话:\n- 开始时间:\n", text)
+
+    def test_start_selects_agent_by_task_scale(self) -> None:
+        fake_bin = self.install_fake_launchers()
+        self.write_onevoke_config("codex", "tmux", kanban_agents={"large": "codex", "small": "cursor"})
+        small_id, small = self.make_todo("scale-small")
+        large_id = self.make_large_todo("scale-large")
+
+        small_result = self.run_command("start", small_id)
+        small_command = self.last_launch_command()
+        large_result = self.run_command("start", large_id)
+        large_command = self.last_launch_command()
+
+        self.assertIn("规模=小任务\tAgent=cursor", small_result.stdout)
+        self.assertIn(str(fake_bin / "cursor-agent"), small_command)
+        self.assertIn("--model cursor-grok-4.6-high", small_command)
+        self.assertIn("--resume chat-fake-0001", small_command)
+        small_text = (self.root / "working" / small.name).read_text(encoding="utf-8")
+        self.assertIn("- 负责人: cursor\n- 会话: cursor chat-fake-0001\n", small_text)
+
+        self.assertIn("规模=大任务\tAgent=codex", large_result.stdout)
+        self.assertIn(str(fake_bin / "codex"), large_command)
+        self.assertIn('model_reasoning_effort="high"', large_command)
+        self.assertNotIn("resume", large_command)
+        large_text = (self.root / "working" / large_id / "spec.md").read_text(encoding="utf-8")
+        self.assertIn("- 负责人: codex\n- 会话: codex\n", large_text)
+
+    def test_start_agent_option_overrides_scale_selection(self) -> None:
+        self.install_fake_launchers()
+        self.write_onevoke_config("codex", "tmux", kanban_agents={"large": "codex", "small": "cursor"})
+        task_id, _ = self.make_todo("scale-override")
+
+        result = self.run_command("start", "--agent", "grok", task_id)
+
+        self.assertIn("Agent=grok", result.stdout)
+        self.assertIn("--permission-mode bypassPermissions", self.last_launch_command())
+
+    def test_start_records_claude_session_id_for_resume(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("claude-session")
+
+        self.run_command("start", "--agent", "claude", task_id)
+
+        command = self.last_launch_command()
+        match = re.search(r"--session-id ([0-9a-f-]{36})", command)
+        self.assertIsNotNone(match, command)
+        text = (self.root / "working" / task.name).read_text(encoding="utf-8")
+        self.assertIn(f"- 会话: claude {match.group(1)}\n", text)
+        self.assertNotIn("--resume", command)
+
+    def test_start_fills_session_into_legacy_cards_without_the_field(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("legacy-session")
+        task.write_text(task.read_text(encoding="utf-8").replace("- 会话:\n", "", 1), encoding="utf-8")
+
+        self.run_command("start", "--agent", "grok", task_id)
+
+        text = (self.root / "working" / task.name).read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^- 负责人: grok\n- 会话: grok [0-9a-f-]{36}$")
+
+    def test_start_cursor_create_chat_failure_does_not_claim(self) -> None:
+        self.install_fake_launchers()
+        self.env["KANBAN_CURSOR_CHAT_FAIL"] = "1"
+        task_id, task = self.make_todo("cursor-chat-fail")
+
+        result = self.run_command("start", "--agent", "cursor", task_id, succeeds=False)
+
+        self.assertIn("create-chat", result.stderr)
+        self.assertTrue(task.exists())
+        self.assertIn("- 负责人:\n", task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "tmux.log").exists())
+
+    def test_review_state_sits_between_working_and_done(self) -> None:
+        task_id, task = self.make_todo("review-flow")
+        self.run_command("move", task_id, "working")
+        working = self.root / "working" / task.name
+
+        rejected = self.run_command("move", task_id, "review", succeeds=False)
+        self.assertIn("任务分支", rejected.stderr)
+        self.set_branch(working, "review-flow")
+        self.run_command("move", task_id, "review")
+        review = self.root / "review" / task.name
+        self.assertTrue(review.exists())
+        self.assertIn("review", self.run_command("list", "review").stdout)
+
+        # 修复轮次迁回 working, 再回到 review; 完成后从 review 直接进 done.
+        self.run_command("move", task_id, "working")
+        self.run_command("move", task_id, "review")
+        self.run_command("move", task_id, "done", succeeds=False)
+        self.complete(review)
+        self.run_command("move", task_id, "done")
+        self.assertTrue((self.root / "done" / task.name).exists())
+        self.run_command("check")
+
+    def test_review_cannot_be_entered_from_todo_or_backlog(self) -> None:
+        task_id, _ = self.make_todo("review-skip")
+        rejected = self.run_command("move", task_id, "review", succeeds=False)
+        self.assertIn("todo -> review", rejected.stderr.replace("todo -> review", "todo -> review"))
+
+    def test_resume_relaunches_claude_with_its_original_session(self) -> None:
+        fake_bin = self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-claude")
+        self.run_command("start", "--agent", "claude", task_id)
+        session_id = re.search(r"--session-id ([0-9a-f-]{36})", self.last_launch_command()).group(1)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "resume-claude")
+        self.run_command("move", task_id, "review")
+
+        result = self.run_command("resume", task_id, "--message", "QA finding: 补齐空输入校验")
+
+        self.assertIn(f"已唤醒: {task_id}\t规模=小任务\tAgent=claude", result.stdout)
+        self.assertTrue(working.exists())
+        self.assertFalse((self.root / "review" / task.name).exists())
+        command = self.last_launch_command()
+        self.assertIn(str(fake_bin / "claude"), command)
+        self.assertIn(f"--resume {session_id}", command)
+        self.assertNotIn("--session-id", command)
+        self.assertIn("--dangerously-skip-permissions", command)
+        self.assertIn("--effort medium", command)
+        self.assertIn(f"继续 Kanban 任务 {task_id}", command)
+        self.assertIn("QA finding: 补齐空输入校验", command)
+        self.assertIn(f"kanban show {task_id}", command)
+        tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual("kb-任务-resume-claude", tmux_args[tmux_args.index("-n") + 1])
+
+    def test_resume_reads_the_message_from_a_file(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-file")
+        self.run_command("start", "--agent", "grok", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "resume-file")
+        self.run_command("move", task_id, "review")
+        findings = self.root / "findings.md"
+        findings.write_text("- [QA][high] 越界读取\n- [PM][medium] 缺少验收 3\n", encoding="utf-8")
+
+        self.run_command("resume", task_id, "--message-file", str(findings))
+
+        command = self.last_launch_command()
+        self.assertIn("越界读取", command)
+        self.assertIn("缺少验收 3", command)
+        self.assertRegex(command, r"--resume [0-9a-f-]{36}")
+
+    def test_resume_requires_exactly_one_message_source(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-args")
+        self.run_command("start", "--agent", "grok", task_id)
+        self.set_branch(self.root / "working" / task.name, "resume-args")
+        self.run_command("move", task_id, "review")
+
+        neither = self.run_command("resume", task_id, succeeds=False)
+        both = self.run_command("resume", task_id, "--message", "x", "--message-file", "y", succeeds=False)
+        empty = self.run_command("resume", task_id, "--message", "  ", succeeds=False)
+
+        for result in (neither, both):
+            self.assertIn("--message", result.stderr)
+        self.assertIn("不得为空", empty.stderr)
+        self.assertTrue((self.root / "review" / task.name).exists())
+
+    def test_resume_finds_the_codex_session_from_rollouts(self) -> None:
+        fake_bin = self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-codex")
+        other_id, _ = self.make_todo("resume-codex-other")
+        self.run_command("start", task_id)
+        self.set_branch(self.root / "working" / task.name, "resume-codex")
+        self.run_command("move", task_id, "review")
+        codex_home = self.root / "codex-home"
+        day = codex_home / "sessions" / "2026" / "09" / "01"
+        day.mkdir(parents=True)
+
+        def rollout(name: str, session_id: str, prompt: str) -> Path:
+            path = day / name
+            lines = [
+                {"timestamp": "t", "type": "session_meta", "payload": {"id": session_id, "cwd": "/p"}},
+                {"timestamp": "t", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "perm"}]}},
+                {"timestamp": "t", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}]}},
+            ]
+            path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+            return path
+
+        decoy = rollout("rollout-2026-09-01T10-00-00-aaaa.jsonl", "aaaaaaaa-0000-0000-0000-000000000001", f"执行 Kanban 任务 {other_id}.")
+        # 主控自己的会话只是提到任务 ID, 不是 start prompt, 即使更新也不能被选中.
+        orchestrator = rollout("rollout-2026-09-01T11-00-00-cccc.jsonl", "cccccccc-0000-0000-0000-000000000003", f"请用 kanban start 启动 {task_id} 并跟踪")
+        target = rollout("rollout-2026-09-01T09-00-00-bbbb.jsonl", "bbbbbbbb-0000-0000-0000-000000000002", f"执行 Kanban 任务 {task_id}. 先运行 kanban rules")
+        os.utime(target, (1_700_000_000, 1_700_000_000))
+        os.utime(decoy, (1_700_000_500, 1_700_000_500))
+        os.utime(orchestrator, (1_700_000_900, 1_700_000_900))
+        self.env["CODEX_HOME"] = str(codex_home)
+
+        result = self.run_command("resume", task_id, "--message", "PM finding: 验收 2 未闭环")
+
+        self.assertIn("Agent=codex", result.stdout)
+        command = self.last_launch_command()
+        self.assertIn(f"{fake_bin / 'codex'} resume", command)
+        self.assertIn("bbbbbbbb-0000-0000-0000-000000000002", command)
+        self.assertNotIn("aaaaaaaa-0000-0000-0000-000000000001", command)
+        self.assertNotIn("cccccccc-0000-0000-0000-000000000003", command)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn('model_reasoning_effort="medium"', command)
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_resume_without_a_codex_rollout_keeps_the_card_in_review(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-codex-missing")
+        self.run_command("start", task_id)
+        self.set_branch(self.root / "working" / task.name, "resume-codex-missing")
+        self.run_command("move", task_id, "review")
+        self.env["CODEX_HOME"] = str(self.root / "empty-codex-home")
+        (self.root / "empty-codex-home" / "sessions").mkdir(parents=True)
+
+        result = self.run_command("resume", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn(task_id, result.stderr)
+        self.assertIn("Codex", result.stderr)
+        self.assertTrue((self.root / "review" / task.name).exists())
+
+    def test_resume_rejects_wrong_states_and_cards_without_a_session(self) -> None:
+        self.install_fake_launchers()
+        todo_id, _ = self.make_todo("resume-todo")
+        manual_id, manual = self.make_todo("resume-manual")
+        self.run_command("move", manual_id, "working")
+
+        wrong_state = self.run_command("resume", todo_id, "--message", "x", succeeds=False)
+        no_session = self.run_command("resume", manual_id, "--message", "x", succeeds=False)
+
+        self.assertIn("review", wrong_state.stderr)
+        self.assertIn("todo", wrong_state.stderr)
+        self.assertIn("会话", no_session.stderr)
+        self.assertTrue((self.root / "working" / manual.name).exists())
+
+    def test_resume_launch_failure_moves_the_card_back_to_review(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-rollback")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "resume-rollback")
+        self.run_command("move", task_id, "review")
+        before = (self.root / "review" / task.name).read_text(encoding="utf-8")
+        self.env["KANBAN_TMUX_FAIL"] = "1"
+
+        result = self.run_command("resume", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn("tmux new-window 失败", result.stderr)
+        self.assertFalse(working.exists())
+        self.assertEqual(before, (self.root / "review" / task.name).read_text(encoding="utf-8"))
+
+    def test_resume_of_a_working_card_does_not_move_it(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-working")
+        self.run_command("start", "--agent", "grok", task_id)
+
+        result = self.run_command("resume", task_id, "--message", "进程已退出, 请继续")
+
+        self.assertIn("已唤醒", result.stdout)
+        self.assertTrue((self.root / "working" / task.name).exists())
+        self.assertRegex(self.last_launch_command(), r"--resume [0-9a-f-]{36}")
 
     def test_start_moves_task_and_launches_agent_window(self) -> None:
         task_id, task = self.make_todo("start-direct")
@@ -2750,22 +3042,25 @@ N/A
         self.assertEqual("todo", model.current_state)
         self.assertEqual(("backlog", "todo", "working"), model.visible_states(3))
         model.move_column(2)
-        self.assertEqual("done", model.current_state)
-        self.assertEqual(("todo", "working", "done"), model.visible_states(3))
+        self.assertEqual("review", model.current_state)
+        self.assertEqual(("todo", "working", "review"), model.visible_states(3))
         self.assertIn(model.current_state, model.visible_states(3))
+        model.move_column(1)
+        self.assertEqual("done", model.current_state)
+        self.assertEqual(("working", "review", "done"), model.visible_states(3))
         model.move_column(1)
         self.assertEqual("backlog", model.current_state)
         self.assertEqual(("backlog", "todo", "working"), model.visible_states(3))
         model.move_column(-1)
         self.assertEqual("done", model.current_state)
-        self.assertEqual(("todo", "working", "done"), model.visible_states(3))
+        self.assertEqual(("working", "review", "done"), model.visible_states(3))
 
         model.toggle_archived()
         model.column_index = model.states.index("trash")
         self.assertEqual(("done", "archived", "trash"), model.visible_states(3))
         model.toggle_archived()
         self.assertEqual("done", model.current_state)
-        self.assertEqual(("todo", "working", "done"), model.visible_states(3))
+        self.assertEqual(("working", "review", "done"), model.visible_states(3))
 
         class FakeScreen:
             def __init__(self, width: int) -> None:
@@ -2823,10 +3118,10 @@ N/A
         tui.model.move_column(3)
         tui._render_board()
         focused_headings = " ".join(text for y, _x, text in narrow.writes if y == 2)
-        self.assertIn("done", focused_headings)
+        self.assertIn("review", focused_headings)
         self.assertNotIn("backlog", focused_headings)
         self.assertIn(tui.model.current_state, tui.model.visible_states(3))
-        self.assertEqual(("todo", "working", "done"), tui.model.visible_states(3))
+        self.assertEqual(("todo", "working", "review"), tui.model.visible_states(3))
 
         one_column = FakeScreen(20)
         tui = kanban_tui.KanbanTui(
