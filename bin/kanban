@@ -2558,7 +2558,9 @@ def resumed_agent_failure_output(plan: LaunchPlan, outcome: LaunchOutcome) -> st
             return ""
     except (KanbanError, OSError, UnicodeError, ValueError):
         return ""
-    output = (result.stdout or result.stderr).rstrip()
+    if result.returncode != 0:
+        return ""
+    output = result.stdout.rstrip()
     if len(output) > RESUME_FAILURE_OUTPUT_LIMIT:
         output = output[-RESUME_FAILURE_OUTPUT_LIMIT:]
     return output

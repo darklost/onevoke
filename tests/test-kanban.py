@@ -1074,6 +1074,27 @@ exit 1
         self.assertFalse((self.root / "review" / task.name).exists())
         self.assertIn("Agent mutation", (self.root / "working" / task.name).read_text(encoding="utf-8"))
 
+    def test_resume_failure_output_ignores_terminal_capture_errors(self) -> None:
+        kanban = self.load_kanban_module()
+        failure = subprocess.CompletedProcess([], 1, "", "can't find pane")
+        cases = (
+            (
+                kanban.LaunchPlan("herdr", self.root.parent, herdr_bin="herdr"),
+                kanban.LaunchOutcome(pane="w1:p9"),
+                mock.patch.object(kanban, "herdr_capture", return_value=failure),
+            ),
+            (
+                kanban.LaunchPlan("tmux", self.root.parent, tmux="tmux", session="$42"),
+                kanban.LaunchOutcome(pane="%9"),
+                mock.patch.object(kanban, "tmux_capture", return_value=failure),
+            ),
+        )
+
+        for plan, outcome, capture in cases:
+            with self.subTest(launcher=plan.launcher):
+                with capture:
+                    self.assertEqual("", kanban.resumed_agent_failure_output(plan, outcome))
+
     def test_resume_of_a_working_card_does_not_move_it(self) -> None:
         self.install_fake_launchers()
         task_id, task = self.make_todo("resume-working")
