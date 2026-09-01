@@ -133,6 +133,27 @@ class WindowsConsoleLauncherTest(unittest.TestCase):
         finally:
             self.kanban.remove_notify_message(path)
 
+    def test_notify_payload_rejects_reparse_temporary_root(self) -> None:
+        actual = self.project / "actual-temp"
+        actual.mkdir()
+        junction = self.project / "junction-temp"
+        linked = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(actual)],
+            text=True,
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertEqual(0, linked.returncode, linked.stderr)
+        try:
+            with mock.patch.object(self.kanban, "notification_temp_root", return_value=junction):
+                with self.assertRaises(self.kanban.UnsafePathError):
+                    self.kanban.write_notify_message("sensitive finding")
+            self.assertEqual([], list(actual.iterdir()))
+        finally:
+            os.rmdir(junction)
+
     def test_console_creation_failure_restores_todo_and_document(self) -> None:
         popen = mock.Mock(side_effect=OSError("cannot create console"))
 

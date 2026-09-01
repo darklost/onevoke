@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import unittest
 from datetime import datetime
@@ -212,12 +213,13 @@ fi
 if [ "$1" = "capture-pane" ]; then
     [ "${KANBAN_TMUX_CAPTURE_FAIL:-}" = "1" ] && exit 1
     if [ "${KANBAN_TMUX_ACK:-1}" = "1" ] && [ -f "$KANBAN_TMUX_LOG.instruction" ]; then
-        sed -n 's/.*先原样输出 \\([^, ]*\\),.*/\\1/p' "$KANBAN_TMUX_LOG.instruction"
+        sed -n 's/.*先原样输出 \\([^, ]*\\),.*/• \\1/p' "$KANBAN_TMUX_LOG.instruction"
     fi
     exit 0
 fi
 if [ "$1" = "kill-window" ]; then
     printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.kill"
+    [ "${KANBAN_TMUX_KILL_FAIL:-}" = "1" ] && exit 1
     exit 0
 fi
 if [ "$1" = "respawn-pane" ]; then
@@ -349,6 +351,7 @@ if [ "$1" = "pane" ] && [ "$2" = "list" ]; then
 fi
 if [ "$1" = "tab" ] && [ "$2" = "close" ]; then
     printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.close"
+    [ "${KANBAN_HERDR_CLOSE_FAIL:-}" = "1" ] && exit 1
     exit 0
 fi
 printf '%s\\n' "unexpected herdr args: $*" >&2
@@ -1123,7 +1126,7 @@ exit 1
         cases = (
             ("notify-no-pane", "KANBAN_HERDR_GET_FAIL", "1", "pane 不存在"),
             ("notify-agent", "KANBAN_HERDR_AGENT", "codex", "Agent 不匹配"),
-            ("notify-busy", "KANBAN_HERDR_STATUS", "running", "pane 非 idle"),
+            ("notify-busy", "KANBAN_HERDR_STATUS", "running", "状态不可投递"),
             ("notify-session", "KANBAN_HERDR_SESSION", "wrong-session", "会话不匹配"),
         )
         for slug, variable, value, expected in cases:
@@ -1387,6 +1390,10 @@ exit 1
     def test_notify_resume_rejects_done_herdr_agent_and_keeps_review(self) -> None:
         kanban = self.load_kanban_module()
         task_id, review = self.make_herdr_review("notify-resume-done")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
         before = review.read_text(encoding="utf-8")
         self.env["KANBAN_HERDR_STATUS"] = "done"
         args = argparse.Namespace(task=task_id, message="x", message_file=None, timeout=61, pane=None)
@@ -1399,6 +1406,74 @@ exit 1
 
         self.assertEqual(before, review.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / review.name).exists())
+
+    def test_notify_existing_done_herdr_pane_accepts_direct_delivery(self) -> None:
+        task_id, review = self.make_herdr_review("notify-existing-done")
+        self.env["KANBAN_HERDR_STATUS"] = "done"
+
+        result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61")
+
+        self.assertIn("通道=herdr-direct", result.stdout)
+        self.assertTrue((self.root / "working" / review.name).exists())
+        message_path = Path(re.search(r"消息文件=(\S+)", result.stdout).group(1))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_process_resume_observes_the_full_liveness_budget(self) -> None:
+        kanban = self.load_kanban_module()
+        plan = kanban.LaunchPlan("console", self.root.parent)
+        session = kanban.AgentSession("codex", "session")
+
+        exits_late = mock.Mock(returncode=17)
+        exits_late.poll.side_effect = (None, 17)
+        with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 0.25)):
+            with mock.patch.object(kanban.time, "sleep"):
+                with self.assertRaisesRegex(kanban.KanbanError, "观察期内退出"):
+                    kanban.validate_resumed_agent(
+                        plan, kanban.LaunchOutcome(process=exits_late), session, 61
+                    )
+
+        survives = mock.Mock(returncode=None)
+        survives.poll.return_value = None
+        with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 61.0)):
+            with mock.patch.object(kanban.time, "sleep") as sleeper:
+                kanban.validate_resumed_agent(
+                    plan, kanban.LaunchOutcome(process=survives), session, 61
+                )
+        sleeper.assert_not_called()
+
+    def test_failed_resume_cleanup_reports_herdr_and_tmux_failures(self) -> None:
+        kanban = self.load_kanban_module()
+        cases = (
+            (
+                kanban.LaunchPlan("herdr", self.root.parent, herdr_bin="herdr"),
+                kanban.LaunchOutcome(tab="w1:t9", pane="w1:p9"),
+                mock.patch.object(kanban, "herdr_close_tab", return_value="injected close failure"),
+            ),
+            (
+                kanban.LaunchPlan("tmux", self.root.parent, tmux="tmux", session="$42"),
+                kanban.LaunchOutcome(window="@9", pane="%9"),
+                mock.patch.object(kanban, "tmux_close_window", return_value="injected kill failure"),
+            ),
+        )
+        for plan, outcome, failure in cases:
+            with self.subTest(launcher=plan.launcher):
+                with failure:
+                    with self.assertRaisesRegex(kanban.KanbanError, "可能仍存活"):
+                        kanban.cleanup_failed_resume(plan, outcome)
+
+    def test_notify_via_resume_combines_liveness_and_cleanup_errors(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("notify-cleanup-combined")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        text = working.read_text(encoding="utf-8")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "validate_resumed_agent", side_effect=kanban.KanbanError("liveness failed")):
+                with mock.patch.object(kanban, "cleanup_failed_resume", side_effect=kanban.KanbanError("cleanup failed")):
+                    with self.assertRaisesRegex(kanban.KanbanError, "liveness failed; 清理=cleanup failed"):
+                        kanban.notify_via_resume(kanban.locate(kanban.load_board(self.root), task_id), text, "x", self.root, 61)
 
     def test_tmux_notify_timeout_uses_injected_clock(self) -> None:
         kanban = self.load_kanban_module()
@@ -1435,10 +1510,70 @@ exit 1
             with mock.patch.object(kanban.sys.stdin, "isatty", return_value=True):
                 with mock.patch.object(kanban.sys.stdout, "isatty", return_value=True):
                     with mock.patch.object(kanban.sys.stderr, "isatty", return_value=True):
-                        with self.assertRaisesRegex(kanban.KanbanError, "恢复 Agent 秒退"):
+                        with self.assertRaisesRegex(kanban.KanbanError, "观察期内退出"):
                             kanban.command_notify(args, self.root)
 
         self.assertEqual(before, review.read_text(encoding="utf-8"))
+
+    def test_notify_foreground_stays_attached_until_a_late_agent_exit_on_pty(self) -> None:
+        fake_bin = self.install_fake_herdr()
+        task_id, review = self.make_herdr_review("notify-foreground-pty")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
+        self.write_onevoke_config("claude", "foreground")
+        claude = fake_bin / "claude"
+        claude.write_text("#!/bin/sh\n/bin/sleep 0.6\nexit 7\n", encoding="utf-8")
+        claude.chmod(0o755)
+        master, slave = pty.openpty()
+        started = time.monotonic()
+        process = subprocess.Popen(
+            [sys.executable, str(COMMAND), "notify", task_id, "--message", "x", "--timeout", "61"],
+            env=self.env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+        try:
+            returncode = process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+            self.fail("foreground notify did not observe the resumed Agent exit")
+        finally:
+            os.close(master)
+        self.assertNotEqual(0, returncode)
+        self.assertGreaterEqual(time.monotonic() - started, 0.5)
+        self.assertTrue(review.exists())
+        self.assertFalse((self.root / "working" / review.name).exists())
+
+    def test_notify_foreground_waits_after_migrating_the_card(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, review = self.make_herdr_review("notify-foreground-wait")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
+        process = mock.Mock()
+
+        def finish_after_migration():
+            self.assertTrue((self.root / "working" / review.name).exists())
+            return 0
+
+        process.wait.side_effect = finish_after_migration
+        launch = kanban.ResumeLaunch(
+            kanban.LaunchPlan("foreground", self.root.parent),
+            kanban.LaunchOutcome(process=process),
+        )
+        args = argparse.Namespace(task=task_id, message="x", message_file=None, timeout=61, pane=None)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "notify_via_resume", return_value=launch):
+                kanban.command_notify(args, self.root)
+
+        process.wait.assert_called_once_with()
 
     def test_notify_requires_message_and_supported_state(self) -> None:
         self.install_fake_herdr()

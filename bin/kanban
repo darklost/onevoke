@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import ctypes
 import hashlib
 import json
 import math
@@ -15,6 +16,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1879,6 +1881,12 @@ class LaunchOutcome:
     pane: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class ResumeLaunch:
+    plan: LaunchPlan
+    outcome: LaunchOutcome
+
+
 class LaunchFailure(KanbanError):
     """启动失败; herdr 路径附带关闭本次新建 tab 的结果."""
 
@@ -2263,8 +2271,11 @@ def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None
             f"Agent mismatch: task={session.agent}, pane={actual_agent or 'N/A'}",
         ))
     status = pane.get("agent_status")
-    if status != "idle":
-        raise KanbanError(t(f"pane 非 idle: {pane_id}: {status or 'N/A'}", f"pane is not idle: {pane_id}: {status or 'N/A'}"))
+    if status not in ("idle", "done"):
+        raise KanbanError(t(
+            f"pane 状态不可投递: {pane_id}: {status or 'N/A'}",
+            f"pane status does not accept delivery: {pane_id}: {status or 'N/A'}",
+        ))
     agent_session = pane.get("agent_session")
     actual_session = agent_session.get("value") if isinstance(agent_session, dict) else None
     if actual_session != session.reference:
@@ -2351,8 +2362,28 @@ def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
         ))
 
 
+def notification_temp_root() -> Path:
+    """返回词法临时根; Windows 不允许 tempfile 写探测或 resolve 跟随 reparse point."""
+    if os.name != "nt":
+        return Path(tempfile.gettempdir()).resolve()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetTempPathW.argtypes = [wintypes.DWORD, wintypes.LPWSTR]
+    kernel32.GetTempPathW.restype = wintypes.DWORD
+    capacity = 32768
+    buffer = ctypes.create_unicode_buffer(capacity)
+    length = kernel32.GetTempPathW(capacity, buffer)
+    if length == 0 or length >= capacity:
+        code = ctypes.get_last_error()
+        detail = ctypes.FormatError(code) if code else "invalid temporary path"
+        raise KanbanError(t(
+            f"无法取得 Windows 临时目录: {detail}",
+            f"Could not determine the Windows temporary directory: {detail}",
+        ))
+    return Path(os.path.abspath(buffer.value))
+
+
 def write_notify_message(message: str) -> Path:
-    temporary_root = Path(tempfile.gettempdir()).resolve()
+    temporary_root = notification_temp_root()
     for _attempt in range(128):
         directory = temporary_root / f"onevoke-notify-{uuid.uuid4().hex}"
         try:
@@ -2429,7 +2460,7 @@ def tmux_direct_notify(
         result = tmux_capture(tmux, "capture-pane", "-p", "-t", pane_id)
         if result.returncode != 0:
             return False, result.stderr.strip() or f"exit {result.returncode}"
-        if any(line.strip() == marker for line in result.stdout.splitlines()):
+        if marker in result.stdout:
             return True, ""
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -2447,16 +2478,19 @@ def notify_resume_prompt(task_id: str, message: str, paths: InstallPaths) -> str
 
 
 def validate_resumed_agent(plan: LaunchPlan, outcome: LaunchOutcome, session: AgentSession, timeout: float) -> None:
-    if plan.launcher in ("foreground", "console"):
-        time.sleep(min(0.25, timeout))
-        if outcome.process.poll() is not None:
-            raise KanbanError(t(
-                f"恢复 Agent 秒退: exit {outcome.process.returncode}",
-                f"Resumed Agent exited immediately: exit {outcome.process.returncode}",
-            ))
-        return
     deadline = time.monotonic() + timeout
     while True:
+        if plan.launcher in ("foreground", "console"):
+            if outcome.process.poll() is not None:
+                raise KanbanError(t(
+                    f"恢复 Agent 在存活观察期内退出: exit {outcome.process.returncode}",
+                    f"Resumed Agent exited during the liveness observation period: exit {outcome.process.returncode}",
+                ))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
+            continue
         try:
             if plan.launcher == "herdr":
                 pane = herdr_pane_info(plan.herdr_bin, outcome.pane)
@@ -2480,15 +2514,31 @@ def validate_resumed_agent(plan: LaunchPlan, outcome: LaunchOutcome, session: Ag
 
 
 def cleanup_failed_resume(plan: LaunchPlan, outcome: LaunchOutcome) -> None:
+    cleanup_error = None
     if plan.launcher == "herdr" and outcome.tab:
-        herdr_close_tab(plan.herdr_bin, outcome.tab)
+        cleanup_error = herdr_close_tab(plan.herdr_bin, outcome.tab)
     elif plan.launcher in ("tmux", "tmux-session") and outcome.window:
-        tmux_capture(plan.tmux, "kill-window", "-t", outcome.window)
+        cleanup_error = tmux_close_window(plan.tmux, outcome.window)
     elif outcome.process is not None and outcome.process.poll() is None:
-        outcome.process.terminate()
+        try:
+            outcome.process.terminate()
+            outcome.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                outcome.process.kill()
+                outcome.process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                cleanup_error = str(error)
+        except OSError as error:
+            cleanup_error = str(error)
+    if cleanup_error:
+        raise KanbanError(t(
+            f"恢复失败后的清理失败, 新 Agent 可能仍存活: {cleanup_error}",
+            f"Cleanup after failed resume failed; the new Agent may still be alive: {cleanup_error}",
+        ))
 
 
-def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout: float) -> None:
+def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout: float) -> ResumeLaunch:
     session = resolved_task_session(entry, text)
     config = effective_config(load_config())
     plan = prepare_launch(config["launcher"], root.parent.resolve(), "notify")
@@ -2499,9 +2549,16 @@ def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout
     outcome = launch_agent(plan, root, window_name(entry, text), agent_argv)
     try:
         validate_resumed_agent(plan, outcome, session, timeout)
-    except BaseException:
-        cleanup_failed_resume(plan, outcome)
+    except (KanbanError, OSError, UnicodeError, ValueError) as liveness_error:
+        try:
+            cleanup_failed_resume(plan, outcome)
+        except (KanbanError, OSError) as cleanup_error:
+            raise KanbanError(t(
+                f"{liveness_error}; 清理={cleanup_error}",
+                f"{liveness_error}; cleanup={cleanup_error}",
+            )) from cleanup_error
         raise
+    return ResumeLaunch(plan, outcome)
 
 
 def command_notify(args: argparse.Namespace, root: Path) -> None:
@@ -2522,6 +2579,7 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
     acknowledgement_detail = ""
     message_path = None
     window_written = False
+    resume_launch = None
     try:
         session = resolved_task_session(entry, text)
         herdr_match = HERDR_WINDOW_RE.fullmatch(window)
@@ -2599,7 +2657,7 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
                     f"notify direct delivery failed and message cleanup failed: direct={direct_error}; cleanup={cleanup_error}",
                 )) from cleanup_error
         try:
-            notify_via_resume(entry, text, message, root, args.timeout)
+            resume_launch = notify_via_resume(entry, text, message, root, args.timeout)
         except (KanbanError, OSError, UnicodeError, ValueError, LaunchFailure) as resume_error:
             raise KanbanError(t(
                 f"notify 失败: 直投={direct_error}; 恢复={resume_error}",
@@ -2623,7 +2681,18 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
     print(t(
         f"已通知: {moved.task_id}\t通道={channel}\t回执={acknowledgement}\t消息文件={output_path}{channel_detail}",
         f"notified: {moved.task_id}\tchannel={channel}\tacknowledgement={acknowledgement}\tmessage-file={output_path}{channel_detail}",
-    ))
+    ), flush=True)
+    if (
+        channel == "resume"
+        and isinstance(resume_launch, ResumeLaunch)
+        and resume_launch.plan.launcher == "foreground"
+    ):
+        returncode = resume_launch.outcome.process.wait()
+        if returncode != 0:
+            raise KanbanError(t(
+                f"恢复 Agent 已通过存活校验, 随后以非零状态退出: {returncode}; 卡片保留在 working",
+                f"Resumed Agent passed liveness validation, then exited with status {returncode}; task remains in working",
+            ))
 
 
 WEB_STATUS_LABELS = {
