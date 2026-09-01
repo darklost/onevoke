@@ -2262,6 +2262,50 @@ exit 1
             (self.root / "tmux.log.pane-setopt").read_text(encoding="utf-8").splitlines(),
         )
 
+    def test_tmux_codex_start_rejects_all_historical_sessions(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, _task = self.make_todo("pane-codex-history")
+        self.install_fake_launchers()
+        args = argparse.Namespace(task=task_id, launcher="tmux", agent="codex")
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(
+                kanban,
+                "codex_sessions_for_task",
+                side_effect=(
+                    ("old-a", "old-b"),
+                    ("old-b",),
+                    ("old-a", "old-b", "new-session"),
+                ),
+            ):
+                with mock.patch.object(kanban.time, "sleep"):
+                    kanban.command_start(args, self.root)
+
+        self.assertEqual(
+            "new-session",
+            (self.root / "tmux.log.pane-session").read_text(encoding="utf-8").strip(),
+        )
+
+    def test_tmux_codex_start_rejects_ambiguous_new_sessions(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, task = self.make_todo("pane-codex-ambiguous")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_launchers()
+        args = argparse.Namespace(task=task_id, launcher="tmux", agent="codex")
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(
+                kanban,
+                "codex_sessions_for_task",
+                side_effect=(("old-session",), ("old-session", "new-a", "new-b")),
+            ):
+                with self.assertRaisesRegex(kanban.KanbanError, "多个新 Codex 会话"):
+                    kanban.command_start(args, self.root)
+
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+        self.assertTrue((self.root / "tmux.log.kill").exists())
+
     def test_start_outside_tmux_does_not_claim_task(self) -> None:
         task_id, task = self.make_todo("no-tmux")
         self.install_fake_launchers()

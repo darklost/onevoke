@@ -1802,7 +1802,7 @@ def codex_rollout_mentions_task(path: Path, task_id: str) -> Optional[str]:
     return None
 
 
-def find_codex_session(task_id: str) -> str:
+def codex_sessions_for_task(task_id: str) -> tuple[str, ...]:
     root = codex_sessions_root()
     if not root.is_dir():
         raise KanbanError(t(
@@ -1810,10 +1810,23 @@ def find_codex_session(task_id: str) -> str:
             f"Codex sessions directory not found: {root}; cannot resume with context",
         ))
     candidates = sorted(root.rglob("rollout-*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True)
+    sessions: list[str] = []
     for path in candidates:
         session_id = codex_rollout_mentions_task(path, task_id)
-        if session_id and SESSION_REFERENCE_RE.fullmatch(session_id):
-            return session_id
+        if (
+            session_id
+            and SESSION_REFERENCE_RE.fullmatch(session_id)
+            and session_id not in sessions
+        ):
+            sessions.append(session_id)
+    return tuple(sessions)
+
+
+def find_codex_session(task_id: str) -> str:
+    sessions = codex_sessions_for_task(task_id)
+    if sessions:
+        return sessions[0]
+    root = codex_sessions_root()
     raise KanbanError(t(
         f"在 {root} 中找不到以 {task_id} 启动的 Codex 执行会话",
         f"No Codex execution session started for {task_id} was found under {root}",
@@ -2139,10 +2152,10 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "start")
     agent = resolve_agent_binary(agent_name)
     session = new_agent_session(agent_name, agent)
-    previous_codex_session = ""
+    previous_codex_sessions: set[str] = set()
     if agent_name == "codex" and plan.launcher in ("tmux", "tmux-session"):
         try:
-            previous_codex_session = find_codex_session(entry.task_id)
+            previous_codex_sessions.update(codex_sessions_for_task(entry.task_id))
         except KanbanError:
             pass
 
@@ -2176,15 +2189,22 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         deadline = time.monotonic() + START_SESSION_DISCOVERY_TIMEOUT
         while True:
             try:
-                candidate = resolved_task_session(moved, read_document(moved))
-                if candidate.reference != previous_codex_session:
-                    return candidate
+                candidates = set(codex_sessions_for_task(moved.task_id))
+            except KanbanError as resolve_error:
+                error = resolve_error
+            else:
+                new_sessions = candidates - previous_codex_sessions
+                if len(new_sessions) == 1:
+                    return AgentSession("codex", next(iter(new_sessions)))
+                if len(new_sessions) > 1:
+                    raise KanbanError(t(
+                        f"本次启动发现多个新 Codex 会话: {len(new_sessions)}",
+                        f"Multiple new Codex sessions appeared during start: {len(new_sessions)}",
+                    ))
                 error = KanbanError(t(
                     "尚未发现本次新建的 Codex 会话",
                     "The newly started Codex session has not appeared yet",
                 ))
-            except KanbanError as resolve_error:
-                error = resolve_error
             if time.monotonic() >= deadline:
                 raise error
             time.sleep(NOTIFY_POLL_INTERVAL)

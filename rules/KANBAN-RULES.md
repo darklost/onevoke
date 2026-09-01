@@ -197,7 +197,7 @@ kanban move <task-id> working
 ```
 
 - `kanban move <task-id> working` 仅适用于用户明确要求当前 Agent 执行既有任务卡; 选择「确认计划并走看板」时必须用 `start`. 不得先 `move ... working` 再 `start`; `start` 只接受 `todo` 卡. 同文件系统上的入口迁移就是领取原语, 只有迁移成功者取得任务; 失败后重查, 不建替代卡, 不另加 lock 服务, 数据库或 ID 分配器.
-- `start` 在启动前检查 Agent, launcher 和 TTY; `auto` 先按当前环境解析再走对应检查, `tmux` 要求已在 tmux session 内, `tmux-session` 只要求 tmux 可用并在此时选定项目专属 session 名, `herdr` 要求 `HERDR_ENV=1`、herdr 在 PATH 且有 `HERDR_WORKSPACE_ID`, `foreground` 要求三个标准流都是 TTY, `console` 要求原生 Windows. 前置检查失败不领取; 创建进程, tmux session, tmux window, herdr tab, herdr pane 就绪等待或 `pane run` 失败时恢复文档并迁回 `todo/`; 就绪等待或 `pane run` 失败还须关闭本次新建的 tab. 新建 tab 的 shell 接管终端前送入的命令文本会被丢弃, 因此 `pane run` 必须在 pane 渲染出首帧输出之后, 就绪等待有上限, 超时按失败处理. 进程创建成功后即算启动成功, 后续退出不自动回滚; `console` 成功时输出 PID 后立即返回. 成功输出报告解析后的实际启动方式 (`herdr` 或 `tmux`), 而不是只写 `auto`.
+- `start` 在启动前检查 Agent, launcher 和 TTY; `auto` 先按当前环境解析再走对应检查, `tmux` 要求已在 tmux session 内, `tmux-session` 只要求 tmux 可用并在此时选定项目专属 session 名, `herdr` 要求 `HERDR_ENV=1`、herdr 在 PATH 且有 `HERDR_WORKSPACE_ID`, `foreground` 要求三个标准流都是 TTY, `console` 要求原生 Windows. 前置检查失败不领取; 创建进程, tmux session, tmux window, herdr tab, herdr pane 就绪等待或 `pane run` 失败时恢复文档并迁回 `todo/`; herdr 就绪等待或 `pane run` 失败还须关闭本次新建的 tab, tmux/tmux-session 的 Codex 会话发现或 pane 会话标记写入失败还须关闭本次新建的 window. 新建 tab 的 shell 接管终端前送入的命令文本会被丢弃, 因此 `pane run` 必须在 pane 渲染出首帧输出之后, 就绪等待有上限, 超时按失败处理. tmux/tmux-session 只有在会话发现与 pane 标记写入成功后才算启动成功; 其他 launcher 在进程创建成功后即算启动成功, 后续退出不自动回滚. `console` 成功时输出 PID 后立即返回. 成功输出报告解析后的实际启动方式 (`herdr` 或 `tmux`), 而不是只写 `auto`.
 - `start` 的 prompt 只传任务 ID 和固定要求. 执行 Agent 先读本规则, 卡片和项目规则, 再准备工作区并填写任务分支.
 - 领取后只有执行负责人可修改或迁移 `working/` 入口; 协调和编排 Agent 只读督办. 明确交接后由新负责人接管, 不得并发写.
 - 启动后的协调责任按启动方式分:
