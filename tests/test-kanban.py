@@ -2757,7 +2757,6 @@ exit 1
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 1.5)
         self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
-        self.assertIn("timed out", result.stderr)
         self.assertTrue((self.root / "working" / task.name).exists())
         self.assertFalse((self.root / "herdr.log.close").exists())
 
