@@ -18,7 +18,7 @@
 - 执行 Agent 开发, 验证并按关注点提交 push 任务分支后, 先 rebase 到组分支最新头并重跑验证, 再 ff 进组分支: 远端路径用非 force 的 `git push origin <任务分支最终 commit>:refs/heads/group/<id>`, 本地路径在组分支 worktree 或主树用 `git merge --ff-only`; 被 non-fast-forward 拒绝时 fetch 后重新 rebase 重试. 任何路径不产生 merge commit. rebase 冲突由该卡的执行 Agent 解决, 主控不代解.
 - 组级审核在组分支的专用 worktree 上进行, `CWD` 为该 worktree, commit 为组分支 HEAD; 首批 base 为组分支创建时所基于的 `develop` commit, 后续批次 base 为上一批通过的组分支 commit. 修复轮次由执行 Agent 在各自任务分支完成并再次 ff 进组分支, 批次与增量复审见 `REVIEW-RULES.md`「任务组的组级审核」.
 - 组分支合回 `develop` 按「集成与清理」执行, 把其中的"任务分支"读作组分支, "最终任务 commit"读作组分支 HEAD: 审核通过后 rebase 到最新 `develop`, 重做验证, `git push origin <组分支 HEAD>:refs/heads/develop`, fetch 后主树 `develop` `--ff-only` 同步. 一次性门规则不变: `develop` 前进只重做 rebase 和验证, 实质代码冲突由主控交回对应卡的执行 Agent 解决并重审.
-- 清理前置改为组内全部任务 commit 已进入 `develop` (`git merge-base --is-ancestor <组分支 HEAD> <develop>`). 满足后主控逐卡执行: 记忆合并, 删该卡 worktree 与本地/远端任务分支; 全部卡完成后删本地/远端组分支. 某张卡的清理失败时只保留该卡及尚未处理卡的现场, 已清理完成的卡不回退, 逐卡如实报告.
+- 清理前置改为组内全部任务 commit 已进入 `develop` (`git merge-base --is-ancestor <组分支 HEAD> <develop>`). 满足后主控按 `KANBAN-RULES.md`「集成与收尾」把收尾派回各卡的原执行 Agent, 由它在本卡 worktree 执行: 记忆合并, 删本卡 worktree 与本地/远端任务分支; 执行 Agent 不删组分支. 无法派回或收尾未闭环时主控代做该卡这两步. 全部卡收尾完成后主控删本地/远端组分支. 某张卡的清理失败时只保留该卡及尚未处理卡的现场, 已清理完成的卡不回退, 逐卡如实报告.
 
 ## Markdown 直改路径
 
