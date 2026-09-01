@@ -108,6 +108,40 @@ class MergeResult:
         self.source_identity = source_identity
 
 
+class ProcessSnapshot:
+    """来自同一个 `/proc/<pid>` 的可复核进程身份和启动状态."""
+
+    __slots__ = (
+        "state",
+        "start_time",
+        "process_group",
+        "executable_identity",
+        "args",
+    )
+
+    def __init__(
+        self,
+        state: str,
+        start_time: str,
+        process_group: int,
+        executable_identity: tuple[int, int] | None,
+        args: list[str],
+    ) -> None:
+        self.state = state
+        self.start_time = start_time
+        self.process_group = process_group
+        self.executable_identity = executable_identity
+        self.args = args
+
+    def same_identity(self, other: ProcessSnapshot) -> bool:
+        return (
+            self.start_time == other.start_time
+            and self.process_group == other.process_group
+            and self.executable_identity == other.executable_identity
+            and self.args == other.args
+        )
+
+
 def die(message: str) -> None:
     print(f"{t('错误', 'ERROR')}: {message}", file=sys.stderr)
     raise SystemExit(1)
@@ -576,7 +610,7 @@ def read_watch_pid(source_root: str) -> int | None:
     return pid
 
 
-def linux_process_snapshot(pid: int) -> tuple[str, str, list[str]] | None:
+def linux_process_snapshot(pid: int) -> ProcessSnapshot | None:
     process_dir = Path("/proc") / str(pid)
     try:
         owner = process_dir.stat().st_uid
@@ -597,17 +631,32 @@ def linux_process_snapshot(pid: int) -> tuple[str, str, list[str]] | None:
     try:
         stat_fields = stat_data.rsplit(")", 1)[1].split()
         state = stat_fields[0]
+        process_group = int(stat_fields[2])
         start_time = stat_fields[19]
-    except IndexError:
+    except (IndexError, ValueError):
         die_both(
             f"无法解析 MemSearch watcher PID {pid} 的进程状态",
             f"cannot parse process state for MemSearch watcher PID {pid}",
         )
     args = [os.fsdecode(part) for part in command_data.split(b"\0") if part]
-    return state, start_time, args
+    executable_identity: tuple[int, int] | None = None
+    if not state.startswith("Z"):
+        try:
+            executable_info = os.stat(process_dir / "exe")
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            die_both(
+                f"无法核验 MemSearch watcher PID {pid} 的可执行文件: {error}",
+                f"cannot verify executable for MemSearch watcher PID {pid}: {error}",
+            )
+        executable_identity = executable_info.st_dev, executable_info.st_ino
+    return ProcessSnapshot(
+        state, start_time, process_group, executable_identity, args
+    )
 
 
-def process_snapshot(pid: int) -> tuple[str, str, list[str]] | None:
+def process_snapshot(pid: int) -> ProcessSnapshot | None:
     """读取 Linux 原生 argv；其他平台不得回落到会丢 argv 边界的 `ps`."""
     if sys.platform.startswith("linux") and Path("/proc").is_dir():
         return linux_process_snapshot(pid)
@@ -618,23 +667,43 @@ def process_snapshot(pid: int) -> tuple[str, str, list[str]] | None:
     )
 
 
-def process_exists_portable(pid: int) -> bool:
+def portable_process_state(pid: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        die_both(
+            f"无法核验 MemSearch watcher PID {pid} 的状态: {error}",
+            f"cannot verify state for MemSearch watcher PID {pid}: {error}",
+        )
+    state = result.stdout.strip().split(None, 1)
+    if result.returncode == 0 and state:
+        return state[0]
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return None
     except OSError as error:
         die_both(
             f"无法核验 MemSearch watcher PID {pid}: {error}",
             f"cannot verify MemSearch watcher PID {pid}: {error}",
         )
-    return True
+    die_both(
+        f"无法读取仍存活的 MemSearch watcher PID {pid} 的状态",
+        f"cannot read state for live MemSearch watcher PID {pid}",
+    )
 
 
-def watcher_invocation_arguments(args: list[str]) -> tuple[str, str] | None:
-    """返回 (MemSearch 入口, memory); 只接受固定的直接或 shebang 形态."""
+def watcher_invocation_arguments(
+    args: list[str],
+) -> tuple[str, str, str | None] | None:
+    """返回 (MemSearch 入口, memory, 解释器); 只接受固定启动形态."""
     if len(args) >= 3 and Path(args[0]).name == "memsearch" and args[1] == "watch":
-        return args[0], args[2]
+        return args[0], args[2], None
     interpreter = Path(args[0]).name if args else ""
     if not re.fullmatch(r"(?:python|pypy)(?:[0-9.]+)?(?:\.exe)?", interpreter):
         return None
@@ -643,7 +712,7 @@ def watcher_invocation_arguments(args: list[str]) -> tuple[str, str] | None:
         and Path(args[1]).name == "memsearch"
         and args[2] == "watch"
     ):
-        return args[1], args[3]
+        return args[1], args[3], args[0]
     return None
 
 
@@ -651,36 +720,62 @@ def lexical_absolute_path(path: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(path)))
 
 
-def invocation_is_trusted_memsearch(executable: str, pid: int) -> bool:
+def process_path(path: str, pid: int, *, search_path: bool) -> str | None:
+    candidate = path
+    if os.path.isabs(candidate):
+        return candidate
+    if os.sep in candidate or (os.altsep is not None and os.altsep in candidate):
+        try:
+            return os.path.join(os.readlink(f"/proc/{pid}/cwd"), candidate)
+        except OSError:
+            return None
+    return shutil.which(candidate) if search_path else None
+
+
+def path_identity(path: str | None) -> tuple[int, int] | None:
+    if path is None:
+        return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def invocation_is_trusted_memsearch(
+    invocation: tuple[str, str, str | None],
+    snapshot: ProcessSnapshot,
+    pid: int,
+) -> bool:
+    executable, _watched, interpreter = invocation
     trusted = shutil.which("memsearch")
     if trusted is None:
         return False
-    candidate = executable
-    if not os.path.isabs(candidate):
-        if os.sep in candidate or (os.altsep is not None and os.altsep in candidate):
-            try:
-                candidate = os.path.join(os.readlink(f"/proc/{pid}/cwd"), candidate)
-            except OSError:
-                return False
-        else:
-            candidate = shutil.which(candidate) or candidate
-    try:
-        candidate_info = os.stat(candidate)
-        trusted_info = os.stat(trusted)
-    except OSError:
+    trusted_identity = path_identity(trusted)
+    candidate_identity = path_identity(
+        process_path(executable, pid, search_path=True)
+    )
+    if trusted_identity is None or candidate_identity != trusted_identity:
         return False
-    return (candidate_info.st_dev, candidate_info.st_ino) == (
-        trusted_info.st_dev,
-        trusted_info.st_ino,
+    if interpreter is None:
+        return snapshot.executable_identity == trusted_identity
+    interpreter_identity = path_identity(
+        process_path(interpreter, pid, search_path=True)
+    )
+    return (
+        interpreter_identity is not None
+        and snapshot.executable_identity == interpreter_identity
     )
 
 
-def watcher_matches_memory(args: list[str], source_memory: Path, pid: int) -> bool:
-    invocation = watcher_invocation_arguments(args)
+def watcher_matches_memory(
+    snapshot: ProcessSnapshot, source_memory: Path, pid: int
+) -> bool:
+    invocation = watcher_invocation_arguments(snapshot.args)
     if invocation is None:
         return False
-    executable, watched = invocation
-    if not invocation_is_trusted_memsearch(executable, pid):
+    _executable, watched, _interpreter = invocation
+    if not invocation_is_trusted_memsearch(invocation, snapshot, pid):
         return False
     if not os.path.isabs(watched):
         try:
@@ -756,26 +851,46 @@ def pidfd_has_exited(pidfd: int) -> bool:
 
 
 def wait_for_stopped_watcher(
-    pid: int, pidfd: int, start_time: str, args: list[str]
-) -> bool:
+    pid: int, pidfd: int, expected: ProcessSnapshot
+) -> ProcessSnapshot | None:
     deadline = time.monotonic() + WATCH_STOP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if pidfd_has_exited(pidfd):
-            return False
+            return None
         current = process_snapshot(pid)
         if current is None:
-            return False
-        if current[1] != start_time or current[2] != args:
+            return None
+        if not expected.same_identity(current):
             die_both(
                 f"暂停核验期间 PID {pid} 的身份发生变化",
                 f"PID {pid} changed identity while being suspended",
             )
-        if current[0].startswith(("T", "t")):
-            return True
+        if current.state.startswith(("T", "t")):
+            return current
         time.sleep(WATCH_STOP_POLL_SECONDS)
     die_both(
         f"MemSearch watcher PID {pid} 无法暂停以完成安全核验",
         f"MemSearch watcher PID {pid} could not be suspended for safe verification",
+    )
+
+
+def wait_for_process_group_exit(process_group: int, pid: int) -> bool:
+    deadline = time.monotonic() + WATCH_STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if not linux_process_group_members(process_group):
+            print(
+                t(
+                    f"已停止 MemSearch watcher: pid={pid}",
+                    f"Stopped MemSearch watcher: pid={pid}",
+                )
+            )
+            return True
+        time.sleep(WATCH_STOP_POLL_SECONDS)
+    die_both(
+        f"MemSearch watcher 进程组 {process_group} 在 "
+        f"{WATCH_STOP_TIMEOUT_SECONDS:g} 秒内未退出",
+        f"MemSearch watcher process group {process_group} did not exit within "
+        f"{WATCH_STOP_TIMEOUT_SECONDS:g} seconds",
     )
 
 
@@ -794,7 +909,8 @@ def stop_memsearch_watcher(
         and hasattr(os, "pidfd_open")
         and hasattr(signal, "pidfd_send_signal")
     ):
-        if not process_exists_portable(pid):
+        state = portable_process_state(pid)
+        if state is None or state.startswith("Z"):
             print(
                 t(
                     f"MemSearch watcher 已停止: pid={pid}",
@@ -838,7 +954,7 @@ def stop_memsearch_watcher_pidfd(
     expected_source_identity: tuple[int, ...] | None,
 ) -> bool:
     snapshot = process_snapshot(pid)
-    if snapshot is None or snapshot[0].startswith("Z"):
+    if snapshot is None or snapshot.state.startswith("Z"):
         print(
             t(
                 f"MemSearch watcher 已停止: pid={pid}",
@@ -846,8 +962,7 @@ def stop_memsearch_watcher_pidfd(
             )
         )
         return True
-    _, start_time, args = snapshot
-    if not watcher_matches_memory(args, source_memory, pid):
+    if not watcher_matches_memory(snapshot, source_memory, pid):
         die_both(
             f"PID {pid} 不是监控来源 memory 的 MemSearch watcher; 拒绝终止进程",
             f"PID {pid} is not the MemSearch watcher for the source memory; refusing to terminate it",
@@ -862,11 +977,17 @@ def stop_memsearch_watcher_pidfd(
         )
         return True
 
+    process_group = snapshot.process_group
+    independent_group = process_group == pid
     suspended = False
     try:
-        signal.pidfd_send_signal(pidfd, signal.SIGSTOP)
-        suspended = wait_for_stopped_watcher(pid, pidfd, start_time, args)
-        if not suspended:
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGSTOP)
+        except ProcessLookupError:
+            stopped_snapshot = None
+        else:
+            stopped_snapshot = wait_for_stopped_watcher(pid, pidfd, snapshot)
+        if stopped_snapshot is None and not independent_group:
             print(
                 t(
                     f"MemSearch watcher 已停止: pid={pid}",
@@ -874,15 +995,34 @@ def stop_memsearch_watcher_pidfd(
                 )
             )
             return True
+        suspended = stopped_snapshot is not None
         assert_stop_source_identity(source_memory, expected_source_identity)
-        process_group = os.getpgid(pid)
-        if process_group == pid:
-            os.killpg(process_group, signal.SIGTERM)
+
+        if independent_group:
+            # 组 ID 来自 pidfd 固定的进程快照；即使组长在 SIGTERM 后消失，
+            # 也必须继续等已经识别出的组全部清空，不能把 ESRCH 当整组成功。
+            if linux_process_group_members(process_group):
+                try:
+                    os.killpg(process_group, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            if suspended:
+                try:
+                    signal.pidfd_send_signal(pidfd, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+                suspended = False
         else:
+            assert stopped_snapshot is not None
             signal.pidfd_send_signal(pidfd, signal.SIGTERM)
-        signal.pidfd_send_signal(pidfd, signal.SIGCONT)
-        suspended = False
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            suspended = False
     except ProcessLookupError:
+        # 非独立组只负责 pidfd 固定的 watcher 本身；其已退出即完成。
+        suspended = False
         print(
             t(
                 f"MemSearch watcher 已停止: pid={pid}",
@@ -902,14 +1042,12 @@ def stop_memsearch_watcher_pidfd(
             except OSError:
                 pass
 
+    if independent_group:
+        return wait_for_process_group_exit(process_group, pid)
+
     deadline = time.monotonic() + WATCH_STOP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        exited = (
-            not linux_process_group_members(process_group)
-            if process_group == pid
-            else pidfd_has_exited(pidfd)
-        )
-        if exited:
+        if pidfd_has_exited(pidfd):
             print(
                 t(
                     f"已停止 MemSearch watcher: pid={pid}",
