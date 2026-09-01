@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -10,11 +11,13 @@ import re
 import runpy
 import select
 import shutil
+import socket
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import unittest
@@ -90,6 +93,7 @@ class KanbanCommandTest(unittest.TestCase):
             "HERDR_WORKSPACE_ID",
             "HERDR_TAB_ID",
             "HERDR_PANE_ID",
+            "HERDR_SOCKET_PATH",
         ):
             self.env.pop(name, None)
 
@@ -411,6 +415,54 @@ exit 1
 
     def herdr_arguments(self, suffix: str) -> list[str]:
         return (self.root / f"herdr.log.{suffix}").read_text(encoding="utf-8").splitlines()
+
+    @contextmanager
+    def fake_herdr_socket(self, response_type: str = "ok"):
+        socket_path = self.root / "herdr.sock"
+        requests = []
+        stop = threading.Event()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen()
+        server.settimeout(0.1)
+
+        def serve() -> None:
+            while not stop.is_set():
+                try:
+                    connection, _address = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                with connection:
+                    data = b""
+                    while b"\n" not in data:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                    request = json.loads(data.splitlines()[0])
+                    requests.append(request)
+                    response = {
+                        "id": request["id"],
+                        "result": {"type": response_type},
+                    }
+                    connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        previous = self.env.get("HERDR_SOCKET_PATH")
+        self.env["HERDR_SOCKET_PATH"] = str(socket_path)
+        try:
+            yield requests
+        finally:
+            if previous is None:
+                self.env.pop("HERDR_SOCKET_PATH", None)
+            else:
+                self.env["HERDR_SOCKET_PATH"] = previous
+            stop.set()
+            server.close()
+            thread.join(timeout=1)
 
     def test_locale_selects_chinese_or_english(self) -> None:
         chinese = self.run_command("--help")
@@ -2612,6 +2664,147 @@ exit 1
         working = self.root / "working" / task.name
         self.assertTrue(working.exists())
         self.assertIn("- 会话: codex\n- 窗口: herdr:w1:t9:w1:p9\n", working.read_text(encoding="utf-8"))
+
+    def test_herdr_launcher_reports_cursor_session_and_reads_it_back(self) -> None:
+        task_id, task = self.make_todo("herdr-report-cursor")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_AGENT"] = "cursor"
+        self.env["KANBAN_HERDR_SESSION"] = "chat-fake-0001"
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command(
+                "start", "--launcher", "herdr", "--agent", "cursor", task_id
+            )
+
+        self.assertNotIn("herdr 会话身份上报失败", result.stderr)
+        self.assertEqual(1, len(requests))
+        request = requests[0]
+        self.assertEqual("pane.report_agent_session", request["method"])
+        self.assertEqual({
+            "pane_id": "w1:p9",
+            "source": "herdr:cursor",
+            "agent": "cursor",
+            "agent_session_id": "chat-fake-0001",
+        }, {
+            key: request["params"][key]
+            for key in ("pane_id", "source", "agent", "agent_session_id")
+        })
+        self.assertIsInstance(request["params"]["seq"], int)
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_launcher_skips_session_report_without_reference(self) -> None:
+        task_id, _task = self.make_todo("herdr-report-codex")
+        self.install_fake_herdr()
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command("start", "--launcher", "herdr", task_id)
+
+        self.assertEqual([], requests)
+        self.assertNotIn("herdr 会话身份上报失败", result.stderr)
+
+    def test_herdr_session_report_socket_failure_only_warns(self) -> None:
+        task_id, task = self.make_todo("herdr-report-socket-fail")
+        self.install_fake_herdr()
+        self.env["HERDR_SOCKET_PATH"] = str(self.root / "missing-herdr.sock")
+
+        result = self.run_command(
+            "start", "--launcher", "herdr", "--agent", "cursor", task_id
+        )
+
+        self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
+        self.assertIn(f"已启动: {task_id}", result.stdout)
+        self.assertTrue((self.root / "working" / task.name).exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_herdr_session_report_non_ok_response_only_warns(self) -> None:
+        task_id, task = self.make_todo("herdr-report-response-fail")
+        self.install_fake_herdr()
+
+        with self.fake_herdr_socket(response_type="error") as requests:
+            result = self.run_command(
+                "start", "--launcher", "herdr", "--agent", "cursor", task_id
+            )
+
+        self.assertGreater(len(requests), 1)
+        self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
+        self.assertIn("响应不是 ok", result.stderr)
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_session_report_readback_mismatch_only_warns(self) -> None:
+        task_id, task = self.make_todo("herdr-report-mismatch")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_SESSION"] = "wrong-session"
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command(
+                "start", "--launcher", "herdr", "--agent", "cursor", task_id
+            )
+
+        self.assertGreater(len(requests), 1)
+        sequences = [request["params"]["seq"] for request in requests]
+        self.assertEqual(sequences, sorted(set(sequences)))
+        self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
+        self.assertIn("读回不一致", result.stderr)
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_resume_uses_the_shared_session_report_path(self) -> None:
+        self.install_fake_herdr()
+        task_id, task = self.make_todo("herdr-report-resume")
+        self.run_command("start", "--launcher", "tmux", "--agent", "cursor", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "herdr-report-resume")
+        self.run_command("move", task_id, "review")
+        self.env["KANBAN_HERDR_AGENT"] = "cursor"
+        self.env["KANBAN_HERDR_SESSION"] = "chat-fake-0001"
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command(
+                "resume",
+                "--launcher",
+                "herdr",
+                "--timeout",
+                "61",
+                "--message",
+                "继续验证",
+                task_id,
+            )
+
+        self.assertIn(f"已唤醒: {task_id}", result.stdout)
+        self.assertEqual(1, len(requests))
+        self.assertEqual("chat-fake-0001", requests[0]["params"]["agent_session_id"])
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_notify_fallback_uses_the_shared_session_report_path(self) -> None:
+        self.install_fake_herdr()
+        self.write_onevoke_config("cursor", "herdr")
+        task_id, task = self.make_todo("herdr-report-notify")
+        self.run_command("start", "--launcher", "tmux", "--agent", "cursor", task_id)
+        working = self.root / "working" / task.name
+        text = working.read_text(encoding="utf-8")
+        working.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", text),
+            encoding="utf-8",
+        )
+        self.set_branch(working, "herdr-report-notify")
+        self.run_command("move", task_id, "review")
+        self.env["KANBAN_HERDR_AGENT"] = "cursor"
+        self.env["KANBAN_HERDR_SESSION"] = "chat-fake-0001"
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command(
+                "notify",
+                "--timeout",
+                "61",
+                "--message",
+                "继续验证",
+                task_id,
+            )
+
+        self.assertIn(f"已通知: {task_id}", result.stdout)
+        self.assertIn("通道=resume", result.stdout)
+        self.assertEqual(1, len(requests))
+        self.assertEqual("chat-fake-0001", requests[0]["params"]["agent_session_id"])
+        self.assertTrue((self.root / "working" / task.name).exists())
 
     def test_herdr_launcher_reads_the_machine_config(self) -> None:
         task_id, _ = self.make_todo("herdr-config")

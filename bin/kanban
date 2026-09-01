@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -1613,10 +1614,18 @@ def window_name(entry: Entry, text: str) -> str:
     return f"kb-{label}"[:50]
 
 
-def herdr_capture(herdr: str, *arguments: str) -> subprocess.CompletedProcess:
+def herdr_capture(
+    herdr: str, *arguments: str, timeout: Optional[float] = None
+) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run([herdr, *arguments], text=True, capture_output=True, check=False)
-    except ValueError as error:
+        return subprocess.run(
+            [herdr, *arguments],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, ValueError) as error:
         raise KanbanError(t(f"herdr 调用失败: {error}", f"herdr invocation failed: {error}")) from error
 
 
@@ -1659,6 +1668,116 @@ def herdr_close_tab(herdr: str, tab_id: str) -> Optional[str]:
         f"关闭 tab {tab_id} 失败: {herdr_failure_detail(result)}",
         f"failed to close tab {tab_id}: {herdr_failure_detail(result)}",
     )
+
+
+def next_herdr_session_report_seq() -> int:
+    """同一 Onevoke 进程内生成严格递增的 herdr 上报序号."""
+    global _HERDR_SESSION_REPORT_SEQ
+    _HERDR_SESSION_REPORT_SEQ = max(time.time_ns(), _HERDR_SESSION_REPORT_SEQ + 1)
+    return _HERDR_SESSION_REPORT_SEQ
+
+
+def send_herdr_agent_session(
+    socket_path: str,
+    pane_id: str,
+    session: "AgentSession",
+    timeout: float,
+) -> None:
+    seq = next_herdr_session_report_seq()
+    request_id = f"onevoke:{session.agent}:{seq}"
+    request = {
+        "id": request_id,
+        "method": "pane.report_agent_session",
+        "params": {
+            "pane_id": pane_id,
+            "source": f"herdr:{session.agent}",
+            "agent": session.agent,
+            "seq": seq,
+            "agent_session_id": session.reference,
+        },
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        client.connect(socket_path)
+        client.sendall(
+            (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
+        )
+        response_bytes = b""
+        while b"\n" not in response_bytes and len(response_bytes) < 65536:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response_bytes += chunk
+    if not response_bytes:
+        raise KanbanError(t("herdr socket 未返回响应", "herdr socket returned no response"))
+    try:
+        response = json.loads(response_bytes.splitlines()[0])
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise KanbanError(t(
+            f"herdr socket 响应不是有效 JSON: {error}",
+            f"herdr socket response is not valid JSON: {error}",
+        )) from error
+    result = response.get("result") if isinstance(response, dict) else None
+    if (
+        not isinstance(response, dict)
+        or response.get("id") != request_id
+        or not isinstance(result, dict)
+        or result.get("type") != "ok"
+    ):
+        raise KanbanError(t("herdr socket 响应不是 ok", "herdr socket response is not ok"))
+
+
+def report_herdr_agent_session(
+    herdr: str, pane_id: str, session: "AgentSession"
+) -> None:
+    """Best-effort 上报并读回会话身份; 失败不得改变 launcher 结果."""
+    if not session.reference:
+        return
+    socket_path = os.environ.get("HERDR_SOCKET_PATH", "").strip()
+    if not socket_path:
+        print(t(
+            "警告: herdr 会话身份上报失败: 缺少 HERDR_SOCKET_PATH",
+            "warning: failed to report the herdr session identity: HERDR_SOCKET_PATH is missing",
+        ), file=sys.stderr)
+        return
+    deadline = time.monotonic() + HERDR_SESSION_REPORT_BUDGET
+    error: BaseException = KanbanError(t(
+        "herdr 会话身份上报预算耗尽",
+        "herdr session identity report budget exhausted",
+    ))
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        try:
+            send_herdr_agent_session(
+                socket_path,
+                pane_id,
+                session,
+                min(HERDR_SESSION_REPORT_SOCKET_TIMEOUT, remaining),
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise KanbanError(t(
+                    "herdr 会话身份读回超时",
+                    "timed out reading back the herdr session identity",
+                ))
+            pane = herdr_pane_info(herdr, pane_id, timeout=remaining)
+            agent_session = pane.get("agent_session")
+            reference = agent_session.get("value") if isinstance(agent_session, dict) else None
+            if reference == session.reference:
+                return
+            raise KanbanError(t(
+                f"herdr 会话身份读回不一致: 上报={session.reference}, pane={reference or 'N/A'}",
+                f"herdr session identity read-back mismatch: reported={session.reference}, pane={reference or 'N/A'}",
+            ))
+        except (KanbanError, OSError, UnicodeError, ValueError) as report_error:
+            error = report_error
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
+    print(t(
+        f"警告: herdr 会话身份上报失败: {error}",
+        f"warning: failed to report the herdr session identity: {error}",
+    ), file=sys.stderr)
 
 
 def herdr_create_tab(herdr: str, workspace: str, cwd: str, label: str) -> tuple[str, str]:
@@ -1754,6 +1873,9 @@ TMUX_WINDOW_RE = re.compile(r"^(tmux|tmux-session):([^:\s]+):([^:\s]+):([^:\s]+)
 NOTIFY_DEFAULT_TIMEOUT = 120.0
 NOTIFY_POLL_INTERVAL = 0.1
 START_SESSION_DISCOVERY_TIMEOUT = 10.0
+HERDR_SESSION_REPORT_BUDGET = 1.0
+HERDR_SESSION_REPORT_SOCKET_TIMEOUT = 0.25
+_HERDR_SESSION_REPORT_SEQ = 0
 
 
 @dataclass(frozen=True)
@@ -2040,6 +2162,7 @@ def launch_agent(
     agent_argv: list[str],
     location_callback: Optional[Callable[[LaunchOutcome], None]] = None,
     pane_session_callback: Optional[Callable[[], AgentSession]] = None,
+    agent_session: Optional[AgentSession] = None,
 ) -> LaunchOutcome:
     """按 plan 启动 Agent; 六种 launcher 的 cwd 都是项目根. 失败抛 LaunchFailure."""
     created_tab = None
@@ -2075,6 +2198,8 @@ def launch_agent(
             if location_callback is not None:
                 location_callback(outcome)
             herdr_pane_run(plan.herdr_bin, pane_id, command)
+            if agent_session is not None:
+                report_herdr_agent_session(plan.herdr_bin, pane_id, agent_session)
             return outcome
         create = plan.launcher == "tmux-session" and not plan.session_exists
         result = tmux_launch(plan.tmux, plan.session, create, str(root.parent), name)
@@ -2272,6 +2397,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             agent_argv,
             record_terminal_location if plan.launcher in ("herdr", "tmux", "tmux-session") else None,
             started_tmux_session if plan.launcher in ("tmux", "tmux-session") else None,
+            session,
         )
     except LaunchFailure as failure:
         rollback_launch(root, moved, entry.state, failure, original)
@@ -2358,6 +2484,7 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
             pane_session_callback=(lambda: session)
             if plan.launcher in ("tmux", "tmux-session")
             else None,
+            agent_session=session,
         )
     except LaunchFailure as failure:
         rollback_launch(root, moved, entry.state, failure, text)
@@ -2399,8 +2526,10 @@ def resolved_task_session(entry: Entry, text: str) -> AgentSession:
     return session
 
 
-def herdr_pane_info(herdr: str, pane_id: str) -> dict:
-    result = herdr_capture(herdr, "pane", "get", pane_id)
+def herdr_pane_info(
+    herdr: str, pane_id: str, *, timeout: Optional[float] = None
+) -> dict:
+    result = herdr_capture(herdr, "pane", "get", pane_id, timeout=timeout)
     if result.returncode != 0:
         raise KanbanError(t(
             f"pane 不存在: {pane_id}: {herdr_failure_detail(result)}",
@@ -2754,6 +2883,7 @@ def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout
         pane_session_callback=(lambda: session)
         if plan.launcher in ("tmux", "tmux-session")
         else None,
+        agent_session=session,
     )
     try:
         validate_resumed_agent(plan, outcome, session, timeout)
