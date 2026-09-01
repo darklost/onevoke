@@ -701,18 +701,21 @@ def prerequisite_ids_from(text: str, task_id: str) -> tuple[str, ...]:
     ]
     if not positions:
         return ()
-    expected = 1 if lines[0].strip() in ("```", "```text") else 0
-    if len(positions) != 1 or positions[0] != expected:
+    if (
+        lines[0].strip() not in ("```", "```text")
+        or len(positions) != 1
+        or positions[0] != 1
+    ):
         raise KanbanError(t(
-            f"任务 {task_id} 的前置任务语法非法: 必须位于讨论与决策开头",
-            f"Task {task_id} has invalid prerequisite syntax: it must start the discussion section",
+            f"任务 {task_id} 的前置任务语法非法: 必须位于讨论与决策开头的代码块中",
+            f"Task {task_id} has invalid prerequisite syntax: it must be in the opening discussion code block",
         ))
-    if expected == 1 and (len(lines) < 3 or lines[2].strip() != "```"):
+    if len(lines) < 3 or lines[2].strip() != "```":
         raise KanbanError(t(
             f"任务 {task_id} 的前置任务语法非法: 代码块必须在该行后结束",
             f"Task {task_id} has invalid prerequisite syntax: close the code block after the line",
         ))
-    match = re.fullmatch(r"前置任务[ \t]*:[ \t]*(.*?)[ \t]*", lines[expected].strip())
+    match = re.fullmatch(r"前置任务[ \t]*:[ \t]*(.*?)[ \t]*", lines[1].strip())
     if match is None or not match.group(1):
         raise KanbanError(t(
             f"任务 {task_id} 的前置任务语法非法: 无依赖时写 N/A",

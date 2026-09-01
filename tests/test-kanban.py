@@ -2435,6 +2435,24 @@ exit 1
         self.assertIn(invalid_id, invalid_result.stderr)
         self.assertIn("前置任务语法非法", invalid_result.stderr)
 
+    def test_check_rejects_unfenced_prerequisite(self) -> None:
+        task_id, task = self.make_todo("dependency-unfenced")
+        self.set_task_group(task, "20260901-unfenced-group")
+        text = task.read_text(encoding="utf-8")
+        task.write_text(
+            text.replace(
+                "## 讨论与决策\n\n",
+                "## 讨论与决策\n\n前置任务: 20260901-other-task\n\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_command("check", task_id, succeeds=False)
+
+        self.assertIn(task_id, result.stderr)
+        self.assertIn("讨论与决策开头的代码块", result.stderr)
+
     def test_check_detects_cross_group_dependency_cycle(self) -> None:
         first_id, first = self.make_todo("dependency-cycle-first")
         second_id, second = self.make_todo("dependency-cycle-second")
