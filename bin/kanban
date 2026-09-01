@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Callable, Dict, Iterable, Optional
 
 from onevoke_config import (
     ARGPARSE_ZH,
@@ -1059,6 +1059,7 @@ def render_contract(title: str, task_type: str) -> str:
 - 创建时间: {created}
 - 负责人:
 - 会话:
+- 窗口:
 - 开始时间:
 - 完成时间:
 - 任务分支:
@@ -1370,7 +1371,7 @@ def command_pick(args: argparse.Namespace, root: Path) -> None:
     print(move_entry(entry, root, "todo").path)
 
 
-def start_metadata(text: str, agent: str, session: "AgentSession") -> str:
+def start_metadata(text: str, agent: str, session: "AgentSession", window: str) -> str:
     for name, value in (
         ("负责人", agent),
         ("开始时间", datetime.now().strftime("%Y-%m-%d %H:%M")),
@@ -1385,8 +1386,34 @@ def start_metadata(text: str, agent: str, session: "AgentSession") -> str:
         raise KanbanError(t(f"任务文档缺少唯一元数据字段: {SESSION_FIELD}", f"Task document must contain exactly one metadata field: {SESSION_FIELD}"))
     rendered = f"- {SESSION_FIELD}: {session.render()}"
     if session_lines:
-        return re.sub(rf"(?m)^- {SESSION_FIELD}:.*$", lambda _match: rendered, text, count=1)
-    return re.sub(r"(?m)^(- 负责人: .*)$", lambda match: f"{match.group(1)}\n{rendered}", text, count=1)
+        text = re.sub(rf"(?m)^- {SESSION_FIELD}:.*$", lambda _match: rendered, text, count=1)
+    else:
+        text = re.sub(r"(?m)^(- 负责人: .*)$", lambda match: f"{match.group(1)}\n{rendered}", text, count=1)
+    # 窗口字段与会话字段一起后加. 已有字段也归一到会话之后, 让读取方有稳定布局.
+    window_lines = re.findall(rf"(?m)^- {WINDOW_FIELD}:.*$", text)
+    if len(window_lines) > 1:
+        raise KanbanError(t(f"任务文档缺少唯一元数据字段: {WINDOW_FIELD}", f"Task document must contain exactly one metadata field: {WINDOW_FIELD}"))
+    if window_lines:
+        text = re.sub(rf"(?m)^- {WINDOW_FIELD}:.*\n?", "", text, count=1)
+    rendered_window = f"- {WINDOW_FIELD}: {window}".rstrip()
+    return re.sub(
+        rf"(?m)^(- {SESSION_FIELD}:.*)$",
+        lambda match: f"{match.group(1)}\n{rendered_window}",
+        text,
+        count=1,
+    )
+
+
+def window_metadata(text: str, value: str) -> str:
+    lines = re.findall(rf"(?m)^- {WINDOW_FIELD}:.*$", text)
+    if len(lines) != 1:
+        raise KanbanError(t(f"任务文档缺少唯一元数据字段: {WINDOW_FIELD}", f"Task document must contain exactly one metadata field: {WINDOW_FIELD}"))
+    return re.sub(
+        rf"(?m)^- {WINDOW_FIELD}:.*$",
+        lambda _match: f"- {WINDOW_FIELD}: {value}",
+        text,
+        count=1,
+    )
 
 
 TMUX_SESSION_HINT = "tmux new -A -s onevoke"
@@ -1619,7 +1646,9 @@ def resolve_start_launcher(launcher: str) -> str:
 
 
 SESSION_FIELD = "会话"
+WINDOW_FIELD = "窗口"
 SESSION_REFERENCE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+HERDR_WINDOW_RE = re.compile(r"^herdr:([^:\s]+:[^:\s]+):([^:\s]+:[^:\s]+)$")
 
 
 @dataclass(frozen=True)
@@ -1880,7 +1909,13 @@ def prepare_launch(launcher: str, project: Path, command: str) -> LaunchPlan:
     return LaunchPlan(launcher, project, tmux, session, session_exists, herdr_bin, herdr_workspace)
 
 
-def launch_agent(plan: LaunchPlan, root: Path, name: str, agent_argv: list[str]) -> LaunchOutcome:
+def launch_agent(
+    plan: LaunchPlan,
+    root: Path,
+    name: str,
+    agent_argv: list[str],
+    location_callback: Optional[Callable[[LaunchOutcome], None]] = None,
+) -> LaunchOutcome:
     """按 plan 启动 Agent; 六种 launcher 的 cwd 都是项目根. 失败抛 LaunchFailure."""
     created_tab = None
     try:
@@ -1910,8 +1945,11 @@ def launch_agent(plan: LaunchPlan, root: Path, name: str, agent_argv: list[str])
                 plan.herdr_bin, plan.herdr_workspace, str(root.parent), name
             )
             herdr_wait_pane_ready(plan.herdr_bin, pane_id)
+            outcome = LaunchOutcome(tab=created_tab, pane=pane_id)
+            if location_callback is not None:
+                location_callback(outcome)
             herdr_pane_run(plan.herdr_bin, pane_id, command)
-            return LaunchOutcome(tab=created_tab, pane=pane_id)
+            return outcome
         create = plan.launcher == "tmux-session" and not plan.session_exists
         result = tmux_launch(plan.tmux, plan.session, create, str(root.parent), name, command)
         if create and result.returncode != 0 and session_owner(plan.tmux, plan.session) in ("", str(plan.project)):
@@ -2028,15 +2066,34 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     session = new_agent_session(agent_name, agent)
 
     original = read_document(entry)
-    updated = start_metadata(original, agent_name, session)
+    updated = start_metadata(
+        original,
+        agent_name,
+        session,
+        "" if plan.launcher == "herdr" else plan.launcher,
+    )
     prompt = start_agent_prompt(entry.task_id, current_install_paths(), task_group_from(original))
     moved = move_entry(entry, root, "working")
     name = window_name(entry, original)
     model_entry = config["models"]["kanban"][agent_name]
     agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind, session), prompt]
+
+    def record_herdr_location(outcome: LaunchOutcome) -> None:
+        location = f"herdr:{outcome.tab}:{outcome.pane}"
+        write_text_atomic(
+            moved.document,
+            window_metadata(updated, location),
+            entry=moved,
+        )
     try:
         write_text_atomic(moved.document, updated, entry=moved)
-        outcome = launch_agent(plan, root, name, agent_argv)
+        outcome = launch_agent(
+            plan,
+            root,
+            name,
+            agent_argv,
+            record_herdr_location if plan.launcher == "herdr" else None,
+        )
     except LaunchFailure as failure:
         rollback_launch(root, moved, entry.state, failure, original)
         raise
@@ -2066,11 +2123,11 @@ def resume_agent_prompt(task_id: str, message: str, paths: InstallPaths) -> str:
     )
 
 
-def read_resume_message(args: argparse.Namespace) -> str:
+def read_task_message(args: argparse.Namespace, command: str) -> str:
     if bool(args.message) == bool(args.message_file):
         raise KanbanError(t(
-            "resume 必须且只能提供 --message 或 --message-file 之一",
-            "resume requires exactly one of --message or --message-file",
+            f"{command} 必须且只能提供 --message 或 --message-file 之一",
+            f"{command} requires exactly one of --message or --message-file",
         ))
     if args.message:
         message = args.message
@@ -2084,7 +2141,7 @@ def read_resume_message(args: argparse.Namespace) -> str:
             raise KanbanError(t(f"读取消息文件失败: {error}", f"Failed to read message file: {error}")) from error
     message = message.strip()
     if not message:
-        raise KanbanError(t("resume 消息不得为空", "resume message must not be empty"))
+        raise KanbanError(t(f"{command} 消息不得为空", f"{command} message must not be empty"))
     return message
 
 
@@ -2095,7 +2152,7 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
             f"只能唤醒 {' 或 '.join(RESUME_STATES)} 中的任务; {entry.task_id} 在 {entry.state}",
             f"Only tasks in {' or '.join(RESUME_STATES)} can be resumed; {entry.task_id} is in {entry.state}",
         ))
-    message = read_resume_message(args)
+    message = read_task_message(args, "resume")
     text = read_document(entry)
     session = session_from(text)
     config = effective_config(load_config())
@@ -2118,6 +2175,116 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
         rollback_launch(root, moved, entry.state, failure)
         raise
     report_launch(t("已唤醒", "resumed"), moved, session.agent, plan, outcome)
+
+
+def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None:
+    result = herdr_capture(herdr, "pane", "get", pane_id)
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"pane 不存在: {pane_id}: {herdr_failure_detail(result)}",
+            f"pane does not exist: {pane_id}: {herdr_failure_detail(result)}",
+        ))
+    data = herdr_json_result(result, "pane get")
+    pane = data.get("pane")
+    if not isinstance(pane, dict) or herdr_public_id(pane.get("pane_id")) != pane_id:
+        raise KanbanError(t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}"))
+    actual_agent = pane.get("agent")
+    if actual_agent != session.agent:
+        raise KanbanError(t(
+            f"Agent 不匹配: 卡片={session.agent}, pane={actual_agent or 'N/A'}",
+            f"Agent mismatch: task={session.agent}, pane={actual_agent or 'N/A'}",
+        ))
+    status = pane.get("agent_status")
+    if status != "idle":
+        raise KanbanError(t(f"pane 非 idle: {pane_id}: {status or 'N/A'}", f"pane is not idle: {pane_id}: {status or 'N/A'}"))
+    if session.reference:
+        agent_session = pane.get("agent_session")
+        actual_session = agent_session.get("value") if isinstance(agent_session, dict) else None
+        if actual_session != session.reference:
+            raise KanbanError(t(
+                f"会话不匹配: 卡片={session.reference}, pane={actual_session or 'N/A'}",
+                f"Session mismatch: task={session.reference}, pane={actual_session or 'N/A'}",
+            ))
+
+
+def write_notify_message(message: str) -> Path:
+    directory = Path(tempfile.mkdtemp(prefix="onevoke-notify-"))
+    try:
+        os.chmod(directory, 0o700)
+        path = directory / "message.txt"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                descriptor = -1
+                stream.write(message)
+                stream.write("\n")
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        os.chmod(path, 0o600)
+        return path.resolve()
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
+def command_notify(args: argparse.Namespace, root: Path) -> None:
+    entry = locate(load_board(root), args.task)
+    if entry.state not in RESUME_STATES:
+        raise KanbanError(t(
+            f"只能直投 {' 或 '.join(RESUME_STATES)} 中的任务; {entry.task_id} 在 {entry.state}",
+            f"Only tasks in {' or '.join(RESUME_STATES)} can be notified; {entry.task_id} is in {entry.state}",
+        ))
+    message = read_task_message(args, "notify")
+    text = read_document(entry)
+    window = metadata_from(text, WINDOW_FIELD)
+    if not window:
+        raise KanbanError(t(
+            f"任务卡没有 `{WINDOW_FIELD}` 记录, 无直投通道",
+            f"Task has no `{WINDOW_FIELD}` metadata; no direct notification channel is available",
+        ))
+    match = HERDR_WINDOW_RE.fullmatch(window)
+    if match is None:
+        launcher = window.split(":", 1)[0]
+        if launcher == "herdr":
+            raise KanbanError(t(
+                f"任务卡的 `{WINDOW_FIELD}` 记录无效: {window}",
+                f"Task `{WINDOW_FIELD}` metadata is invalid: {window}",
+            ))
+        raise KanbanError(t(
+            f"launcher 不支持直投: {launcher}",
+            f"Launcher does not support direct notification: {launcher}",
+        ))
+    _tab_id, pane_id = match.groups()
+    if os.name == "nt":
+        raise KanbanError(t(
+            "launcher 不支持直投: herdr (Windows)",
+            "Launcher does not support direct notification: herdr (Windows)",
+        ))
+    session = session_from(text)
+    herdr = shutil.which("herdr")
+    if not herdr:
+        raise KanbanError(t("herdr 不在 PATH, 无法直投", "herdr is not in PATH; cannot notify directly"))
+    herdr_notify_target(herdr, pane_id, session)
+    message_path = write_notify_message(message)
+    instruction = t(
+        f"继续 Kanban 任务 {entry.task_id}. 请读取消息文件 {message_path} 并按看板规则处理.",
+        f"Continue Kanban task {entry.task_id}. Read message file {message_path} and handle it according to the kanban rules.",
+    )
+    try:
+        herdr_pane_run(herdr, pane_id, instruction)
+    except BaseException:
+        try:
+            message_path.unlink()
+            message_path.parent.rmdir()
+        except OSError:
+            pass
+        raise
+    moved = move_entry(entry, root, "working") if entry.state != "working" else entry
+    print(t(
+        f"已直投: {moved.task_id}\tAgent={session.agent}\tpane={pane_id}\t消息文件={message_path}",
+        f"notified: {moved.task_id}\tagent={session.agent}\tpane={pane_id}\tmessage-file={message_path}",
+    ))
 
 
 WEB_STATUS_LABELS = {
@@ -2539,6 +2706,14 @@ def parser() -> argparse.ArgumentParser:
         help=t("覆盖本次启动方式, 不修改配置", "override the launcher for this run without changing the configuration"),
     )
 
+    notify_parser = commands.add_parser(
+        "notify",
+        help=t("向仍存活的 herdr 执行 Agent 直投事项", "notify a live herdr execution Agent directly"),
+    )
+    notify_parser.add_argument("task", metavar=t("任务", "task"))
+    notify_parser.add_argument("--message", help=t("交给执行 Agent 处理的事项", "the items for the execution Agent to handle"))
+    notify_parser.add_argument("--message-file", help=t("从 UTF-8 文件读取事项", "read the items from a UTF-8 file"))
+
     check_parser = commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
     check_parser.add_argument(
         "tasks",
@@ -2664,6 +2839,8 @@ def main() -> int:
             command_start(args, root)
         elif args.command == "resume":
             command_resume(args, root)
+        elif args.command == "notify":
+            command_notify(args, root)
         elif args.command == "check":
             return command_check(args, root)
         elif args.command == "subscribe":

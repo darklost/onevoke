@@ -10,6 +10,7 @@ import re
 import runpy
 import select
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -267,6 +268,17 @@ if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
         fi
         exit 1
     fi
+    exit 0
+fi
+if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
+    printf '%s\n' "$@" > "$KANBAN_HERDR_LOG.get"
+    printf '%s\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ "${KANBAN_HERDR_GET_FAIL:-}" = "1" ]; then
+        printf '%s\n' 'fake pane not found' >&2
+        exit 1
+    fi
+    printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"w1:t9","agent":"%s","agent_status":"%s","agent_session":{"value":"%s"}}}}\n' \
+        "$3" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_STATUS:-idle}" "${KANBAN_HERDR_SESSION:-}"
     exit 0
 fi
 if [ "$1" = "tab" ] && [ "$2" = "close" ]; then
@@ -626,10 +638,19 @@ exit 1
         text = path.read_text(encoding="utf-8")
         path.write_text(text.replace("- 任务分支:\n", f"- 任务分支: {branch}\n", 1), encoding="utf-8")
 
-    def test_new_template_includes_session_field(self) -> None:
+    def make_herdr_review(self, slug: str, agent: str = "codex") -> tuple[str, Path]:
+        self.install_fake_herdr()
+        task_id, task = self.make_todo(slug)
+        self.run_command("start", "--launcher", "herdr", "--agent", agent, task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, slug)
+        self.run_command("move", task_id, "review")
+        return task_id, self.root / "review" / task.name
+
+    def test_new_template_includes_session_and_window_fields(self) -> None:
         task_id, task = self.make_todo("template-session")
         text = task.read_text(encoding="utf-8")
-        self.assertIn("- 负责人:\n- 会话:\n- 开始时间:\n", text)
+        self.assertIn("- 负责人:\n- 会话:\n- 窗口:\n- 开始时间:\n", text)
 
     def test_start_selects_agent_by_task_scale(self) -> None:
         fake_bin = self.install_fake_launchers()
@@ -647,14 +668,14 @@ exit 1
         self.assertIn("--model cursor-grok-4.6-high", small_command)
         self.assertIn("--resume chat-fake-0001", small_command)
         small_text = (self.root / "working" / small.name).read_text(encoding="utf-8")
-        self.assertIn("- 负责人: cursor\n- 会话: cursor chat-fake-0001\n", small_text)
+        self.assertIn("- 负责人: cursor\n- 会话: cursor chat-fake-0001\n- 窗口: tmux\n", small_text)
 
         self.assertIn("规模=大任务\tAgent=codex", large_result.stdout)
         self.assertIn(str(fake_bin / "codex"), large_command)
         self.assertIn('model_reasoning_effort="high"', large_command)
         self.assertNotIn("resume", large_command)
         large_text = (self.root / "working" / large_id / "spec.md").read_text(encoding="utf-8")
-        self.assertIn("- 负责人: codex\n- 会话: codex\n", large_text)
+        self.assertIn("- 负责人: codex\n- 会话: codex\n- 窗口: tmux\n", large_text)
 
     def test_start_agent_option_overrides_scale_selection(self) -> None:
         self.install_fake_launchers()
@@ -682,12 +703,17 @@ exit 1
     def test_start_fills_session_into_legacy_cards_without_the_field(self) -> None:
         self.install_fake_launchers()
         task_id, task = self.make_todo("legacy-session")
-        task.write_text(task.read_text(encoding="utf-8").replace("- 会话:\n", "", 1), encoding="utf-8")
+        task.write_text(
+            task.read_text(encoding="utf-8")
+            .replace("- 会话:\n", "", 1)
+            .replace("- 窗口:\n", "", 1),
+            encoding="utf-8",
+        )
 
         self.run_command("start", "--agent", "grok", task_id)
 
         text = (self.root / "working" / task.name).read_text(encoding="utf-8")
-        self.assertRegex(text, r"(?m)^- 负责人: grok\n- 会话: grok [0-9a-f-]{36}$")
+        self.assertRegex(text, r"(?m)^- 负责人: grok\n- 会话: grok [0-9a-f-]{36}\n- 窗口: tmux$")
 
     def test_start_cursor_create_chat_failure_does_not_claim(self) -> None:
         self.install_fake_launchers()
@@ -926,6 +952,126 @@ exit 1
         self.assertIn("--force", command)
         self.assertIn("QA finding: 修复空指针", command)
         self.assertTrue(working.exists())
+
+    def test_notify_delivers_message_file_to_live_herdr_agent(self) -> None:
+        task_id, review = self.make_herdr_review("notify-success")
+        before = review.read_text(encoding="utf-8")
+        source = self.root / "finding.md"
+        source.write_text("QA finding: 补齐空输入校验\n第二行含 `code`", encoding="utf-8")
+
+        result = self.run_command("notify", task_id, "--message-file", str(source))
+
+        working = self.root / "working" / review.name
+        self.assertTrue(working.exists())
+        self.assertEqual(before, working.read_text(encoding="utf-8"))
+        self.assertIn("已直投", result.stdout)
+        self.assertEqual(["pane", "get", "w1:p9"], self.herdr_arguments("get"))
+        run = self.herdr_arguments("run")
+        self.assertEqual(["pane", "run", "w1:p9"], run[:3])
+        self.assertEqual(4, len(run))
+        self.assertNotIn("\n", run[3])
+        self.assertIn("按看板规则处理", run[3])
+        self.assertNotIn("QA finding", run[3])
+        match = re.search(r"消息文件=(\S+)", result.stdout)
+        self.assertIsNotNone(match, result.stdout)
+        message_path = Path(match.group(1))
+        self.assertEqual("QA finding: 补齐空输入校验\n第二行含 `code`\n", message_path.read_text(encoding="utf-8"))
+        self.assertEqual(0o600, stat.S_IMODE(message_path.stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(message_path.parent.stat().st_mode))
+        self.assertEqual(1, self.herdr_arguments("order").count("tab create"))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_notify_rejects_missing_pane_without_moving_review_card(self) -> None:
+        task_id, review = self.make_herdr_review("notify-no-pane")
+        before = review.read_text(encoding="utf-8")
+        self.env["KANBAN_HERDR_GET_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn("pane 不存在", result.stderr)
+        self.assertEqual(before, review.read_text(encoding="utf-8"))
+        self.assertEqual("pane get", self.herdr_arguments("order")[-1])
+
+    def test_notify_rejects_agent_mismatch(self) -> None:
+        task_id, review = self.make_herdr_review("notify-agent")
+        self.env["KANBAN_HERDR_AGENT"] = "claude"
+
+        result = self.run_command("notify", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn("Agent 不匹配", result.stderr)
+        self.assertTrue(review.exists())
+
+    def test_notify_rejects_non_idle_pane(self) -> None:
+        task_id, review = self.make_herdr_review("notify-busy")
+        self.env["KANBAN_HERDR_STATUS"] = "running"
+
+        result = self.run_command("notify", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn("pane 非 idle", result.stderr)
+        self.assertTrue(review.exists())
+
+    def test_notify_rejects_session_mismatch(self) -> None:
+        task_id, review = self.make_herdr_review("notify-session", "claude")
+        self.env["KANBAN_HERDR_AGENT"] = "claude"
+        self.env["KANBAN_HERDR_SESSION"] = "wrong-session"
+
+        result = self.run_command("notify", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn("会话不匹配", result.stderr)
+        self.assertTrue(review.exists())
+
+    def test_notify_rejects_non_herdr_launcher(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("notify-tmux")
+        self.run_command("start", "--launcher", "tmux", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "notify-tmux")
+        self.run_command("move", task_id, "review")
+
+        result = self.run_command("notify", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn("launcher 不支持直投: tmux", result.stderr)
+        self.assertTrue((self.root / "review" / task.name).exists())
+
+    def test_notify_rejects_legacy_card_without_window_metadata(self) -> None:
+        task_id, review = self.make_herdr_review("notify-legacy")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*\n", "", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
+
+        result = self.run_command("notify", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn("`窗口`", result.stderr)
+        self.assertTrue(review.exists())
+
+    def test_notify_delivery_failure_keeps_review_card_unchanged(self) -> None:
+        task_id, review = self.make_herdr_review("notify-rollback")
+        before = review.read_text(encoding="utf-8")
+        self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "x", succeeds=False)
+
+        self.assertIn("herdr pane run 失败", result.stderr)
+        self.assertEqual(before, review.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / review.name).exists())
+
+    def test_notify_requires_message_and_supported_state(self) -> None:
+        self.install_fake_herdr()
+        wrong_id, _wrong = self.make_todo("notify-wrong-state")
+        task_id, _task = self.make_todo("notify-args")
+        self.run_command("start", "--launcher", "herdr", task_id)
+
+        wrong_state = self.run_command("notify", wrong_id, "--message", "x", succeeds=False)
+        neither = self.run_command("notify", task_id, succeeds=False)
+        both = self.run_command("notify", task_id, "--message", "x", "--message-file", "y", succeeds=False)
+        empty = self.run_command("notify", task_id, "--message", "  ", succeeds=False)
+
+        self.assertIn("todo", wrong_state.stderr)
+        self.assertIn("--message", neither.stderr)
+        self.assertIn("--message", both.stderr)
+        self.assertIn("不得为空", empty.stderr)
 
     def load_kanban_module(self):
         import importlib.util
@@ -1580,7 +1726,9 @@ exit 1
         self.assertIn(str(fake_bin / "codex"), run[3])
         self.assertIn(task_id, run[3])
         self.assertFalse((self.root / "herdr.log.close").exists())
-        self.assertTrue((self.root / "working" / task.name).exists())
+        working = self.root / "working" / task.name
+        self.assertTrue(working.exists())
+        self.assertIn("- 会话: codex\n- 窗口: herdr:w1:t9:w1:p9\n", working.read_text(encoding="utf-8"))
 
     def test_herdr_launcher_reads_the_machine_config(self) -> None:
         task_id, _ = self.make_todo("herdr-config")
