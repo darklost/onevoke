@@ -2749,7 +2749,7 @@ exit 1
         self.install_fake_herdr()
         started = time.monotonic()
 
-        with self.fake_herdr_socket(response_chunks=8, chunk_delay=0.15):
+        with self.fake_herdr_socket(response_chunks=8, chunk_delay=0.20):
             result = self.run_command(
                 "start", "--launcher", "herdr", "--agent", "cursor", task_id
             )
