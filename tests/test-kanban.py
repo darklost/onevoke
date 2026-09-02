@@ -354,6 +354,15 @@ if [ "$1" = "pane" ] && [ "$2" = "send-keys" ]; then
     fi
     exit 0
 fi
+if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.prompt"
+    printf '%s\\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ "${KANBAN_HERDR_PROMPT_FAIL:-}" = "1" ]; then
+        printf '%s\\n' 'fake herdr agent prompt failure' >&2
+        exit 1
+    fi
+    exit 0
+fi
 if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
     printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.run"
     printf '%s\\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
@@ -1261,12 +1270,18 @@ exit 1
         self.assertIn("通道=herdr-direct", result.stdout)
         self.assertIn("回执=已确认", result.stdout)
         self.assertEqual(["pane", "get", "w1:p9"], self.herdr_arguments("get"))
-        sent = self.herdr_arguments("run")
-        self.assertEqual(["pane", "run", "w1:p9"], sent[:3])
+        sent = self.herdr_arguments("prompt")
+        self.assertEqual(["agent", "prompt", "w1:p9"], sent[:3])
         self.assertEqual(4, len(sent))
         self.assertTrue(sent[3].startswith("# onevoke-notify:"), sent[3])
         self.assertNotIn("QA finding", sent[3])
         self.assertFalse((self.root / "herdr.log.send").exists())
+        # pane run 只属于 start 拉起 Agent 的那一次; 直投再走它会把正文留在输入栏.
+        order = self.herdr_arguments("order")
+        self.assertEqual(1, order.count("pane run"))
+        self.assertEqual(1, order.count("agent prompt"))
+        self.assertLess(order.index("pane run"), order.index("agent prompt"))
+        self.assertNotIn("# onevoke-notify:", "\n".join(self.herdr_arguments("run")))
         waited = self.herdr_arguments("wait")
         self.assertEqual("recent", waited[waited.index("--source") + 1])
         self.assertRegex(waited[waited.index("--match") + 1], r"^ONEVOKE-NOTIFY-ACK:")
@@ -1371,13 +1386,25 @@ exit 1
         self.assertIn("回执=未确认", result.stdout)
         self.assertIn("已投递, 未在超时内确认", result.stderr)
         self.assertTrue((self.root / "working" / review.name).exists())
-        run = self.herdr_arguments("run")
-        self.assertNotIn("--resume", "\n".join(run))
+        self.assertNotIn("--resume", "\n".join(self.herdr_arguments("prompt")))
+        self.assertNotIn("--resume", "\n".join(self.herdr_arguments("run")))
         self.assertEqual(1, self.herdr_arguments("order").count("tab create"))
         match = re.search(r"消息文件=(\S+)", result.stdout)
         message_path = Path(match.group(1))
         message_path.unlink()
         message_path.parent.rmdir()
+
+    def test_notify_falls_back_to_resume_when_herdr_agent_prompt_fails(self) -> None:
+        task_id, review = self.make_herdr_review("notify-prompt-fail")
+        self.env["KANBAN_HERDR_PROMPT_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "继续修复", "--timeout", "61")
+
+        self.assertIn("通道=resume", result.stdout)
+        self.assertIn("herdr agent prompt 失败", result.stdout)
+        self.assertTrue((self.root / "working" / review.name).exists())
+        # 直投失败不得退回 pane run 重投: 那正是正文停在输入栏的路径.
+        self.assertNotIn("# onevoke-notify:", "\n".join(self.herdr_arguments("run")))
 
     def test_notify_herdr_identity_rejections_are_reported_when_fallback_fails(self) -> None:
         cases = (
@@ -1534,11 +1561,12 @@ exit 1
             encoding="utf-8",
         )
         before = review.read_text(encoding="utf-8")
+        self.env["KANBAN_HERDR_PROMPT_FAIL"] = "1"
         self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
 
         result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61", succeeds=False)
 
-        self.assertIn("herdr pane run 失败", result.stderr)
+        self.assertIn("herdr agent prompt 失败", result.stderr)
         self.assertEqual(before, review.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / review.name).exists())
 

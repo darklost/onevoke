@@ -1861,6 +1861,23 @@ def herdr_pane_run(herdr: str, pane_id: str, command: str) -> None:
         ))
 
 
+def herdr_agent_prompt(herdr: str, pane_id: str, text: str) -> None:
+    """向 pane 内已存在的 Agent TUI 提交正文.
+
+    `pane run` 面向 shell: 它把正文和结尾 CR 放进同一次写入, 既不按 pane 当前的
+    bracketed-paste 模式包裹, 也不在正文之后留出间隔. Cursor 的输入组件不把这种
+    同批 CR 当作提交, 正文会停在输入栏不执行. `agent prompt` 是 herdr 的 Agent
+    面: 它按 pane 实际的 bracketed-paste 模式送正文, 再延时补一次编码后的 Enter,
+    并在 Agent 已停在审批或提问 UI 时先行拒绝而不是把正文塞进那个对话框.
+    """
+    result = herdr_capture(herdr, "agent", "prompt", pane_id, text)
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"herdr agent prompt 失败: {herdr_failure_detail(result)}",
+            f"herdr agent prompt failed: {herdr_failure_detail(result)}",
+        ))
+
+
 def resolve_start_launcher(launcher: str) -> str:
     """auto 只在启动当时解析, 不把结果写回配置."""
     if launcher != "auto":
@@ -2731,8 +2748,9 @@ def notify_instruction(entry: Entry, message_path: Path, marker: str) -> str:
 def herdr_direct_notify(
     herdr: str, pane_id: str, instruction: str, marker: str, timeout: float
 ) -> tuple[bool, str]:
-    # send-keys 只接受 Enter/C-c 等按键名; pane run 才会送字面文本并提交 Enter.
-    herdr_pane_run(herdr, pane_id, instruction)
+    # 直投的目标是 pane 里已在运行的 Agent TUI, 不是 shell: 走 agent prompt,
+    # 不用面向 shell 的 pane run, 也不用只接受按键名的 pane send-keys.
+    herdr_agent_prompt(herdr, pane_id, instruction)
     print(t("已投递, 等待回执: 通道=herdr-direct", "delivered; waiting for acknowledgement: channel=herdr-direct"), flush=True)
     result = herdr_capture(
         herdr,
