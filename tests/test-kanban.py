@@ -2,7 +2,7 @@
 
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 import hashlib
 import io
 import json
@@ -3155,6 +3155,18 @@ exit 1
         self.assertIn("无效入口", listing.stderr)
         self.assertIn("# 任务 healthy", self.run_command("show", task_id).stdout)
         self.run_command("move", task_id, "working")
+
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_web_scan_warning_test")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                payload = kanban["web_board_payload"](self.root)
+                kanban["web_task_payload"](self.root, task_id)
+        finally:
+            sys.path.pop(0)
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual(task_id, payload["tasks"][0]["task_id"])
 
     def test_check_reports_invalid_entries_and_fails(self) -> None:
         (self.root / "backlog" / "notes.md").write_text("随手记", encoding="utf-8")

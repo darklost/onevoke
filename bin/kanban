@@ -3116,7 +3116,7 @@ def web_task_summary(entry: Entry, text: Optional[str] = None) -> dict:
 
 
 def web_board_payload(root: Path) -> dict:
-    board = load_board(root)
+    board = scan(root)
     tasks = []
     for entry in board.entries.values():
         tasks.append(web_task_summary(entry))
@@ -3130,7 +3130,7 @@ def web_board_payload(root: Path) -> dict:
 
 
 def web_task_payload(root: Path, task_id: str) -> dict:
-    entry = locate(load_board(root), task_id)
+    entry = locate(scan(root), task_id)
     text = read_document(entry)
     payload = web_task_summary(entry, text)
     payload["document"] = text
