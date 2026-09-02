@@ -40,6 +40,14 @@ from onevoke_config import (
     language_text,
     load_config,
 )
+from onevoke_process import (
+    AgentProgram,
+    ProcessInvocation,
+    create_task_file,
+    process_invocation,
+    resolve_agent_program,
+    task_file_instruction,
+)
 import kanban_web
 from onevoke_fs import (
     UnsafePathError,
@@ -1928,9 +1936,16 @@ class AgentSession:
         return f"{self.agent} {self.reference}".strip()
 
 
-def cursor_create_chat(binary: str) -> str:
+def cursor_create_chat(program: AgentProgram) -> str:
+    invocation = process_invocation(program, ("create-chat",))
     try:
-        result = subprocess.run([binary, "create-chat"], text=True, capture_output=True, check=False)
+        result = subprocess.run(
+            invocation.argv,
+            env=invocation.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
     except OSError as error:
         raise KanbanError(t(f"cursor-agent create-chat 失败: {error}", f"cursor-agent create-chat failed: {error}")) from error
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -1944,11 +1959,11 @@ def cursor_create_chat(binary: str) -> str:
     return chat_id
 
 
-def new_agent_session(agent: str, binary: str) -> AgentSession:
+def new_agent_session(agent: str, program: AgentProgram) -> AgentSession:
     if agent in ("claude", "grok"):
         return AgentSession(agent, str(uuid.uuid4()))
     if agent == "cursor":
-        return AgentSession(agent, cursor_create_chat(binary))
+        return AgentSession(agent, cursor_create_chat(program))
     return AgentSession(agent, "")
 
 
@@ -2044,9 +2059,8 @@ def find_codex_session(task_id: str) -> str:
     ))
 
 
-def agent_command(
+def agent_arguments(
     agent: str,
-    binary: str,
     model_entry: Dict[str, str],
     kind: str,
     session: AgentSession,
@@ -2061,7 +2075,7 @@ def agent_command(
     if agent == "cursor":
         model = model_entry["large_model" if kind == "large" else "small_model"]
         model_args = ["--model", model] if model else []
-        return [binary, *model_args, "--trust", "--force", "--resume", session.reference]
+        return [*model_args, "--trust", "--force", "--resume", session.reference]
     model = model_entry["model"]
     effort = model_entry["large_effort" if kind == "large" else "small_effort"]
     model_args = ["--model", model] if model else []
@@ -2073,30 +2087,25 @@ def agent_command(
             "--dangerously-bypass-approvals-and-sandbox",
         ]
         if resume:
-            return [binary, "resume", *options, session.reference]
-        return [binary, *options]
+            return ["resume", *options, session.reference]
+        return options
     session_args = ["--resume" if resume else "--session-id", session.reference]
     if agent == "claude":
-        return [binary, *model_args, "--effort", effort, "--dangerously-skip-permissions", *session_args]
+        return [*model_args, "--effort", effort, "--dangerously-skip-permissions", *session_args]
     if agent == "grok":
-        return [binary, *model_args, "--effort", effort, "--permission-mode", "bypassPermissions", *session_args]
+        return [*model_args, "--effort", effort, "--permission-mode", "bypassPermissions", *session_args]
     raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
 
 
-def resolve_agent_binary(agent_name: str) -> str:
+def require_agent_program(agent_name: str) -> AgentProgram:
     executable_name = agent_executable_name(agent_name)
-    agent = shutil.which(executable_name)
-    if not agent:
-        raise KanbanError(t(
-            f"Agent 不在 PATH: {executable_name}",
-            f"Agent is not in PATH: {executable_name}",
-        ))
-    if os.name == "nt" and Path(agent).suffix.lower() != ".exe":
-        raise KanbanError(t(
-            f"Windows Agent 必须是原生 .exe, 不会执行可能重解析参数的入口: {agent}",
-            f"Windows Agent must be a native .exe; refusing an entry point that can reparse arguments: {agent}",
-        ))
-    return agent
+    program = resolve_agent_program(executable_name)
+    if program:
+        return program
+    raise KanbanError(t(
+        f"Agent 不在 PATH: {executable_name}",
+        f"Agent is not in PATH: {executable_name}",
+    ))
 
 
 @dataclass(frozen=True)
@@ -2193,7 +2202,7 @@ def launch_agent(
     plan: LaunchPlan,
     root: Path,
     name: str,
-    agent_argv: list[str],
+    invocation: ProcessInvocation,
     location_callback: Optional[Callable[[LaunchOutcome], None]] = None,
     pane_session_callback: Optional[Callable[[], AgentSession]] = None,
     agent_session: Optional[AgentSession] = None,
@@ -2204,15 +2213,20 @@ def launch_agent(
     try:
         if plan.launcher == "foreground":
             try:
-                process = subprocess.Popen(agent_argv, cwd=root.parent)
+                process = subprocess.Popen(
+                    invocation.argv,
+                    cwd=root.parent,
+                    env=invocation.environment,
+                )
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
             return LaunchOutcome(process=process)
         if plan.launcher == "console":
             try:
                 process = subprocess.Popen(
-                    agent_argv,
+                    invocation.argv,
                     cwd=root.parent,
+                    env=invocation.environment,
                     creationflags=(
                         subprocess.CREATE_NEW_CONSOLE
                         | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -2222,7 +2236,7 @@ def launch_agent(
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
             return LaunchOutcome(process=process)
-        command = shlex.join(agent_argv)
+        command = shlex.join(invocation.argv)
         if plan.launcher == "herdr":
             created_tab, pane_id = herdr_create_tab(
                 plan.herdr_bin, plan.herdr_workspace, str(root.parent), name
@@ -2364,8 +2378,8 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     config = effective_config(load_config())
     agent_name = args.agent or kanban_agent_for(config, entry.kind)
     plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "start")
-    agent = resolve_agent_binary(agent_name)
-    session = new_agent_session(agent_name, agent)
+    program = require_agent_program(agent_name)
+    session = new_agent_session(agent_name, program)
     previous_codex_sessions: set[str] = set()
     if agent_name == "codex" and plan.launcher in ("tmux", "tmux-session"):
         try:
@@ -2380,11 +2394,18 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         session,
         "" if plan.launcher in ("herdr", "tmux", "tmux-session") else plan.launcher,
     )
-    prompt = start_agent_prompt(entry.task_id, current_install_paths(), task_group_from(original))
+    task_file = create_task_file(
+        start_agent_prompt(entry.task_id, current_install_paths(), task_group_from(original)),
+        prefix=f"onevoke-{entry.task_id}-start-",
+    )
+    prompt = task_file_instruction(f"执行 Kanban 任务 {entry.task_id}.", task_file)
     moved = move_entry(entry, root, "working")
     name = window_name(entry, original)
     model_entry = config["models"]["kanban"][agent_name]
-    agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind, session), prompt]
+    invocation = process_invocation(
+        program,
+        [*agent_arguments(agent_name, model_entry, entry.kind, session), prompt],
+    )
 
     def record_terminal_location(outcome: LaunchOutcome) -> None:
         if plan.launcher == "herdr":
@@ -2428,7 +2449,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             plan,
             root,
             name,
-            agent_argv,
+            invocation,
             record_terminal_location if plan.launcher in ("herdr", "tmux", "tmux-session") else None,
             started_tmux_session if plan.launcher in ("tmux", "tmux-session") else None,
             session,
@@ -2497,7 +2518,7 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
     session = session_from(text)
     config = effective_config(load_config())
     plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "resume")
-    agent = resolve_agent_binary(session.agent)
+    program = require_agent_program(session.agent)
     if session.agent == "codex":
         session = AgentSession("codex", find_codex_session(entry.task_id))
     elif not session.reference:
@@ -2505,16 +2526,23 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
             f"任务卡的 {session.agent} 会话缺少 id, 无法唤醒",
             f"Task session for {session.agent} has no id; cannot resume",
         ))
-    prompt = resume_agent_prompt(entry.task_id, message, current_install_paths())
+    task_file = create_task_file(
+        resume_agent_prompt(entry.task_id, message, current_install_paths()),
+        prefix=f"onevoke-{entry.task_id}-resume-",
+    )
+    prompt = task_file_instruction(f"继续 Kanban 任务 {entry.task_id}.", task_file)
     model_entry = config["models"]["kanban"][session.agent]
-    agent_argv = [*agent_command(session.agent, agent, model_entry, entry.kind, session, resume=True), prompt]
+    invocation = process_invocation(
+        program,
+        [*agent_arguments(session.agent, model_entry, entry.kind, session, resume=True), prompt],
+    )
     moved = move_entry(entry, root, "working") if entry.state != "working" else entry
     try:
         outcome = launch_agent(
             plan,
             root,
             window_name(entry, text),
-            agent_argv,
+            invocation,
             pane_session_callback=(lambda: session)
             if plan.launcher in ("tmux", "tmux-session")
             else None,
@@ -3260,15 +3288,22 @@ def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout
     session = resolved_task_session(entry, text)
     config = effective_config(load_config())
     plan = prepare_launch(config["launcher"], root.parent.resolve(), "notify")
-    agent = resolve_agent_binary(session.agent)
+    program = require_agent_program(session.agent)
     model_entry = config["models"]["kanban"][session.agent]
-    prompt = notify_resume_prompt(entry.task_id, message, current_install_paths())
-    agent_argv = [*agent_command(session.agent, agent, model_entry, entry.kind, session, resume=True), prompt]
+    task_file = create_task_file(
+        notify_resume_prompt(entry.task_id, message, current_install_paths()),
+        prefix=f"onevoke-{entry.task_id}-notify-",
+    )
+    prompt = task_file_instruction(f"继续 Kanban 任务 {entry.task_id}.", task_file)
+    invocation = process_invocation(
+        program,
+        [*agent_arguments(session.agent, model_entry, entry.kind, session, resume=True), prompt],
+    )
     outcome = launch_agent(
         plan,
         root,
         window_name(entry, text),
-        agent_argv,
+        invocation,
         pane_session_callback=(lambda: session)
         if plan.launcher in ("tmux", "tmux-session")
         else None,

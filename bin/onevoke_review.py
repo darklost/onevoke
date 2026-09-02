@@ -28,7 +28,18 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import IO, NoReturn
 
-from onevoke_config import configured_language, effective_config
+from onevoke_config import (
+    configured_language,
+    effective_config,
+)
+from onevoke_process import (
+    AgentProgram,
+    ProcessInvocation,
+    process_invocation,
+    resolve_agent_program,
+    task_file_instruction,
+    write_task_file,
+)
 from onevoke_fs import (
     PrivateTemporaryDirectoryCleanupError,
     private_temporary_directory_nofollow,
@@ -275,7 +286,7 @@ class ReviewContext:
     task_spec: Path | None
     review_context: str
     reviewed: str | None
-    executable: str
+    program: AgentProgram
     temp_root: Path
 
 
@@ -703,20 +714,12 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
             )
         )
 
-    executable = shutil.which(settings.executable)
-    if executable is None:
+    program = resolve_agent_program(settings.executable)
+    if program is None:
         raise GateError(
             t(
                 f"{settings.name} CLI 不可用: {settings.executable}",
                 f"{settings.name} CLI is unavailable: {settings.executable}",
-            ),
-            127,
-        )
-    if os.name == "nt" and Path(executable).suffix.lower() != ".exe":
-        raise GateError(
-            t(
-                f"{settings.name} CLI 必须是原生 .exe, 不会执行可能重解析参数的入口: {executable}",
-                f"{settings.name} CLI must be a native .exe; refusing an entry point that can reparse arguments: {executable}",
             ),
             127,
         )
@@ -731,7 +734,7 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
         task_spec=task_spec,
         review_context=review_context,
         reviewed=reviewed,
-        executable=executable,
+        program=program,
         temp_root=temp_root,
     )
 
@@ -916,10 +919,9 @@ def build_prompt(context: ReviewContext, evidence_file: Path, task_context: str)
 
 
 def launch_process(
-    arguments: list[str],
+    invocation: ProcessInvocation,
     *,
     cwd: Path,
-    environment: dict[str, str],
     stdin: IO[bytes],
     stdout: IO[bytes],
     stderr: IO[bytes],
@@ -928,9 +930,9 @@ def launch_process(
     if os.name != "nt":
         options["start_new_session"] = True
         return subprocess.Popen(
-            arguments,
+            invocation.argv,
             cwd=cwd,
-            env=environment,
+            env=invocation.environment,
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
@@ -956,10 +958,10 @@ def launch_process(
                 str(Path(__file__).resolve()),
                 WINDOWS_JOB_BOOTSTRAP,
                 event_name,
-                *arguments,
+                *invocation.argv,
             ],
             cwd=cwd,
-            env=environment,
+            env=invocation.environment,
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
@@ -1249,7 +1251,7 @@ def reviewer_arguments(
     runtime: Path,
     output_file: Path,
     prompt_file: Path,
-) -> tuple[list[str], Path, dict[str, str]]:
+) -> tuple[ProcessInvocation, Path]:
     settings = context.settings
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
@@ -1257,7 +1259,6 @@ def reviewer_arguments(
     if context.agent == "codex":
         environment["CODEX_HOME"] = str(settings.review_home.resolve())
         arguments = [
-            context.executable,
             "exec",
             "--cd",
             str(context.root),
@@ -1275,11 +1276,10 @@ def reviewer_arguments(
             str(output_file),
             "-",
         ]
-        return arguments, context.root, environment
+        return process_invocation(context.program, arguments, environment), context.root
     if context.agent == "claude":
         environment["CLAUDE_CONFIG_DIR"] = str(settings.review_home.resolve())
         arguments = [
-            context.executable,
             "--print",
             "--output-format",
             "json",
@@ -1298,12 +1298,11 @@ def reviewer_arguments(
             "--effort",
             settings.effort,
         ]
-        return arguments, runtime, environment
+        return process_invocation(context.program, arguments, environment), runtime
     if context.agent == "cursor":
         environment["CURSOR_CONFIG_DIR"] = str(runtime)
         environment["CURSOR_DATA_DIR"] = str(runtime)
         arguments = [
-            context.executable,
             "--print",
             "--output-format",
             "json",
@@ -1312,7 +1311,7 @@ def reviewer_arguments(
             str(context.root),
             *model,
         ]
-        return arguments, runtime, environment
+        return process_invocation(context.program, arguments, environment), runtime
     if context.agent != "grok":
         raise GateError(
             t(
@@ -1322,7 +1321,6 @@ def reviewer_arguments(
         )
     environment["GROK_HOME"] = str(settings.review_home.resolve())
     arguments = [
-        context.executable,
         "--cwd",
         str(runtime),
         *model,
@@ -1356,7 +1354,7 @@ def reviewer_arguments(
         "--prompt-file",
         str(prompt_file),
     ]
-    return arguments, context.root, environment
+    return process_invocation(context.program, arguments, environment), context.root
 
 
 def monitor_process(
@@ -1471,6 +1469,7 @@ def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
     error_file = runtime / "error.log"
     evidence_file = runtime / "evidence.txt"
     prompt_file = runtime / "prompt.txt"
+    stdin_file = runtime / "stdin.txt"
     process: subprocess.Popen[bytes] | None = None
     review_started = False
     tree_collection_attempted = False
@@ -1495,14 +1494,22 @@ def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
             task_context = f"Authoritative spec file: {snapshot}. Read it completely before reviewing."
 
         write_evidence(context, evidence_file)
-        prompt_file.write_text(build_prompt(context, evidence_file, task_context) + "\n", encoding="utf-8")
+        write_task_file(prompt_file, build_prompt(context, evidence_file, task_context))
+        stdin_file.write_text(
+            task_file_instruction(
+                f"Perform the {context.role} review.",
+                prompt_file,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         output_file.write_bytes(b"")
         stdout_file.write_bytes(b"")
         error_file.write_bytes(b"")
-        arguments, process_cwd, environment = reviewer_arguments(context, runtime, output_file, prompt_file)
+        invocation, process_cwd = reviewer_arguments(context, runtime, output_file, prompt_file)
         try:
             with (
-                prompt_file.open("rb") as prompt_stream,
+                stdin_file.open("rb") as prompt_stream,
                 stdout_file.open("wb") as stdout_stream,
                 error_file.open("wb") as error_stream,
             ):
@@ -1510,9 +1517,8 @@ def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
                 reviewer_stdout = stdout_stream if output_stream is None else output_stream
                 try:
                     process = launch_process(
-                        arguments,
+                        invocation,
                         cwd=process_cwd,
-                        environment=environment,
                         stdin=prompt_stream,
                         stdout=reviewer_stdout,
                         stderr=error_stream,

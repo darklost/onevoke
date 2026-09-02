@@ -11,6 +11,7 @@ import os
 import re
 import runpy
 import select
+import shlex
 import shutil
 import socket
 import stat
@@ -871,6 +872,14 @@ exit 1
         return (self.root / "tmux.log.command").read_text(encoding="utf-8").rstrip("\n")
 
     @staticmethod
+    def task_file_from_command(command: str) -> Path:
+        prompt = shlex.split(command)[-1]
+        match = re.search(r"task file at (.+); read the complete file first", prompt)
+        if match is None:
+            raise AssertionError(f"task file pointer missing from command: {command}")
+        return Path(match.group(1))
+
+    @staticmethod
     def set_branch(path: Path, branch: str) -> None:
         text = path.read_text(encoding="utf-8")
         path.write_text(text.replace("- 任务分支:\n", f"- 任务分支: {branch}\n", 1), encoding="utf-8")
@@ -1051,8 +1060,10 @@ exit 1
         self.assertIn("--dangerously-skip-permissions", command)
         self.assertIn("--effort medium", command)
         self.assertIn(f"继续 Kanban 任务 {task_id}", command)
-        self.assertIn("QA finding: 补齐空输入校验", command)
-        self.assertIn(f"kanban show {task_id}", command)
+        self.assertNotIn("QA finding: 补齐空输入校验", command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn("QA finding: 补齐空输入校验", task_content)
+        self.assertIn(f"kanban show {task_id}", task_content)
         tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
         self.assertEqual("kb-任务-resume-claude", tmux_args[tmux_args.index("-n") + 1])
 
@@ -1069,8 +1080,9 @@ exit 1
         self.run_command("resume", task_id, "--message-file", str(findings))
 
         command = self.last_launch_command()
-        self.assertIn("越界读取", command)
-        self.assertIn("缺少验收 3", command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn("越界读取", task_content)
+        self.assertIn("缺少验收 3", task_content)
         self.assertRegex(command, r"--resume [0-9a-f-]{36}")
 
     def test_resume_requires_exactly_one_message_source(self) -> None:
@@ -1309,15 +1321,17 @@ exit 1
 
         self.run_command("start", task_id)
         group_command = self.last_launch_command()
+        group_content = self.task_file_from_command(group_command).read_text(encoding="utf-8")
         self.run_command("start", single_id)
         single_command = self.last_launch_command()
+        single_content = self.task_file_from_command(single_command).read_text(encoding="utf-8")
 
-        self.assertIn(f"kanban move {task_id} review", group_command)
-        self.assertIn("汇入组集成分支", group_command)
-        self.assertIn("由任务组主控负责", group_command)
-        self.assertNotIn("审核、集成和看板收尾.", group_command)
-        self.assertIn("审核、集成和看板收尾", single_command)
-        self.assertNotIn("review", single_command)
+        self.assertIn(f"kanban move {task_id} review", group_content)
+        self.assertIn("汇入组集成分支", group_content)
+        self.assertIn("由任务组主控负责", group_content)
+        self.assertNotIn("审核、集成和看板收尾.", group_content)
+        self.assertIn("审核、集成和看板收尾", single_content)
+        self.assertNotIn("review", single_content)
 
     def test_resume_relaunches_cursor_with_its_chat(self) -> None:
         fake_bin = self.install_fake_launchers()
@@ -1340,7 +1354,8 @@ exit 1
         self.assertIn("--model cursor-grok-4.6-high", command)
         self.assertIn("--trust", command)
         self.assertIn("--force", command)
-        self.assertIn("QA finding: 修复空指针", command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn("QA finding: 修复空指针", task_content)
         self.assertTrue(working.exists())
 
     def test_notify_delivers_private_payload_and_waits_for_herdr_ack(self) -> None:
@@ -2442,9 +2457,11 @@ exit 1
         self.assertIn('model_reasoning_effort="medium"', command)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn(task_id, command)
-        self.assertIn("先运行 kanban rules", command)
-        self.assertIn("遵守目标项目 AGENTS.md", command)
-        self.assertNotIn(".onevoke/bin/kanban", command)
+        self.assertNotIn("先运行 kanban rules", command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn("先运行 kanban rules", task_content)
+        self.assertIn("遵守目标项目 AGENTS.md", task_content)
+        self.assertNotIn(".onevoke/bin/kanban", task_content)
 
     def test_start_window_name_folds_title_and_truncates(self) -> None:
         task_id, task = self.make_todo("window-name")
@@ -7386,6 +7403,14 @@ class PosixProjectInstallerTest(unittest.TestCase):
 class KanbanProjectInstallTest(unittest.TestCase):
     """项目安装入口必须使用主 worktree `.onevoke/`, 且不得回落全局资源."""
 
+    @staticmethod
+    def task_file_from_command(command: str) -> Path:
+        prompt = shlex.split(command)[-1]
+        match = re.search(r"task file at (.+); read the complete file first", prompt)
+        if match is None:
+            raise AssertionError(f"task file pointer missing from command: {command}")
+        return Path(match.group(1))
+
     def setUp(self) -> None:
         self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
         self.language.start()
@@ -7467,6 +7492,7 @@ class KanbanProjectInstallTest(unittest.TestCase):
             "kanban",
             "onevoke_config.py",
             "onevoke_fs.py",
+            "onevoke_process.py",
             "kanban_web.py",
             "kanban_tui.py",
         ):
@@ -7771,10 +7797,11 @@ printf '%s\\t%s\\n' '@9' '%9'
         self.assertTrue((board / "working" / f"{task_id}.md").is_file())
         command = (self.root / "tmux.log.command").read_text(encoding="utf-8").rstrip("\n")
         self.assertIn(str(fake_bin / "grok"), command)
-        self.assertIn(str(entry), command)
-        self.assertIn(str(main / "AGENTS.md"), command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn(str(entry), task_content)
+        self.assertIn(str(main / "AGENTS.md"), task_content)
         self.assertIn(str(main), (self.root / "tmux.log").read_text(encoding="utf-8"))
-        self.assertNotIn("先运行 kanban rules", command)
+        self.assertNotIn("先运行 kanban rules", task_content)
 
 
 if __name__ == "__main__":

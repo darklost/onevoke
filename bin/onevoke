@@ -38,6 +38,7 @@ from onevoke_config import (
     resolve_language,
     save_config,
 )
+from onevoke_process import AgentProgram, process_invocation, resolve_agent_program
 from onevoke_menu import (
     MenuCancelled,
     MenuEnded,
@@ -162,10 +163,12 @@ VERSION_FAILED = t("版本检查失败", "version check failed")
 TMUX_SESSION_HINT = "tmux new -A -s onevoke"
 
 
-def agent_version(command: str) -> str:
+def agent_version(program: AgentProgram) -> str:
+    invocation = process_invocation(program, ("--version",))
     try:
         result = subprocess.run(
-            [command, "--version"],
+            invocation.argv,
+            env=invocation.environment,
             text=True,
             capture_output=True,
             check=False,
@@ -182,20 +185,15 @@ def agent_usable(state: dict[str, str | bool | None]) -> bool:
     return bool(state.get("path")) and state.get("version") not in (None, VERSION_FAILED)
 
 
-def windows_native_executable(command: str) -> bool:
-    """Programmatic Windows Agent calls require a native argv boundary."""
-    return os.name != "nt" or Path(command).suffix.lower() == ".exe"
-
-
 def find_agents() -> dict[str, dict[str, str | bool | None]]:
     agents: dict[str, dict[str, str | bool | None]] = {}
     for name in EXECUTION_AGENTS:
-        command = shutil.which(agent_executable_name(name))
-        native = bool(command and windows_native_executable(command))
+        executable_name = agent_executable_name(name)
+        program = resolve_agent_program(executable_name)
         agents[name] = {
-            "path": command,
-            "version": agent_version(command) if command and native else None,
-            "unsafe_batch": bool(command and not native),
+            "path": program.path if program else None,
+            "version": agent_version(program) if program else None,
+            "batch": bool(program and program.batch),
             "execution": True,
             "review": name in REVIEW_AGENTS,
             "memsearch": name in ("codex", "claude"),
@@ -454,14 +452,6 @@ def print_doctor() -> bool:
             success(
                 f"{AGENT_LABELS[name]}: {state['version']} "
                 f"({', '.join(capabilities)}; {t('认证未验证', 'authentication not verified')})"
-            )
-        elif state.get("unsafe_batch"):
-            healthy = False
-            warning(
-                t(
-                    f"{AGENT_LABELS[name]}: {state['path']} 不是原生 .exe; Windows 不会执行会重解析参数的 .cmd/.bat Agent.",
-                    f"{AGENT_LABELS[name]}: {state['path']} is not a native .exe; Windows will not execute a .cmd/.bat Agent that reparses arguments.",
-                )
             )
         elif state["path"]:
             healthy = False

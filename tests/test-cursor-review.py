@@ -22,7 +22,10 @@ FAKE_CURSOR = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_CURSOR_ARGV"
 printf '%s\\n' "$CURSOR_CONFIG_DIR" > "$FAKE_CURSOR_CONFIG_DIR"
 printf '%s\\n' "$CURSOR_DATA_DIR" > "$FAKE_CURSOR_DATA_DIR"
-cat > "$FAKE_CURSOR_PROMPT"
+instruction=$(cat)
+prompt=${instruction#*task file at }
+prompt=${prompt%%; read the complete file first*}
+cat "$prompt" > "$FAKE_CURSOR_PROMPT"
 pwd -P > "$FAKE_CURSOR_CWD"
 
 if [ -n "${FAKE_CURSOR_TAMPER:-}" ]; then

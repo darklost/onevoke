@@ -2004,7 +2004,13 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
         bin_dir.mkdir(parents=True)
         rules_dir = project / ".onevoke" / "rules"
         rules_dir.mkdir(parents=True)
-        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py", "onevoke_menu.py"):
+        for name in (
+            "onevoke",
+            "onevoke_config.py",
+            "onevoke_fs.py",
+            "onevoke_menu.py",
+            "onevoke_process.py",
+        ):
             shutil.copy2(PROJECT_ROOT / "bin" / name, bin_dir / name)
         (bin_dir / "onevoke").chmod(0o755)
         (rules_dir / "ONEVOKE-AGENTS.md").write_text(
@@ -2153,7 +2159,13 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
         project = self.root / "not-git"
         bin_dir = project / ".onevoke" / "bin"
         bin_dir.mkdir(parents=True)
-        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py", "onevoke_menu.py"):
+        for name in (
+            "onevoke",
+            "onevoke_config.py",
+            "onevoke_fs.py",
+            "onevoke_menu.py",
+            "onevoke_process.py",
+        ):
             shutil.copy2(PROJECT_ROOT / "bin" / name, bin_dir / name)
         self.write_config(self.global_config, kanban_agent="grok")
 
