@@ -2,18 +2,24 @@
 
 import argparse
 import base64
+from contextlib import contextmanager, redirect_stderr
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import runpy
 import select
 import shutil
+import socket
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unicodedata
 import unittest
 from datetime import datetime
@@ -88,6 +94,7 @@ class KanbanCommandTest(unittest.TestCase):
             "HERDR_WORKSPACE_ID",
             "HERDR_TAB_ID",
             "HERDR_PANE_ID",
+            "HERDR_SOCKET_PATH",
         ):
             self.env.pop(name, None)
 
@@ -148,6 +155,18 @@ class KanbanCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    @staticmethod
+    def set_prerequisites(path: Path, value: str) -> None:
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            text.replace(
+                "## 讨论与决策\n\n",
+                f"## 讨论与决策\n\n```text\n前置任务: {value}\n```\n\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
     def read_process_json(
         self, process: subprocess.Popen, *, timeout: float = 5.0
     ) -> dict:
@@ -160,11 +179,19 @@ class KanbanCommandTest(unittest.TestCase):
 
     def install_fake_launchers(self) -> Path:
         fake_bin = self.root / "fake-bin"
-        fake_bin.mkdir()
+        fake_bin.mkdir(exist_ok=True)
         tmux = fake_bin / "tmux"
         tmux.write_text(
             """#!/bin/sh
 if [ "$1" = "display-message" ]; then
+    if [ "${5:-}" = '#{pane_current_command}\t#{pane_in_mode}\t#{pane_dead}' ]; then
+        current="${KANBAN_TMUX_CURRENT_COMMAND:-}"
+        if [ -z "$current" ] && [ -f "$KANBAN_TMUX_LOG.current" ]; then
+            current=$(sed -n '1p' "$KANBAN_TMUX_LOG.current")
+        fi
+        printf '%s\t%s\t%s\\n' "${current:-codex}" "${KANBAN_TMUX_IN_MODE:-0}" "${KANBAN_TMUX_DEAD:-0}"
+        exit 0
+    fi
     printf '%s\\n' '$42'
     exit 0
 fi
@@ -175,13 +202,78 @@ if [ "$1" = "has-session" ]; then
     exit 1
 fi
 if [ "$1" = "show-options" ]; then
+    if [ "${2:-}" = "-p" ]; then
+        [ "${KANBAN_TMUX_PANE_SESSION_MISSING:-}" != "1" ] || exit 1
+        if [ -n "${KANBAN_TMUX_PANE_SESSION:-}" ]; then
+            printf '%s\\n' "$KANBAN_TMUX_PANE_SESSION"
+        elif [ -f "$KANBAN_TMUX_LOG.pane-session" ]; then
+            sed -n '1p' "$KANBAN_TMUX_LOG.pane-session"
+        else
+            exit 1
+        fi
+        exit 0
+    fi
     # 真实 tmux 对未设置的用户选项返回非零并报 invalid option.
     [ -n "${KANBAN_TMUX_PROJECT:-}" ] || exit 1
     printf '%s\\n' "$KANBAN_TMUX_PROJECT"
     exit 0
 fi
 if [ "$1" = "set-option" ]; then
+    if [ "${2:-}" = "-p" ]; then
+        printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.pane-setopt"
+        if [ "${KANBAN_TMUX_PANE_SETOPT_FAIL:-}" = "1" ]; then
+            printf '%s\\n' 'fake pane set-option failure' >&2
+            exit 1
+        fi
+        printf '%s\\n' "$6" > "$KANBAN_TMUX_LOG.pane-session"
+        exit 0
+    fi
     printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.setopt"
+    exit 0
+fi
+if [ "$1" = "send-keys" ]; then
+    printf '%s\\n' "$@" >> "$KANBAN_TMUX_LOG.send"
+    if [ "$4" = "-l" ]; then
+        printf '%s\\n' "$5" > "$KANBAN_TMUX_LOG.instruction"
+    fi
+    [ "${KANBAN_TMUX_SEND_FAIL:-}" = "1" ] && exit 1
+    exit 0
+fi
+if [ "$1" = "capture-pane" ]; then
+    [ "${KANBAN_TMUX_CAPTURE_FAIL:-}" = "1" ] && exit 1
+    if [ "${KANBAN_TMUX_ACK:-1}" = "1" ] && [ -f "$KANBAN_TMUX_LOG.instruction" ]; then
+        sed -n 's/.*先原样输出 \\([^, ]*\\),.*/• \\1/p' "$KANBAN_TMUX_LOG.instruction"
+    fi
+    exit 0
+fi
+if [ "$1" = "kill-window" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.kill"
+    [ "${KANBAN_TMUX_KILL_FAIL:-}" = "1" ] && exit 1
+    exit 0
+fi
+if [ "$1" = "respawn-pane" ]; then
+    printf '%s\\n' "$5" > "$KANBAN_TMUX_LOG.command"
+    current=${5%% *}
+    printf '%s\\n' "${current##*/}" > "$KANBAN_TMUX_LOG.current"
+    if [ "${current##*/}" = "codex" ]; then
+        task=$(printf '%s\\n' "$5" | grep -Eo '[0-9]{8}-[a-z0-9-]+-task' | head -n 1)
+        if [ -n "$task" ]; then
+            session_dir="$HOME/.codex/sessions/fake"
+            mkdir -p "$session_dir"
+            printf '%s\\n' \
+                '{"type":"session_meta","payload":{"id":"fake-codex-session"}}' \
+                > "$session_dir/rollout-$task.jsonl"
+            printf '{"type":"event_msg","payload":{"type":"user_message","message":"执行 Kanban 任务 %s."}}\\n' \
+                "$task" >> "$session_dir/rollout-$task.jsonl"
+        fi
+    fi
+    if [ -n "${KANBAN_TMUX_MUTATE_CARD:-}" ]; then
+        printf '%s\\n' '# agent mutation' >> "$KANBAN_TMUX_MUTATE_CARD"
+    fi
+    if [ "${KANBAN_TMUX_RESPAWN_FAIL:-}" = "1" ]; then
+        printf '%s\\n' 'fake tmux respawn failure' >&2
+        exit 1
+    fi
     exit 0
 fi
 printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG"
@@ -189,7 +281,7 @@ if [ "${KANBAN_TMUX_FAIL:-}" = "1" ]; then
     printf '%s\\n' 'fake tmux failure' >&2
     exit 1
 fi
-printf '%s\\n' '@9'
+printf '%s\t%s\\n' '@9' '%9'
 """,
             encoding="utf-8",
         )
@@ -206,7 +298,7 @@ if [ "$1" = "create-chat" ]; then
     printf '%s\\n' "${KANBAN_CURSOR_CHAT_ID:-chat-fake-0001}"
     exit 0
 fi
-exit 0
+exit "${KANBAN_AGENT_EXIT:-0}"
 """,
                 encoding="utf-8",
             )
@@ -243,6 +335,32 @@ if [ "$1" = "pane" ] && [ "$2" = "wait-output" ]; then
         printf '%s\\n' 'fake herdr pane wait-output timeout' >&2
         exit 1
     fi
+    if [ "${KANBAN_HERDR_ACK_FAIL:-}" = "1" ] && [ "$7" = "recent" ]; then
+        printf '%s\\n' 'fake herdr acknowledgement timeout' >&2
+        exit 1
+    fi
+    exit 0
+fi
+if [ "$1" = "pane" ] && [ "$2" = "send-keys" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.send"
+    printf '%s\\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ "$#" -ne 4 ] || [ "$4" != "Enter" ]; then
+        printf '%s\\n' "unsupported key ${4:-}" >&2
+        exit 1
+    fi
+    if [ "${KANBAN_HERDR_SEND_FAIL:-}" = "1" ]; then
+        printf '%s\\n' 'fake herdr send-keys failure' >&2
+        exit 1
+    fi
+    exit 0
+fi
+if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.prompt"
+    printf '%s\\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ "${KANBAN_HERDR_PROMPT_FAIL:-}" = "1" ]; then
+        printf '%s\\n' 'fake herdr agent prompt failure' >&2
+        exit 1
+    fi
     exit 0
 fi
 if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
@@ -257,8 +375,39 @@ if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
     fi
     exit 0
 fi
+if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
+    printf '%s\n' "$@" > "$KANBAN_HERDR_LOG.get"
+    printf '%s\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ "${KANBAN_HERDR_GET_FAIL:-}" = "1" ]; then
+        printf '%s\n' 'fake pane not found' >&2
+        exit 1
+    fi
+    printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"w1:t9","agent":"%s","agent_status":"%s","agent_session":{"value":"%s"}}}}\n' \
+        "$3" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_STATUS:-idle}" "${KANBAN_HERDR_SESSION:-}"
+    exit 0
+fi
+if [ "$1" = "pane" ] && [ "$2" = "read" ]; then
+    printf '%s\n' "${KANBAN_HERDR_OUTPUT:-}"
+    exit 0
+fi
+if [ "$1" = "pane" ] && [ "$2" = "list" ]; then
+    printf '%s\n' "$@" > "$KANBAN_HERDR_LOG.list"
+    printf '%s\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ "${KANBAN_HERDR_LIST_FAIL:-}" = "1" ]; then
+        printf '%s\n' 'fake pane list failure' >&2
+        exit 1
+    fi
+    if [ -n "${KANBAN_HERDR_LIST_JSON:-}" ]; then
+        printf '%s\n' "$KANBAN_HERDR_LIST_JSON"
+        exit 0
+    fi
+    printf '{"id":"cli:pane:list","result":{"type":"pane_list","panes":[{"pane_id":"w1:p9","tab_id":"w1:t9","agent":"%s","agent_status":"idle","agent_session":{"kind":"id","source":"herdr:%s","value":"%s"}}]}}\n' \
+        "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_SESSION:-}"
+    exit 0
+fi
 if [ "$1" = "tab" ] && [ "$2" = "close" ]; then
     printf '%s\\n' "$@" > "$KANBAN_HERDR_LOG.close"
+    [ "${KANBAN_HERDR_CLOSE_FAIL:-}" = "1" ] && exit 1
     exit 0
 fi
 printf '%s\\n' "unexpected herdr args: $*" >&2
@@ -276,6 +425,67 @@ exit 1
 
     def herdr_arguments(self, suffix: str) -> list[str]:
         return (self.root / f"herdr.log.{suffix}").read_text(encoding="utf-8").splitlines()
+
+    @contextmanager
+    def fake_herdr_socket(
+        self,
+        response_type: str = "ok",
+        response_chunks: int = 1,
+        chunk_delay: float = 0.0,
+    ):
+        socket_path = self.root / "herdr.sock"
+        requests = []
+        stop = threading.Event()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen()
+        server.settimeout(0.1)
+
+        def serve() -> None:
+            while not stop.is_set():
+                try:
+                    connection, _address = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                with connection:
+                    data = b""
+                    while b"\n" not in data:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                    request = json.loads(data.splitlines()[0])
+                    requests.append(request)
+                    response = {
+                        "id": request["id"],
+                        "result": {"type": response_type},
+                    }
+                    encoded = (json.dumps(response) + "\n").encode("utf-8")
+                    chunk_size = max(1, math.ceil(len(encoded) / response_chunks))
+                    try:
+                        for offset in range(0, len(encoded), chunk_size):
+                            if chunk_delay:
+                                time.sleep(chunk_delay)
+                            connection.sendall(encoded[offset:offset + chunk_size])
+                    except OSError:
+                        pass
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        previous = self.env.get("HERDR_SOCKET_PATH")
+        self.env["HERDR_SOCKET_PATH"] = str(socket_path)
+        try:
+            yield requests
+        finally:
+            if previous is None:
+                self.env.pop("HERDR_SOCKET_PATH", None)
+            else:
+                self.env["HERDR_SOCKET_PATH"] = previous
+            stop.set()
+            server.close()
+            thread.join(timeout=1)
 
     def test_locale_selects_chinese_or_english(self) -> None:
         chinese = self.run_command("--help")
@@ -391,7 +601,8 @@ exit 1
             "- 完成时间: ",
             (self.root / "done" / large_id / "spec.md").read_text(encoding="utf-8"),
         )
-        self.assertEqual("通过: 2 个任务\n", self.run_command("check").stdout)
+        self.assertEqual("通过: 0 个任务\n", self.run_command("check").stdout)
+        self.assertEqual("通过: 2 个任务\n", self.run_command("check", "--all").stdout)
 
     def test_new_templates_include_optional_task_group_metadata(self) -> None:
         today = datetime.now().strftime("%Y%m%d")
@@ -605,19 +816,30 @@ exit 1
         return task_id
 
     def last_launch_command(self) -> str:
-        # 假 tmux 逐参数记录; 命令是 -n <name> 之后的最后一个参数, resume 的 prompt 可能多行.
-        lines = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
-        return "\n".join(lines[lines.index("-n") + 2:])
+        return (self.root / "tmux.log.command").read_text(encoding="utf-8").rstrip("\n")
 
     @staticmethod
     def set_branch(path: Path, branch: str) -> None:
         text = path.read_text(encoding="utf-8")
         path.write_text(text.replace("- 任务分支:\n", f"- 任务分支: {branch}\n", 1), encoding="utf-8")
 
-    def test_new_template_includes_session_field(self) -> None:
+    def make_herdr_review(self, slug: str, agent: str = "claude") -> tuple[str, Path]:
+        self.install_fake_herdr()
+        task_id, task = self.make_todo(slug)
+        self.run_command("start", "--launcher", "herdr", "--agent", agent, task_id)
+        working = self.root / "working" / task.name
+        session = re.search(rf"(?m)^- 会话: {agent} (\S+)$", working.read_text(encoding="utf-8"))
+        if session is not None:
+            self.env["KANBAN_HERDR_SESSION"] = session.group(1)
+        self.env["KANBAN_HERDR_AGENT"] = agent
+        self.set_branch(working, slug)
+        self.run_command("move", task_id, "review")
+        return task_id, self.root / "review" / task.name
+
+    def test_new_template_includes_session_and_window_fields(self) -> None:
         task_id, task = self.make_todo("template-session")
         text = task.read_text(encoding="utf-8")
-        self.assertIn("- 负责人:\n- 会话:\n- 开始时间:\n", text)
+        self.assertIn("- 负责人:\n- 会话:\n- 窗口:\n- 开始时间:\n", text)
 
     def test_start_selects_agent_by_task_scale(self) -> None:
         fake_bin = self.install_fake_launchers()
@@ -635,14 +857,14 @@ exit 1
         self.assertIn("--model cursor-grok-4.6-high", small_command)
         self.assertIn("--resume chat-fake-0001", small_command)
         small_text = (self.root / "working" / small.name).read_text(encoding="utf-8")
-        self.assertIn("- 负责人: cursor\n- 会话: cursor chat-fake-0001\n", small_text)
+        self.assertIn("- 负责人: cursor\n- 会话: cursor chat-fake-0001\n- 窗口: tmux:$42:@9:%9\n", small_text)
 
         self.assertIn("规模=大任务\tAgent=codex", large_result.stdout)
         self.assertIn(str(fake_bin / "codex"), large_command)
         self.assertIn('model_reasoning_effort="high"', large_command)
         self.assertNotIn("resume", large_command)
         large_text = (self.root / "working" / large_id / "spec.md").read_text(encoding="utf-8")
-        self.assertIn("- 负责人: codex\n- 会话: codex\n", large_text)
+        self.assertIn("- 负责人: codex\n- 会话: codex\n- 窗口: tmux:$42:@9:%9\n", large_text)
 
     def test_start_agent_option_overrides_scale_selection(self) -> None:
         self.install_fake_launchers()
@@ -670,12 +892,17 @@ exit 1
     def test_start_fills_session_into_legacy_cards_without_the_field(self) -> None:
         self.install_fake_launchers()
         task_id, task = self.make_todo("legacy-session")
-        task.write_text(task.read_text(encoding="utf-8").replace("- 会话:\n", "", 1), encoding="utf-8")
+        task.write_text(
+            task.read_text(encoding="utf-8")
+            .replace("- 会话:\n", "", 1)
+            .replace("- 窗口:\n", "", 1),
+            encoding="utf-8",
+        )
 
         self.run_command("start", "--agent", "grok", task_id)
 
         text = (self.root / "working" / task.name).read_text(encoding="utf-8")
-        self.assertRegex(text, r"(?m)^- 负责人: grok\n- 会话: grok [0-9a-f-]{36}$")
+        self.assertRegex(text, r"(?m)^- 负责人: grok\n- 会话: grok [0-9a-f-]{36}\n- 窗口: tmux:\$42:@9:%9$")
 
     def test_start_cursor_create_chat_failure_does_not_claim(self) -> None:
         self.install_fake_launchers()
@@ -769,10 +996,14 @@ exit 1
         neither = self.run_command("resume", task_id, succeeds=False)
         both = self.run_command("resume", task_id, "--message", "x", "--message-file", "y", succeeds=False)
         empty = self.run_command("resume", task_id, "--message", "  ", succeeds=False)
+        bad_timeout = self.run_command("resume", task_id, "--message", "x", "--timeout", "nan", succeeds=False)
+        short_timeout = self.run_command("resume", task_id, "--message", "x", "--timeout", "60", succeeds=False)
 
         for result in (neither, both):
             self.assertIn("--message", result.stderr)
         self.assertIn("不得为空", empty.stderr)
+        self.assertIn("超时", bad_timeout.stderr)
+        self.assertIn("大于 60", short_timeout.stderr)
         self.assertTrue((self.root / "review" / task.name).exists())
 
     def test_resume_finds_the_codex_session_from_rollouts(self) -> None:
@@ -862,6 +1093,116 @@ exit 1
         self.assertFalse(working.exists())
         self.assertEqual(before, (self.root / "review" / task.name).read_text(encoding="utf-8"))
 
+    def test_resume_herdr_immediate_exit_reports_output_and_restores_review(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, review = self.make_herdr_review("resume-herdr-exit")
+        before = review.read_text(encoding="utf-8")
+        self.env["KANBAN_HERDR_STATUS"] = "done"
+        self.env["KANBAN_HERDR_OUTPUT"] = "thread already has an active writer (code -32600)"
+        args = argparse.Namespace(
+            task=task_id,
+            message="x",
+            message_file=None,
+            launcher="herdr",
+            timeout=61,
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 62.0)):
+                with mock.patch.object(kanban.time, "sleep"):
+                    with self.assertRaisesRegex(kanban.KanbanError, "active writer"):
+                        kanban.command_resume(args, self.root)
+
+        self.assertEqual(before, review.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / review.name).exists())
+        self.assertEqual(["tab", "close", "w1:t9"], self.herdr_arguments("close"))
+
+    def test_resume_console_immediate_exit_keeps_working_card_in_place(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-console-exit")
+        self.run_command("start", "--agent", "grok", task_id)
+        working = self.root / "working" / task.name
+        before = working.read_text(encoding="utf-8")
+        process = mock.Mock(returncode=17)
+        process.poll.return_value = 17
+        args = argparse.Namespace(
+            task=task_id,
+            message="x",
+            message_file=None,
+            launcher="console",
+            timeout=61,
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(
+                kanban,
+                "prepare_launch",
+                return_value=kanban.LaunchPlan("console", self.root.parent),
+            ):
+                with mock.patch.object(
+                    kanban,
+                    "launch_agent",
+                    return_value=kanban.LaunchOutcome(process=process),
+                ):
+                    with self.assertRaisesRegex(kanban.KanbanError, "exit 17"):
+                        kanban.command_resume(args, self.root)
+
+        self.assertEqual(before, working.read_text(encoding="utf-8"))
+
+    def test_resume_does_not_move_back_when_document_restore_fails(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("resume-restore-fail")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "resume-restore-fail")
+        self.run_command("move", task_id, "review")
+        args = argparse.Namespace(
+            task=task_id,
+            message="x",
+            message_file=None,
+            launcher="tmux",
+            timeout=61,
+        )
+
+        def mutate_then_fail(_plan, _outcome, _session, _timeout):
+            moved = self.root / "working" / task.name
+            moved.write_text(moved.read_text(encoding="utf-8") + "\nAgent mutation\n", encoding="utf-8")
+            raise kanban.KanbanError("liveness failed")
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "launch_agent", return_value=kanban.LaunchOutcome()):
+                with mock.patch.object(kanban, "validate_resumed_agent", side_effect=mutate_then_fail):
+                    with mock.patch.object(kanban, "cleanup_failed_resume"):
+                        with mock.patch.object(kanban, "write_text_atomic", side_effect=OSError("restore denied")):
+                            with self.assertRaisesRegex(kanban.KanbanError, "卡片保留在 working"):
+                                kanban.command_resume(args, self.root)
+
+        self.assertFalse((self.root / "review" / task.name).exists())
+        self.assertIn("Agent mutation", (self.root / "working" / task.name).read_text(encoding="utf-8"))
+
+    def test_resume_failure_output_ignores_terminal_capture_errors(self) -> None:
+        kanban = self.load_kanban_module()
+        failure = subprocess.CompletedProcess([], 1, "", "can't find pane")
+        cases = (
+            (
+                kanban.LaunchPlan("herdr", self.root.parent, herdr_bin="herdr"),
+                kanban.LaunchOutcome(pane="w1:p9"),
+                mock.patch.object(kanban, "herdr_capture", return_value=failure),
+            ),
+            (
+                kanban.LaunchPlan("tmux", self.root.parent, tmux="tmux", session="$42"),
+                kanban.LaunchOutcome(pane="%9"),
+                mock.patch.object(kanban, "tmux_capture", return_value=failure),
+            ),
+        )
+
+        for plan, outcome, capture in cases:
+            with self.subTest(launcher=plan.launcher):
+                with capture:
+                    self.assertEqual("", kanban.resumed_agent_failure_output(plan, outcome))
+
     def test_resume_of_a_working_card_does_not_move_it(self) -> None:
         self.install_fake_launchers()
         task_id, task = self.make_todo("resume-working")
@@ -914,6 +1255,722 @@ exit 1
         self.assertIn("--force", command)
         self.assertIn("QA finding: 修复空指针", command)
         self.assertTrue(working.exists())
+
+    def test_notify_delivers_private_payload_and_waits_for_herdr_ack(self) -> None:
+        task_id, review = self.make_herdr_review("notify-success")
+        before = review.read_text(encoding="utf-8")
+        source = self.root / "finding.md"
+        source.write_text("QA finding: 补齐空输入校验\n第二行含 `code`", encoding="utf-8")
+
+        result = self.run_command("notify", task_id, "--message-file", str(source), "--timeout", "61")
+
+        working = self.root / "working" / review.name
+        self.assertTrue(working.exists())
+        self.assertEqual(before, working.read_text(encoding="utf-8"))
+        self.assertIn("通道=herdr-direct", result.stdout)
+        self.assertIn("回执=已确认", result.stdout)
+        self.assertEqual(["pane", "get", "w1:p9"], self.herdr_arguments("get"))
+        sent = self.herdr_arguments("prompt")
+        self.assertEqual(["agent", "prompt", "w1:p9"], sent[:3])
+        self.assertEqual(4, len(sent))
+        self.assertTrue(sent[3].startswith("# onevoke-notify:"), sent[3])
+        self.assertNotIn("QA finding", sent[3])
+        self.assertFalse((self.root / "herdr.log.send").exists())
+        # pane run 只属于 start 拉起 Agent 的那一次; 直投再走它会把正文留在输入栏.
+        order = self.herdr_arguments("order")
+        self.assertEqual(1, order.count("pane run"))
+        self.assertEqual(1, order.count("agent prompt"))
+        self.assertLess(order.index("pane run"), order.index("agent prompt"))
+        self.assertNotIn("# onevoke-notify:", "\n".join(self.herdr_arguments("run")))
+        waited = self.herdr_arguments("wait")
+        self.assertEqual("recent", waited[waited.index("--source") + 1])
+        self.assertRegex(waited[waited.index("--match") + 1], r"^ONEVOKE-NOTIFY-ACK:")
+        match = re.search(r"消息文件=(\S+)", result.stdout)
+        self.assertIsNotNone(match, result.stdout)
+        message_path = Path(match.group(1))
+        self.assertEqual("QA finding: 补齐空输入校验\n第二行含 `code`\n", message_path.read_text(encoding="utf-8"))
+        self.assertEqual(0o600, stat.S_IMODE(message_path.stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(message_path.parent.stat().st_mode))
+        self.assertEqual(1, self.herdr_arguments("order").count("tab create"))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_notify_delivers_to_tmux_after_identity_probe_and_ack(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("notify-tmux")
+        self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        session_id = re.search(
+            r"(?m)^- 会话: claude (\S+)$", working.read_text(encoding="utf-8")
+        ).group(1)
+        self.assertEqual(
+            ["set-option", "-p", "-t", "%9", "@onevoke_session", session_id],
+            (self.root / "tmux.log.pane-setopt").read_text(encoding="utf-8").splitlines(),
+        )
+        self.set_branch(working, "notify-tmux")
+        self.run_command("move", task_id, "review")
+        self.env["KANBAN_TMUX_CURRENT_COMMAND"] = "claude"
+
+        result = self.run_command("notify", task_id, "--message", "tmux finding", "--timeout", "61")
+
+        self.assertIn("通道=tmux-direct", result.stdout)
+        self.assertIn("回执=已确认", result.stdout)
+        self.assertTrue((self.root / "working" / task.name).exists())
+        instruction = (self.root / "tmux.log.instruction").read_text(encoding="utf-8").strip()
+        self.assertTrue(instruction.startswith("# onevoke-notify:"), instruction)
+        self.assertNotIn("tmux finding", instruction)
+        send = (self.root / "tmux.log.send").read_text(encoding="utf-8")
+        self.assertIn("-l\n", send)
+        self.assertIn("Enter\n", send)
+        match = re.search(r"消息文件=(\S+)", result.stdout)
+        message_path = Path(match.group(1))
+        self.assertEqual("tmux finding\n", message_path.read_text(encoding="utf-8"))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_notify_tmux_identity_mismatch_and_missing_marker_use_fallback(self) -> None:
+        for slug, variable, value, expected in (
+            ("notify-tmux-mismatch", "KANBAN_TMUX_PANE_SESSION", "wrong-session", "tmux 会话不匹配"),
+            ("notify-tmux-missing", "KANBAN_TMUX_PANE_SESSION_MISSING", "1", "tmux pane 缺少会话标记"),
+        ):
+            with self.subTest(expected=expected):
+                self.install_fake_launchers()
+                task_id, task = self.make_todo(slug)
+                self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
+                review = self.root / "working" / task.name
+                self.set_branch(review, slug)
+                self.run_command("move", task_id, "review")
+                review = self.root / "review" / task.name
+                before = review.read_text(encoding="utf-8")
+                self.env[variable] = value
+                self.env["KANBAN_TMUX_RESPAWN_FAIL"] = "1"
+
+                result = self.run_command(
+                    "notify", task_id, "--message", "x", "--timeout", "61", succeeds=False
+                )
+
+                self.assertIn(expected, result.stderr)
+                self.assertIn("恢复=", result.stderr)
+                self.assertEqual(before, review.read_text(encoding="utf-8"))
+                self.env.pop(variable, None)
+                self.env.pop("KANBAN_TMUX_RESPAWN_FAIL", None)
+
+    def test_notify_tmux_ack_timeout_warns_without_resuming(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("notify-tmux-unconfirmed")
+        self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "notify-tmux-unconfirmed")
+        self.run_command("move", task_id, "review")
+        self.env["KANBAN_TMUX_CURRENT_COMMAND"] = "claude"
+        self.env["KANBAN_TMUX_CAPTURE_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61")
+
+        self.assertIn("通道=tmux-direct", result.stdout)
+        self.assertIn("回执=未确认", result.stdout)
+        self.assertIn("已投递, 未在超时内确认", result.stderr)
+        self.assertTrue((self.root / "working" / task.name).exists())
+        match = re.search(r"消息文件=(\S+)", result.stdout)
+        message_path = Path(match.group(1))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_notify_ack_timeout_warns_without_resuming_the_session(self) -> None:
+        task_id, review = self.make_herdr_review("notify-fallback")
+        self.env["KANBAN_HERDR_ACK_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "继续修复", "--timeout", "61")
+
+        self.assertIn("通道=herdr-direct", result.stdout)
+        self.assertIn("回执=未确认", result.stdout)
+        self.assertIn("已投递, 未在超时内确认", result.stderr)
+        self.assertTrue((self.root / "working" / review.name).exists())
+        prompted = self.herdr_arguments("prompt")
+        self.assertEqual(["agent", "prompt", "w1:p9"], prompted[:3])
+        self.assertEqual(4, len(prompted))
+        self.assertTrue(prompted[3].startswith("# onevoke-notify:"), prompted[3])
+        # 未确认不得再拉起第二个进程: resume 会把带 --resume 的 Agent 命令写进 run 日志.
+        self.assertNotIn("--resume", "\n".join(self.herdr_arguments("run")))
+        self.assertEqual(1, self.herdr_arguments("order").count("tab create"))
+        match = re.search(r"消息文件=(\S+)", result.stdout)
+        message_path = Path(match.group(1))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_notify_falls_back_to_resume_when_herdr_agent_prompt_fails(self) -> None:
+        task_id, review = self.make_herdr_review("notify-prompt-fail")
+        self.env["KANBAN_HERDR_PROMPT_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "继续修复", "--timeout", "61")
+
+        self.assertIn("通道=resume", result.stdout)
+        self.assertIn("herdr agent prompt 失败", result.stdout)
+        self.assertTrue((self.root / "working" / review.name).exists())
+        # 直投失败不得退回 pane run 重投: 那正是正文停在输入栏的路径.
+        self.assertNotIn("# onevoke-notify:", "\n".join(self.herdr_arguments("run")))
+
+    def test_notify_herdr_identity_rejections_are_reported_when_fallback_fails(self) -> None:
+        cases = (
+            ("notify-no-pane", "KANBAN_HERDR_GET_FAIL", "1", "pane 不存在"),
+            ("notify-agent", "KANBAN_HERDR_AGENT", "codex", "Agent 不匹配"),
+            ("notify-busy", "KANBAN_HERDR_STATUS", "running", "状态不可投递"),
+            ("notify-session", "KANBAN_HERDR_SESSION", "wrong-session", "会话不匹配"),
+        )
+        for slug, variable, value, expected in cases:
+            with self.subTest(expected=expected):
+                task_id, review = self.make_herdr_review(slug)
+                before = review.read_text(encoding="utf-8")
+                self.env[variable] = value
+                self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
+
+                result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61", succeeds=False)
+
+                self.assertIn(expected, result.stderr)
+                self.assertIn("恢复=", result.stderr)
+                self.assertEqual(before, review.read_text(encoding="utf-8"))
+                self.env.pop(variable, None)
+                self.env.pop("KANBAN_HERDR_RUN_FAIL", None)
+
+    def test_notify_tmux_rejects_dead_and_copy_mode_panes(self) -> None:
+        self.install_fake_launchers()
+        for slug, variable, expected in (
+            ("notify-dead", "KANBAN_TMUX_DEAD", "tmux pane 已退出"),
+            ("notify-copy", "KANBAN_TMUX_IN_MODE", "copy-mode"),
+        ):
+            with self.subTest(expected=expected):
+                task_id, task = self.make_todo(slug)
+                self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
+                review = self.root / "working" / task.name
+                self.set_branch(review, slug)
+                self.run_command("move", task_id, "review")
+                review = self.root / "review" / task.name
+                before = review.read_text(encoding="utf-8")
+                self.env["KANBAN_TMUX_CURRENT_COMMAND"] = "claude"
+                self.env[variable] = "1"
+                self.env["KANBAN_TMUX_FAIL"] = "1"
+
+                result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61", succeeds=False)
+
+                self.assertIn(expected, result.stderr)
+                self.assertEqual(before, review.read_text(encoding="utf-8"))
+                self.env.pop(variable, None)
+                self.env.pop("KANBAN_TMUX_FAIL", None)
+
+    def test_notify_fallback_immediate_exit_keeps_review_card_unchanged(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("notify-exit")
+        self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
+        review = self.root / "working" / task.name
+        self.set_branch(review, "notify-exit")
+        self.run_command("move", task_id, "review")
+        review = self.root / "review" / task.name
+        before = review.read_text(encoding="utf-8")
+        review.write_text(re.sub(r"(?m)^- 窗口:.*$", "- 窗口:", before, count=1), encoding="utf-8")
+        before = review.read_text(encoding="utf-8")
+        self.env["KANBAN_TMUX_RESPAWN_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61", succeeds=False)
+
+        self.assertIn("tmux 启动 Agent 失败", result.stderr)
+        self.assertEqual(before, review.read_text(encoding="utf-8"))
+        self.assertTrue((self.root / "tmux.log.kill").exists())
+
+    def test_notify_legacy_non_codex_card_discovers_and_persists_herdr_pane(self) -> None:
+        task_id, review = self.make_herdr_review("notify-legacy")
+        original = review.read_text(encoding="utf-8")
+        session_id = re.search(r"(?m)^- 会话: claude (\S+)$", original).group(1)
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*\n", "", original, count=1),
+            encoding="utf-8",
+        )
+        self.env["CODEX_HOME"] = str(self.root / "must-not-be-read")
+        self.env["KANBAN_HERDR_LIST_JSON"] = json.dumps({
+            "id": "cli:pane:list",
+            "result": {
+                "type": "pane_list",
+                "panes": [
+                    {
+                        "pane_id": "w1:p9",
+                        "tab_id": "w1:t9",
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "agent_session": {"source": "herdr:claude", "value": session_id},
+                    },
+                    {
+                        "pane_id": "w2:p8",
+                        "tab_id": "w2:t8",
+                        "agent": "codex",
+                        "agent_status": "idle",
+                        "agent_session": {"source": "herdr:codex", "value": session_id},
+                    },
+                ],
+            },
+        })
+
+        result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61")
+
+        self.assertIn("通道=herdr-direct", result.stdout)
+        working = self.root / "working" / review.name
+        self.assertIn("- 窗口: herdr:w1:t9:w1:p9\n", working.read_text(encoding="utf-8"))
+        self.assertEqual(["pane", "list"], self.herdr_arguments("list"))
+        match = re.search(r"消息文件=(\S+)", result.stdout)
+        message_path = Path(match.group(1))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_notify_herdr_discovery_rejects_zero_and_ambiguous_matches(self) -> None:
+        for slug, panes, expected in (
+            ("notify-discovery-zero", [], "反查无匹配"),
+            (
+                "notify-discovery-many",
+                [
+                    {"pane_id": "w1:p9", "tab_id": "w1:t9"},
+                    {"pane_id": "w2:p8", "tab_id": "w2:t8"},
+                ],
+                "匹配不唯一",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                task_id, review = self.make_herdr_review(slug)
+                text = review.read_text(encoding="utf-8")
+                session_id = re.search(r"(?m)^- 会话: claude (\S+)$", text).group(1)
+                review.write_text(re.sub(r"(?m)^- 窗口:.*\n", "", text, count=1), encoding="utf-8")
+                enriched = [
+                    {
+                        **pane,
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "agent_session": {"value": session_id},
+                    }
+                    for pane in panes
+                ]
+                self.env["KANBAN_HERDR_LIST_JSON"] = json.dumps(
+                    {"id": "cli:pane:list", "result": {"type": "pane_list", "panes": enriched}}
+                )
+                self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
+
+                result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61", succeeds=False)
+
+                self.assertIn(expected, result.stderr)
+                self.assertFalse((self.root / "herdr.log.send").exists())
+                self.assertNotIn("- 窗口:", review.read_text(encoding="utf-8"))
+                self.env.pop("KANBAN_HERDR_LIST_JSON", None)
+                self.env.pop("KANBAN_HERDR_RUN_FAIL", None)
+
+    def test_notify_discovered_window_is_rolled_back_when_delivery_and_resume_fail(self) -> None:
+        task_id, review = self.make_herdr_review("notify-discovery-rollback")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*\n", "", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
+        before = review.read_text(encoding="utf-8")
+        self.env["KANBAN_HERDR_PROMPT_FAIL"] = "1"
+        self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61", succeeds=False)
+
+        self.assertIn("herdr agent prompt 失败", result.stderr)
+        self.assertEqual(before, review.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / review.name).exists())
+
+    def test_notify_explicit_pane_override_still_validates_identity(self) -> None:
+        task_id, review = self.make_herdr_review("notify-pane")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
+
+        result = self.run_command("notify", task_id, "--message", "x", "--pane", "w1:p9", "--timeout", "61")
+
+        self.assertIn("通道=herdr-direct", result.stdout)
+        working = self.root / "working" / review.name
+        self.assertIn("- 窗口: herdr:w1:t9:w1:p9\n", working.read_text(encoding="utf-8"))
+        match = re.search(r"消息文件=(\S+)", result.stdout)
+        message_path = Path(match.group(1))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+        task_id, review = self.make_herdr_review("notify-pane-mismatch")
+        self.env["KANBAN_HERDR_AGENT"] = "codex"
+        self.env["KANBAN_HERDR_RUN_FAIL"] = "1"
+
+        result = self.run_command("notify", task_id, "--message", "x", "--pane", "w1:p9", "--timeout", "61", succeeds=False)
+
+        self.assertIn("Agent 不匹配", result.stderr)
+        self.assertTrue(review.exists())
+
+    def test_notify_tmux_legacy_card_without_window_uses_resume(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("notify-tmux-legacy")
+        self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
+        review = self.root / "working" / task.name
+        self.set_branch(review, "notify-tmux-legacy")
+        review.write_text(re.sub(r"(?m)^- 窗口:.*\n", "", review.read_text(encoding="utf-8"), count=1), encoding="utf-8")
+        self.run_command("move", task_id, "review")
+        self.env["KANBAN_TMUX_CURRENT_COMMAND"] = "claude"
+
+        result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61")
+
+        self.assertIn("通道=resume", result.stdout)
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_notify_legacy_codex_card_resolves_rollout_session(self) -> None:
+        self.install_fake_herdr()
+        task_id, task = self.make_todo("notify-codex-legacy")
+        self.run_command("start", "--launcher", "herdr", "--agent", "codex", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "notify-codex-legacy")
+        self.run_command("move", task_id, "review")
+        review = self.root / "review" / task.name
+        review.write_text(re.sub(r"(?m)^- 窗口:.*\n", "", review.read_text(encoding="utf-8"), count=1), encoding="utf-8")
+        codex_home = self.root / "codex-home"
+        sessions = codex_home / "sessions" / "2026" / "09" / "01"
+        sessions.mkdir(parents=True)
+        session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        rollout = sessions / "rollout-test.jsonl"
+        rollout.write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": session_id}}) + "\n"
+            + json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": f"执行 Kanban 任务 {task_id}."}}) + "\n",
+            encoding="utf-8",
+        )
+        self.env["CODEX_HOME"] = str(codex_home)
+        self.env["KANBAN_HERDR_AGENT"] = "codex"
+        self.env["KANBAN_HERDR_SESSION"] = session_id
+
+        result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61")
+
+        self.assertIn("通道=herdr-direct", result.stdout)
+        working = self.root / "working" / task.name
+        self.assertIn("- 窗口: herdr:w1:t9:w1:p9\n", working.read_text(encoding="utf-8"))
+        match = re.search(r"消息文件=(\S+)", result.stdout)
+        message_path = Path(match.group(1))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_notify_foreground_and_console_addresses_go_straight_to_resume(self) -> None:
+        kanban = self.load_kanban_module()
+        for launcher in ("foreground", "console"):
+            with self.subTest(launcher=launcher):
+                task_id, review = self.make_herdr_review(f"notify-{launcher}")
+                text = review.read_text(encoding="utf-8")
+                review.write_text(
+                    re.sub(r"(?m)^- 窗口:.*$", f"- 窗口: {launcher}", text, count=1),
+                    encoding="utf-8",
+                )
+                args = argparse.Namespace(
+                    task=task_id,
+                    message="x",
+                    message_file=None,
+                    timeout=61,
+                    pane=None,
+                )
+                with mock.patch.dict(os.environ, self.env, clear=True):
+                    with mock.patch.object(kanban.sys.stdout, "write"):
+                        with mock.patch.object(kanban.sys.stdout, "flush"):
+                            with mock.patch.object(kanban, "notify_via_resume") as resume:
+                                with mock.patch.object(kanban, "write_notify_message") as writer:
+                                    kanban.command_notify(args, self.root)
+
+                resume.assert_called_once()
+                writer.assert_not_called()
+                self.assertTrue((self.root / "working" / review.name).exists())
+
+    def test_notify_resume_rejects_done_herdr_agent_and_keeps_review(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, review = self.make_herdr_review("notify-resume-done")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
+        before = review.read_text(encoding="utf-8")
+        self.env["KANBAN_HERDR_STATUS"] = "done"
+        args = argparse.Namespace(task=task_id, message="x", message_file=None, timeout=61, pane=None)
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 62.0)):
+                with mock.patch.object(kanban.time, "sleep"):
+                    with self.assertRaisesRegex(kanban.KanbanError, "存活校验超时"):
+                        kanban.command_notify(args, self.root)
+
+        self.assertEqual(before, review.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / review.name).exists())
+
+    def test_notify_existing_done_herdr_pane_accepts_direct_delivery(self) -> None:
+        task_id, review = self.make_herdr_review("notify-existing-done")
+        self.env["KANBAN_HERDR_STATUS"] = "done"
+
+        result = self.run_command("notify", task_id, "--message", "x", "--timeout", "61")
+
+        self.assertIn("通道=herdr-direct", result.stdout)
+        self.assertTrue((self.root / "working" / review.name).exists())
+        message_path = Path(re.search(r"消息文件=(\S+)", result.stdout).group(1))
+        message_path.unlink()
+        message_path.parent.rmdir()
+
+    def test_process_resume_observes_the_full_liveness_budget(self) -> None:
+        kanban = self.load_kanban_module()
+        plan = kanban.LaunchPlan("console", self.root.parent)
+        session = kanban.AgentSession("codex", "session")
+
+        exits_late = mock.Mock(returncode=17)
+        exits_late.poll.side_effect = (None, 17)
+        with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 0.25)):
+            with mock.patch.object(kanban.time, "sleep"):
+                with self.assertRaisesRegex(kanban.KanbanError, "观察期内退出"):
+                    kanban.validate_resumed_agent(
+                        plan, kanban.LaunchOutcome(process=exits_late), session, 61
+                    )
+
+        survives = mock.Mock(returncode=None)
+        survives.poll.return_value = None
+        with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 61.0)):
+            with mock.patch.object(kanban.time, "sleep") as sleeper:
+                kanban.validate_resumed_agent(
+                    plan, kanban.LaunchOutcome(process=survives), session, 61
+                )
+        sleeper.assert_not_called()
+
+    def test_validate_resumed_agent_herdr_liveness_identity_policy(self) -> None:
+        kanban = self.load_kanban_module()
+        plan = kanban.LaunchPlan("herdr", self.root.parent, herdr_bin="herdr")
+        outcome = kanban.LaunchOutcome(tab="w1:t9", pane="w1:p9")
+        session = kanban.AgentSession("cursor", "expected-session")
+
+        absent_identities = (
+            {},
+            {"agent_session": None},
+            {"agent_session": "invalid"},
+            {"agent_session": {}},
+            {"agent_session": {"value": ""}},
+            {"agent_session": {"value": 42}},
+        )
+        for status in ("idle", "working", "blocked"):
+            for identity in absent_identities:
+                with self.subTest(case="absent identity", status=status, identity=identity):
+                    pane = {"agent": "cursor", "agent_status": status, **identity}
+                    with mock.patch.object(kanban, "herdr_pane_info", return_value=pane):
+                        with mock.patch.object(kanban.time, "monotonic", return_value=0.0):
+                            kanban.validate_resumed_agent(plan, outcome, session, 61)
+
+        for status in ("done", "unknown"):
+            with self.subTest(case="absent identity invalid status", status=status):
+                pane = {"agent": "cursor", "agent_status": status}
+                with mock.patch.object(kanban, "herdr_pane_info", return_value=pane):
+                    with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 62.0)):
+                        with self.assertRaisesRegex(kanban.KanbanError, "存活校验超时"):
+                            kanban.validate_resumed_agent(plan, outcome, session, 61)
+
+        matching = {
+            "agent": "cursor",
+            "agent_status": "idle",
+            "agent_session": {"value": "expected-session"},
+        }
+        with mock.patch.object(kanban, "herdr_pane_info", return_value=matching):
+            with mock.patch.object(kanban.time, "monotonic", return_value=0.0):
+                kanban.validate_resumed_agent(plan, outcome, session, 61)
+
+        rejected = (
+            ("session mismatch", {**matching, "agent_session": {"value": "other-session"}}),
+            ("agent mismatch", {**matching, "agent": "codex"}),
+        )
+        for case, pane in rejected:
+            with self.subTest(case=case):
+                with mock.patch.object(kanban, "herdr_pane_info", return_value=pane):
+                    with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 62.0)):
+                        with self.assertRaisesRegex(kanban.KanbanError, "存活校验超时"):
+                            kanban.validate_resumed_agent(plan, outcome, session, 61)
+
+    def test_failed_resume_cleanup_reports_herdr_and_tmux_failures(self) -> None:
+        kanban = self.load_kanban_module()
+        cases = (
+            (
+                kanban.LaunchPlan("herdr", self.root.parent, herdr_bin="herdr"),
+                kanban.LaunchOutcome(tab="w1:t9", pane="w1:p9"),
+                mock.patch.object(kanban, "herdr_close_tab", return_value="injected close failure"),
+            ),
+            (
+                kanban.LaunchPlan("tmux", self.root.parent, tmux="tmux", session="$42"),
+                kanban.LaunchOutcome(window="@9", pane="%9"),
+                mock.patch.object(kanban, "tmux_close_window", return_value="injected kill failure"),
+            ),
+        )
+        for plan, outcome, failure in cases:
+            with self.subTest(launcher=plan.launcher):
+                with failure:
+                    with self.assertRaisesRegex(kanban.KanbanError, "可能仍存活"):
+                        kanban.cleanup_failed_resume(plan, outcome)
+
+    def test_notify_via_resume_combines_liveness_and_cleanup_errors(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("notify-cleanup-combined")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        text = working.read_text(encoding="utf-8")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "validate_resumed_agent", side_effect=kanban.KanbanError("liveness failed")):
+                with mock.patch.object(kanban, "cleanup_failed_resume", side_effect=kanban.KanbanError("cleanup failed")):
+                    with self.assertRaisesRegex(kanban.KanbanError, "liveness failed; 清理=cleanup failed"):
+                        kanban.notify_via_resume(kanban.locate(kanban.load_board(self.root), task_id), text, "x", self.root, 61)
+
+    def test_tmux_notify_timeout_uses_injected_clock(self) -> None:
+        kanban = self.load_kanban_module()
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(kanban, "tmux_capture", return_value=ok):
+            with mock.patch.object(kanban.time, "monotonic", side_effect=(0.0, 62.0)):
+                with mock.patch.object(kanban.time, "sleep") as sleeper:
+                    confirmed, detail = kanban.tmux_direct_notify("tmux", "%9", "instruction", "marker", 61)
+        self.assertFalse(confirmed)
+        self.assertIn("回执超时", detail)
+        sleeper.assert_not_called()
+
+    def test_notify_message_cleanup_error_is_not_suppressed(self) -> None:
+        kanban = self.load_kanban_module()
+        path = mock.Mock()
+        path.unlink.side_effect = OSError("injected cleanup failure")
+        with self.assertRaisesRegex(OSError, "injected cleanup failure"):
+            kanban.remove_notify_message(path)
+
+    def test_notify_foreground_resume_rejects_an_immediate_exit(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, review = self.make_herdr_review("notify-foreground-exit")
+        text = review.read_text(encoding="utf-8")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", text, count=1),
+            encoding="utf-8",
+        )
+        before = review.read_text(encoding="utf-8")
+        self.write_onevoke_config("claude", "foreground")
+        self.env["KANBAN_AGENT_EXIT"] = "1"
+        args = argparse.Namespace(task=task_id, message="x", message_file=None, timeout=61, pane=None)
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban.sys.stdin, "isatty", return_value=True):
+                with mock.patch.object(kanban.sys.stdout, "isatty", return_value=True):
+                    with mock.patch.object(kanban.sys.stderr, "isatty", return_value=True):
+                        with self.assertRaisesRegex(kanban.KanbanError, "观察期内退出"):
+                            kanban.command_notify(args, self.root)
+
+        self.assertEqual(before, review.read_text(encoding="utf-8"))
+
+    def test_notify_foreground_stays_attached_until_a_late_agent_exit_on_pty(self) -> None:
+        fake_bin = self.install_fake_herdr()
+        task_id, review = self.make_herdr_review("notify-foreground-pty")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
+        self.write_onevoke_config("claude", "foreground")
+        claude = fake_bin / "claude"
+        claude.write_text("#!/bin/sh\n/bin/sleep 0.6\nexit 7\n", encoding="utf-8")
+        claude.chmod(0o755)
+        master, slave = pty.openpty()
+        started = time.monotonic()
+        process = subprocess.Popen(
+            [sys.executable, str(COMMAND), "notify", task_id, "--message", "x", "--timeout", "61"],
+            env=self.env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+        try:
+            returncode = process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+            self.fail("foreground notify did not observe the resumed Agent exit")
+        finally:
+            os.close(master)
+        self.assertNotEqual(0, returncode)
+        self.assertGreaterEqual(time.monotonic() - started, 0.5)
+        self.assertTrue(review.exists())
+        self.assertFalse((self.root / "working" / review.name).exists())
+
+    def test_notify_foreground_waits_after_migrating_the_card(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, review = self.make_herdr_review("notify-foreground-wait")
+        review.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", review.read_text(encoding="utf-8"), count=1),
+            encoding="utf-8",
+        )
+        process = mock.Mock()
+
+        def finish_after_migration():
+            self.assertTrue((self.root / "working" / review.name).exists())
+            return 0
+
+        process.wait.side_effect = finish_after_migration
+        launch = kanban.ResumeLaunch(
+            kanban.LaunchPlan("foreground", self.root.parent),
+            kanban.LaunchOutcome(process=process),
+        )
+        args = argparse.Namespace(task=task_id, message="x", message_file=None, timeout=61, pane=None)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "notify_via_resume", return_value=launch):
+                kanban.command_notify(args, self.root)
+
+        process.wait.assert_called_once_with()
+
+    def test_notify_requires_message_and_supported_state(self) -> None:
+        self.install_fake_herdr()
+        wrong_id, _wrong = self.make_todo("notify-wrong-state")
+        task_id, _task = self.make_todo("notify-args")
+        self.run_command("start", "--launcher", "herdr", task_id)
+
+        wrong_state = self.run_command("notify", wrong_id, "--message", "x", succeeds=False)
+        neither = self.run_command("notify", task_id, succeeds=False)
+        both = self.run_command("notify", task_id, "--message", "x", "--message-file", "y", succeeds=False)
+        empty = self.run_command("notify", task_id, "--message", "  ", succeeds=False)
+        bad_timeout = self.run_command("notify", task_id, "--message", "x", "--timeout", "nan", succeeds=False)
+        short_timeout = self.run_command("notify", task_id, "--message", "x", "--timeout", "60", succeeds=False)
+
+        self.assertIn("todo", wrong_state.stderr)
+        self.assertIn("--message", neither.stderr)
+        self.assertIn("--message", both.stderr)
+        self.assertIn("不得为空", empty.stderr)
+        self.assertIn("超时", bad_timeout.stderr)
+        self.assertIn("大于 60", short_timeout.stderr)
+
+    def test_tmux_persists_window_before_agent_can_mutate_card(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("tmux-order")
+        working = self.root / "working" / task.name
+        self.env["KANBAN_TMUX_MUTATE_CARD"] = str(working)
+
+        self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
+
+        text = working.read_text(encoding="utf-8")
+        self.assertIn("- 窗口: tmux:$42:@9:%9\n", text)
+        self.assertTrue(text.endswith("# agent mutation\n"))
+
+    def test_tmux_metadata_failure_closes_window_and_rolls_back_card(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("tmux-metadata-fail")
+        original = task.read_text(encoding="utf-8")
+        original_writer = kanban.write_text_atomic
+        calls = 0
+
+        def fail_metadata(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected metadata failure")
+            return original_writer(*args, **kwargs)
+
+        args = argparse.Namespace(task=task_id, agent="claude", launcher="tmux")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "write_text_atomic", side_effect=fail_metadata):
+                with self.assertRaisesRegex(OSError, "injected metadata failure"):
+                    kanban.command_start(args, self.root)
+
+        restored = self.root / "todo" / task.name
+        self.assertEqual(original, restored.read_text(encoding="utf-8"))
+        self.assertTrue((self.root / "tmux.log.kill").exists())
+        self.assertFalse((self.root / "tmux.log.command").exists())
 
     def load_kanban_module(self):
         import importlib.util
@@ -994,14 +2051,15 @@ exit 1
         self.assertEqual("$42:", tmux_args[tmux_args.index("-t") + 1])
         self.assertEqual(str(self.root.resolve().parent), tmux_args[tmux_args.index("-c") + 1])
         self.assertEqual("kb-任务-start-direct", tmux_args[tmux_args.index("-n") + 1])
-        self.assertIn(str(fake_bin / "codex"), tmux_args[-1])
-        self.assertIn("--model gpt-5.6-sol", tmux_args[-1])
-        self.assertIn('model_reasoning_effort="medium"', tmux_args[-1])
-        self.assertIn("--dangerously-bypass-approvals-and-sandbox", tmux_args[-1])
-        self.assertIn(task_id, tmux_args[-1])
-        self.assertIn("先运行 kanban rules", tmux_args[-1])
-        self.assertIn("遵守目标项目 AGENTS.md", tmux_args[-1])
-        self.assertNotIn(".onevoke/bin/kanban", tmux_args[-1])
+        command = self.last_launch_command()
+        self.assertIn(str(fake_bin / "codex"), command)
+        self.assertIn("--model gpt-5.6-sol", command)
+        self.assertIn('model_reasoning_effort="medium"', command)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn(task_id, command)
+        self.assertIn("先运行 kanban rules", command)
+        self.assertIn("遵守目标项目 AGENTS.md", command)
+        self.assertNotIn(".onevoke/bin/kanban", command)
 
     def test_start_window_name_folds_title_and_truncates(self) -> None:
         task_id, task = self.make_todo("window-name")
@@ -1042,7 +2100,7 @@ exit 1
         self.assertTrue(first.exists())
         self.assertTrue((self.root / "working" / second.name).exists())
         self.assertIn("Agent=claude", result.stdout)
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertIn("--model opus --effort medium", command)
         self.assertIn("--dangerously-skip-permissions", command)
 
@@ -1055,7 +2113,7 @@ exit 1
         self.assertIn("Agent=grok", result.stdout)
         started = self.root / "working" / task.name
         self.assertIn("- 负责人: grok\n", started.read_text(encoding="utf-8"))
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertIn(str(fake_bin / "grok"), command)
         self.assertNotIn("--model", command)
         self.assertIn("--effort high", command)
@@ -1074,7 +2132,7 @@ exit 1
 
         self.run_command("start", task_id)
 
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertIn("--model gpt-7", command)
         self.assertIn('model_reasoning_effort="low"', command)
         self.assertNotIn("gpt-5.6-sol", command)
@@ -1090,7 +2148,7 @@ exit 1
 
         self.run_command("start", task_id)
 
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertNotIn("--model", command)
         self.assertIn("--effort medium", command)
         self.assertIn("--dangerously-skip-permissions", command)
@@ -1103,7 +2161,7 @@ exit 1
         result = self.run_command("start", task_id)
 
         self.assertIn("Agent=grok", result.stdout)
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertIn(str(fake_bin / "grok"), command)
         self.assertIn("--permission-mode bypassPermissions", command)
 
@@ -1115,7 +2173,7 @@ exit 1
         result = self.run_command("start", task_id)
 
         self.assertIn("Agent=codex", result.stdout)
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertIn(str(fake_bin / "codex"), command)
 
     def test_foreground_launcher_rejects_a_noninteractive_terminal(self) -> None:
@@ -1233,7 +2291,7 @@ exit 1
         self.assertIn("Agent=cursor", result.stdout)
         started = self.root / "working" / task.name
         self.assertIn("- 负责人: cursor\n", started.read_text(encoding="utf-8"))
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertIn(str(fake_bin / "cursor-agent"), command)
         self.assertIn("--model cursor-grok-4.6-high", command)
         self.assertIn("--trust", command)
@@ -1252,7 +2310,7 @@ exit 1
 
         self.run_command("start", "--agent", "cursor", task_id)
 
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertIn("--model cursor-grok-4.6-xhigh", command)
         self.assertNotIn("cursor-grok-4.6-high", command)
         self.assertIn("--trust", command)
@@ -1281,7 +2339,7 @@ exit 1
 
         self.run_command("start", task_id)
 
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = self.last_launch_command()
         self.assertNotIn("--model", command)
         self.assertIn("--trust", command)
         self.assertIn("--force", command)
@@ -1302,7 +2360,7 @@ exit 1
 
             self.run_command("start", "--agent", agent, task_id)
 
-            command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+            command = self.last_launch_command()
             self.assertIn(expected, command)
 
     def test_start_failure_restores_todo_and_metadata(self) -> None:
@@ -1316,6 +2374,86 @@ exit 1
         self.assertIn("tmux new-window 失败", result.stderr)
         self.assertEqual(original, task.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / task.name).exists())
+
+    def test_tmux_pane_session_write_failure_closes_window_and_restores_todo(self) -> None:
+        task_id, task = self.make_todo("pane-session-rollback")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_launchers()
+        self.env["KANBAN_TMUX_PANE_SETOPT_FAIL"] = "1"
+
+        result = self.run_command(
+            "start", "--launcher", "tmux", "--agent", "claude", task_id, succeeds=False
+        )
+
+        self.assertIn("tmux 写入 pane 会话失败", result.stderr)
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+        self.assertEqual(
+            ["kill-window", "-t", "@9"],
+            (self.root / "tmux.log.kill").read_text(encoding="utf-8").splitlines(),
+        )
+
+    def test_tmux_start_records_the_resolved_codex_session(self) -> None:
+        task_id, _task = self.make_todo("pane-codex-session")
+        self.install_fake_launchers()
+
+        self.run_command("start", "--launcher", "tmux", "--agent", "codex", task_id)
+
+        self.assertEqual(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                "%9",
+                "@onevoke_session",
+                "fake-codex-session",
+            ],
+            (self.root / "tmux.log.pane-setopt").read_text(encoding="utf-8").splitlines(),
+        )
+
+    def test_tmux_codex_start_rejects_all_historical_sessions(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, _task = self.make_todo("pane-codex-history")
+        self.install_fake_launchers()
+        args = argparse.Namespace(task=task_id, launcher="tmux", agent="codex")
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(
+                kanban,
+                "codex_sessions_for_task",
+                side_effect=(
+                    ("old-a", "old-b"),
+                    ("old-b",),
+                    ("old-a", "old-b", "new-session"),
+                ),
+            ):
+                with mock.patch.object(kanban.time, "sleep"):
+                    kanban.command_start(args, self.root)
+
+        self.assertEqual(
+            "new-session",
+            (self.root / "tmux.log.pane-session").read_text(encoding="utf-8").strip(),
+        )
+
+    def test_tmux_codex_start_rejects_ambiguous_new_sessions(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, task = self.make_todo("pane-codex-ambiguous")
+        original = task.read_text(encoding="utf-8")
+        self.install_fake_launchers()
+        args = argparse.Namespace(task=task_id, launcher="tmux", agent="codex")
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(
+                kanban,
+                "codex_sessions_for_task",
+                side_effect=(("old-session",), ("old-session", "new-a", "new-b")),
+            ):
+                with self.assertRaisesRegex(kanban.KanbanError, "多个新 Codex 会话"):
+                    kanban.command_start(args, self.root)
+
+        self.assertEqual(original, task.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / task.name).exists())
+        self.assertTrue((self.root / "tmux.log.kill").exists())
 
     def test_start_outside_tmux_does_not_claim_task(self) -> None:
         task_id, task = self.make_todo("no-tmux")
@@ -1358,8 +2496,9 @@ exit 1
         self.assertEqual(session, arguments[arguments.index("-s") + 1])
         self.assertEqual(project, arguments[arguments.index("-c") + 1])
         self.assertEqual("kb-任务-session-create", arguments[arguments.index("-n") + 1])
-        self.assertIn(str(fake_bin / "codex"), arguments[-1])
-        self.assertIn(task_id, arguments[-1])
+        command = self.last_launch_command()
+        self.assertIn(str(fake_bin / "codex"), command)
+        self.assertIn(task_id, command)
         self.assertEqual(
             ["set-option", "-t", session, "@onevoke_project", project],
             (self.root / "tmux.log.setopt").read_text(encoding="utf-8").splitlines(),
@@ -1568,6 +2707,165 @@ exit 1
         self.assertIn(str(fake_bin / "codex"), run[3])
         self.assertIn(task_id, run[3])
         self.assertFalse((self.root / "herdr.log.close").exists())
+        working = self.root / "working" / task.name
+        self.assertTrue(working.exists())
+        self.assertIn("- 会话: codex\n- 窗口: herdr:w1:t9:w1:p9\n", working.read_text(encoding="utf-8"))
+
+    def test_herdr_launcher_reports_cursor_session_and_reads_it_back(self) -> None:
+        task_id, task = self.make_todo("herdr-report-cursor")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_AGENT"] = "cursor"
+        self.env["KANBAN_HERDR_SESSION"] = "chat-fake-0001"
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command(
+                "start", "--launcher", "herdr", "--agent", "cursor", task_id
+            )
+
+        self.assertNotIn("herdr 会话身份上报失败", result.stderr)
+        self.assertEqual(1, len(requests))
+        request = requests[0]
+        self.assertEqual("pane.report_agent_session", request["method"])
+        self.assertEqual({
+            "pane_id": "w1:p9",
+            "source": "herdr:cursor",
+            "agent": "cursor",
+            "agent_session_id": "chat-fake-0001",
+        }, {
+            key: request["params"][key]
+            for key in ("pane_id", "source", "agent", "agent_session_id")
+        })
+        self.assertIsInstance(request["params"]["seq"], int)
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_launcher_skips_session_report_without_reference(self) -> None:
+        task_id, _task = self.make_todo("herdr-report-codex")
+        self.install_fake_herdr()
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command("start", "--launcher", "herdr", task_id)
+
+        self.assertEqual([], requests)
+        self.assertNotIn("herdr 会话身份上报失败", result.stderr)
+
+    def test_herdr_session_report_socket_failure_only_warns(self) -> None:
+        task_id, task = self.make_todo("herdr-report-socket-fail")
+        self.install_fake_herdr()
+        self.env["HERDR_SOCKET_PATH"] = str(self.root / "missing-herdr.sock")
+
+        result = self.run_command(
+            "start", "--launcher", "herdr", "--agent", "cursor", task_id
+        )
+
+        self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
+        self.assertIn(f"已启动: {task_id}", result.stdout)
+        self.assertTrue((self.root / "working" / task.name).exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_herdr_session_report_non_ok_response_only_warns(self) -> None:
+        task_id, task = self.make_todo("herdr-report-response-fail")
+        self.install_fake_herdr()
+
+        with self.fake_herdr_socket(response_type="error") as requests:
+            result = self.run_command(
+                "start", "--launcher", "herdr", "--agent", "cursor", task_id
+            )
+
+        self.assertGreater(len(requests), 1)
+        self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
+        self.assertIn("响应不是 ok", result.stderr)
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_session_report_slow_fragments_respect_total_budget(self) -> None:
+        task_id, task = self.make_todo("herdr-report-slow-response")
+        self.install_fake_herdr()
+        started = time.monotonic()
+
+        with self.fake_herdr_socket(response_chunks=8, chunk_delay=0.20):
+            result = self.run_command(
+                "start", "--launcher", "herdr", "--agent", "cursor", task_id
+            )
+
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
+        self.assertTrue((self.root / "working" / task.name).exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_herdr_session_report_readback_mismatch_only_warns(self) -> None:
+        task_id, task = self.make_todo("herdr-report-mismatch")
+        self.install_fake_herdr()
+        self.env["KANBAN_HERDR_SESSION"] = "wrong-session"
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command(
+                "start", "--launcher", "herdr", "--agent", "cursor", task_id
+            )
+
+        self.assertGreater(len(requests), 1)
+        sequences = [request["params"]["seq"] for request in requests]
+        self.assertEqual(sequences, sorted(set(sequences)))
+        self.assertEqual(1, result.stderr.count("警告: herdr 会话身份上报失败"))
+        self.assertIn("读回不一致", result.stderr)
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_resume_uses_the_shared_session_report_path(self) -> None:
+        self.install_fake_herdr()
+        task_id, task = self.make_todo("herdr-report-resume")
+        self.run_command("start", "--launcher", "tmux", "--agent", "cursor", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "herdr-report-resume")
+        self.run_command("move", task_id, "review")
+        self.env["KANBAN_HERDR_AGENT"] = "cursor"
+        self.env["KANBAN_HERDR_SESSION"] = "chat-fake-0001"
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command(
+                "resume",
+                "--launcher",
+                "herdr",
+                "--timeout",
+                "61",
+                "--message",
+                "继续验证",
+                task_id,
+            )
+
+        self.assertIn(f"已唤醒: {task_id}", result.stdout)
+        self.assertEqual(1, len(requests))
+        self.assertEqual("chat-fake-0001", requests[0]["params"]["agent_session_id"])
+        self.assertTrue((self.root / "working" / task.name).exists())
+
+    def test_herdr_notify_fallback_uses_the_shared_session_report_path(self) -> None:
+        self.install_fake_herdr()
+        self.write_onevoke_config("cursor", "herdr")
+        task_id, task = self.make_todo("herdr-report-notify")
+        self.run_command("start", "--launcher", "tmux", "--agent", "cursor", task_id)
+        working = self.root / "working" / task.name
+        text = working.read_text(encoding="utf-8")
+        working.write_text(
+            re.sub(r"(?m)^- 窗口:.*$", "- 窗口: foreground", text),
+            encoding="utf-8",
+        )
+        self.set_branch(working, "herdr-report-notify")
+        self.run_command("move", task_id, "review")
+        self.env["KANBAN_HERDR_AGENT"] = "cursor"
+        self.env["KANBAN_HERDR_SESSION"] = "chat-fake-0001"
+
+        with self.fake_herdr_socket() as requests:
+            result = self.run_command(
+                "notify",
+                "--timeout",
+                "61",
+                "--message",
+                "继续验证",
+                task_id,
+            )
+
+        self.assertIn(f"已通知: {task_id}", result.stdout)
+        self.assertIn("通道=resume", result.stdout)
+        self.assertEqual(1, len(requests))
+        self.assertEqual("chat-fake-0001", requests[0]["params"]["agent_session_id"])
         self.assertTrue((self.root / "working" / task.name).exists())
 
     def test_herdr_launcher_reads_the_machine_config(self) -> None:
@@ -1858,6 +3156,18 @@ exit 1
         self.assertIn("# 任务 healthy", self.run_command("show", task_id).stdout)
         self.run_command("move", task_id, "working")
 
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_web_scan_warning_test")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                payload = kanban["web_board_payload"](self.root)
+                kanban["web_task_payload"](self.root, task_id)
+        finally:
+            sys.path.pop(0)
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual(task_id, payload["tasks"][0]["task_id"])
+
     def test_check_reports_invalid_entries_and_fails(self) -> None:
         (self.root / "backlog" / "notes.md").write_text("随手记", encoding="utf-8")
 
@@ -1874,6 +3184,97 @@ exit 1
         result = self.run_command("check")
 
         self.assertEqual("通过: 1 个任务\n", result.stdout)
+
+    def test_dependencies_parse_classify_and_expand_groups(self) -> None:
+        source_id, source = self.make_todo("dependency-source")
+        internal_id, internal = self.make_todo("dependency-internal")
+        external_id, external = self.make_todo("dependency-external")
+        group_first_id, group_first = self.make_todo("dependency-group-first")
+        group_second_id, group_second = self.make_todo("dependency-group-second")
+        source_group = "20260901-source-group"
+        expanded_group = "20260901-expanded-group"
+        for task in (source, internal):
+            self.set_task_group(task, source_group)
+        self.set_task_group(external, "20260901-external-group")
+        for task in (group_first, group_second):
+            self.set_task_group(task, expanded_group)
+        self.set_prerequisites(
+            source,
+            f"{internal_id}, {external_id}, {expanded_group}",
+        )
+        self.set_prerequisites(internal, "N/A")
+
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_dependencies")
+        finally:
+            sys.path.pop(0)
+        board = kanban["scan"](self.root)
+        dependencies = kanban["task_dependencies"](
+            board.entries[source_id], board
+        )
+
+        self.assertEqual(
+            (internal_id, external_id, expanded_group),
+            dependencies.prerequisite_ids,
+        )
+        self.assertEqual((internal_id,), dependencies.internal_tasks)
+        self.assertEqual((external_id,), dependencies.external_tasks)
+        self.assertEqual((expanded_group,), dependencies.task_groups)
+        self.assertEqual(
+            (internal_id, external_id, group_first_id, group_second_id),
+            dependencies.expanded_task_ids,
+        )
+        # 前置均未完成是正常中间态; 缺行旧卡和 N/A 也都按无依赖处理.
+        self.assertEqual("通过: 5 个任务\n", self.run_command("check").stdout)
+
+    def test_check_rejects_missing_prerequisite_and_invalid_syntax(self) -> None:
+        missing_id, missing = self.make_todo("dependency-missing")
+        invalid_id, invalid = self.make_todo("dependency-invalid")
+        task_group = "20260901-validation-group"
+        self.set_task_group(missing, task_group)
+        self.set_task_group(invalid, task_group)
+        self.set_prerequisites(missing, "20260901-does-not-exist-task")
+        self.set_prerequisites(invalid, "20260901-bad-task，N/A")
+
+        missing_result = self.run_command("check", missing_id, succeeds=False)
+        invalid_result = self.run_command("check", invalid_id, succeeds=False)
+
+        self.assertIn(missing_id, missing_result.stderr)
+        self.assertIn("20260901-does-not-exist-task", missing_result.stderr)
+        self.assertIn(invalid_id, invalid_result.stderr)
+        self.assertIn("前置任务语法非法", invalid_result.stderr)
+
+    def test_check_rejects_unfenced_prerequisite(self) -> None:
+        task_id, task = self.make_todo("dependency-unfenced")
+        self.set_task_group(task, "20260901-unfenced-group")
+        text = task.read_text(encoding="utf-8")
+        task.write_text(
+            text.replace(
+                "## 讨论与决策\n\n",
+                "## 讨论与决策\n\n前置任务: 20260901-other-task\n\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_command("check", task_id, succeeds=False)
+
+        self.assertIn(task_id, result.stderr)
+        self.assertIn("讨论与决策开头的代码块", result.stderr)
+
+    def test_check_detects_cross_group_dependency_cycle(self) -> None:
+        first_id, first = self.make_todo("dependency-cycle-first")
+        second_id, second = self.make_todo("dependency-cycle-second")
+        self.set_task_group(first, "20260901-cycle-first-group")
+        self.set_task_group(second, "20260901-cycle-second-group")
+        self.set_prerequisites(first, second_id)
+        self.set_prerequisites(second, first_id)
+
+        result = self.run_command("check", first_id, succeeds=False)
+
+        self.assertIn("依赖成环", result.stderr)
+        self.assertIn(f"{first_id} -> {second_id} -> {first_id}", result.stderr)
 
     def test_targeted_check_ignores_unrelated_invalid_entries(self) -> None:
         first_id, _ = self.make_todo("targeted-clean")
@@ -1940,6 +3341,78 @@ exit 1
         os.mkfifo(large / "spec.md")
         result = self.run_command("check", task_id, succeeds=False, timeout=5)
         self.assertIn("spec.md 不是普通文件", result.stderr)
+
+    def test_check_skips_done_and_archived_unless_all(self) -> None:
+        (self.root / "done" / "notes.md").write_text("旧笔记", encoding="utf-8")
+        (self.root / "archived" / "notes.md").write_text("归档笔记", encoding="utf-8")
+
+        result = self.run_command("check")
+        self.assertEqual("通过: 0 个任务\n", result.stdout)
+        self.assertEqual("", result.stderr)
+
+        full = self.run_command("check", "--all", succeeds=False)
+        self.assertEqual(1, full.returncode)
+        self.assertIn("notes.md", full.stderr)
+        self.assertIn("已检查: 0 个有效, 2 个无效", full.stdout)
+
+    def test_check_still_reports_trash_invalid_entries(self) -> None:
+        (self.root / "done" / "notes.md").write_text("旧笔记", encoding="utf-8")
+        (self.root / "trash" / "notes.md").write_text("垃圾笔记", encoding="utf-8")
+
+        result = self.run_command("check", succeeds=False)
+        self.assertIn(f"{os.sep}trash{os.sep}notes.md", result.stderr)
+        self.assertNotIn(f"{os.sep}done{os.sep}notes.md", result.stderr)
+
+    def test_check_ignores_done_prerequisite_errors_unless_all(self) -> None:
+        task_id, task = self.make_todo("old-done-prereq")
+        active_id, active = self.make_todo("active-done-prereq")
+        group = "20260901-old-done-group"
+        self.set_task_group(task, group)
+        self.set_task_group(active, group)
+        self.run_command("move", task_id, "working")
+        working = self.root / "working" / task.name
+        self.complete(working)
+        self.run_command("move", task_id, "done")
+        self.set_prerequisites(self.root / "done" / task.name, "20260901-bad-task，N/A")
+        self.set_prerequisites(active, task_id)
+
+        result = self.run_command("check")
+        self.assertEqual("通过: 1 个任务\n", result.stdout)
+        self.assertEqual("通过: 1 个任务\n", self.run_command("check", active_id).stdout)
+
+        targeted = self.run_command("check", task_id, succeeds=False)
+        self.assertIn("前置任务语法非法", targeted.stderr)
+
+        full = self.run_command("check", "--all", succeeds=False)
+        self.assertIn("前置任务语法非法", full.stderr)
+
+    def test_check_accepts_done_prerequisites_of_active_cards(self) -> None:
+        done_id, done_task = self.make_todo("done-prereq-target")
+        active_id, active = self.make_todo("active-with-done-prereq")
+        group = "20260901-done-prereq-group"
+        self.set_task_group(done_task, group)
+        self.set_task_group(active, group)
+        self.run_command("move", done_id, "working")
+        working = self.root / "working" / done_task.name
+        self.complete(working)
+        self.run_command("move", done_id, "done")
+        self.set_prerequisites(active, done_id)
+
+        result = self.run_command("check")
+        self.assertEqual("通过: 1 个任务\n", result.stdout)
+        self.assertEqual("通过: 1 个任务\n", self.run_command("check", active_id).stdout)
+
+    def test_check_reports_duplicate_id_across_done_and_active(self) -> None:
+        task_id, task = self.make_todo("dup-done")
+        self.run_command("move", task_id, "working")
+        working = self.root / "working" / task.name
+        self.complete(working)
+        self.run_command("move", task_id, "done")
+        duplicate = self.root / "working" / task.name
+        duplicate.write_bytes((self.root / "done" / task.name).read_bytes())
+
+        result = self.run_command("check", succeeds=False)
+        self.assertIn("重复任务 ID", result.stderr)
 
     def test_targeted_scan_retries_a_concurrent_forward_move(self) -> None:
         task_id, task = self.make_todo("target-race")
@@ -2052,9 +3525,199 @@ exit 1
             self.assertEqual("heartbeat", heartbeat["event"])
             self.assertEqual(changed["tasks"], heartbeat["tasks"])
             self.assertNotIn(unrelated_id, heartbeat["tasks"])
+            self.assertNotIn("watched", snapshot)
+            self.assertNotIn("watched", changed)
+            self.assertNotIn("watched", heartbeat)
         finally:
             process.terminate()
             process.communicate(timeout=5)
+
+    def test_subscribe_watches_external_task_changes_and_heartbeat(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-watch-events-group"
+        member_id, member = self.make_todo("watch-member")
+        external_id, external = self.make_todo("watch-external")
+        self.set_task_group(member, group_id)
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "subscribe",
+                group_id,
+                member_id,
+                "--watch",
+                external_id,
+                "--refresh",
+                "0.2",
+                "--heartbeat",
+                "0.6",
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            snapshot = self.read_process_json(process)
+            self.assertEqual(
+                {member_id: "todo", external_id: "todo"}, snapshot["tasks"]
+            )
+            self.assertEqual([external_id], snapshot["watched"])
+
+            external.rename(self.root / "working" / external.name)
+            changed = self.read_process_json(process)
+            self.assertEqual(
+                [{"from": "todo", "task_id": external_id, "to": "working"}],
+                changed["changed"],
+            )
+            self.assertEqual([external_id], changed["watched"])
+
+            heartbeat = self.read_process_json(process)
+            self.assertEqual("heartbeat", heartbeat["event"])
+            self.assertEqual(changed["tasks"], heartbeat["tasks"])
+            self.assertEqual([external_id], heartbeat["watched"])
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
+    def test_direct_watch_ignores_unrelated_invalid_document(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-watch-isolation-group"
+        member_id, member = self.make_todo("watch-isolation-member")
+        external_id, _ = self.make_todo("watch-isolation-external")
+        _, unrelated = self.make_todo("watch-isolation-invalid")
+        self.set_task_group(member, group_id)
+        unrelated.write_bytes(b"\xff")
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "subscribe",
+                group_id,
+                member_id,
+                "--watch",
+                external_id,
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            snapshot = self.read_process_json(process)
+            self.assertEqual(
+                {member_id: "todo", external_id: "todo"}, snapshot["tasks"]
+            )
+            self.assertEqual([external_id], snapshot["watched"])
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
+    def test_subscribe_expands_watched_task_group(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-watch-source-group"
+        watched_group = f"{datetime.now().strftime('%Y%m%d')}-watched-group"
+        member_id, member = self.make_todo("watch-group-member")
+        first_id, first = self.make_todo("watched-group-first")
+        second_id, second = self.make_todo("watched-group-second")
+        self.set_task_group(member, group_id)
+        self.set_task_group(first, watched_group)
+        self.set_task_group(second, watched_group)
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "subscribe",
+                group_id,
+                member_id,
+                "--watch",
+                watched_group,
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            snapshot = self.read_process_json(process)
+            self.assertEqual([first_id, second_id], snapshot["watched"])
+            self.assertEqual(
+                {member_id: "todo", first_id: "todo", second_id: "todo"},
+                snapshot["tasks"],
+            )
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
+    def test_group_watch_ignores_unrelated_invalid_document(self) -> None:
+        group_id = f"{datetime.now().strftime('%Y%m%d')}-group-isolation-group"
+        watched_group = f"{datetime.now().strftime('%Y%m%d')}-watched-isolation-group"
+        member_id, member = self.make_todo("group-isolation-member")
+        external_id, external = self.make_todo("group-isolation-external")
+        _, unrelated = self.make_todo("group-isolation-invalid")
+        self.set_task_group(member, group_id)
+        self.set_task_group(external, watched_group)
+        unrelated.write_bytes(b"\xff")
+
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(COMMAND),
+                "subscribe",
+                group_id,
+                member_id,
+                "--watch",
+                watched_group,
+            ],
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            snapshot = self.read_process_json(process)
+            self.assertEqual(
+                {member_id: "todo", external_id: "todo"}, snapshot["tasks"]
+            )
+            self.assertEqual([external_id], snapshot["watched"])
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
+    def test_subscribe_rejects_invalid_watched_targets(self) -> None:
+        date = datetime.now().strftime("%Y%m%d")
+        group_id = f"{date}-watch-reject-group"
+        member_id, member = self.make_todo("watch-reject-member")
+        self.set_task_group(member, group_id)
+
+        missing = self.run_command(
+            "subscribe",
+            group_id,
+            member_id,
+            "--watch",
+            f"{date}-missing-watch-task",
+            succeeds=False,
+        )
+        duplicate = self.run_command(
+            "subscribe",
+            group_id,
+            member_id,
+            "--watch",
+            member_id,
+            succeeds=False,
+        )
+        empty_group = self.run_command(
+            "subscribe",
+            group_id,
+            member_id,
+            "--watch",
+            f"{date}-empty-watch-group",
+            succeeds=False,
+        )
+
+        self.assertIn("任务不存在", missing.stderr)
+        self.assertIn("外部监控目标与成员任务重复", duplicate.stderr)
+        self.assertIn("外部监控任务组没有成员", empty_group.stderr)
 
     def test_subscribe_rejects_invalid_group_membership_and_duplicate_members(self) -> None:
         group_id = f"{datetime.now().strftime('%Y%m%d')}-events-group"
@@ -5693,8 +7356,16 @@ if [ "$1" = "display-message" ]; then
     printf '%s\\n' '$42'
     exit 0
 fi
+if [ "$1" = "respawn-pane" ]; then
+    printf '%s\\n' "$5" > "$KANBAN_TMUX_LOG.command"
+    exit 0
+fi
+if [ "$1" = "set-option" ] && [ "${2:-}" = "-p" ]; then
+    printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG.pane-setopt"
+    exit 0
+fi
 printf '%s\\n' "$@" > "$KANBAN_TMUX_LOG"
-printf '%s\\n' '@9'
+printf '%s\\t%s\\n' '@9' '%9'
 """,
             encoding="utf-8",
         )
@@ -5713,7 +7384,7 @@ printf '%s\\n' '@9'
         self.assertIn(f"已启动: {task_id}", result.stdout)
         self.assertIn("Agent=grok", result.stdout)
         self.assertTrue((board / "working" / f"{task_id}.md").is_file())
-        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        command = (self.root / "tmux.log.command").read_text(encoding="utf-8").rstrip("\n")
         self.assertIn(str(fake_bin / "grok"), command)
         self.assertIn(str(entry), command)
         self.assertIn(str(main / "AGENTS.md"), command)

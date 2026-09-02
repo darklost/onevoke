@@ -6,6 +6,11 @@
 未安装 memsearch 时 worktree 里没有该目录, 本脚本报告无事可做并以 0 退出,
 不创建任何目录, 集成流程可以无条件调用它.
 
+POSIX 合并成功后安全核验来源 `.memsearch/.watch.pid`; Linux 使用 pidfd 固定
+进程身份, 并在返回成功前终止监控该来源 memory 的 MemSearch watcher. 其他
+POSIX 平台遇到仍存活的 watcher 时 fail-closed. 无法确认进程身份或等待退出
+失败时拒绝成功, 让调用方保留 worktree; `--dry-run` 只报告而不发送信号.
+
 全程按字节处理. 记忆文件由 hook 自动追加, 历史数据可能含非法 UTF-8 序列;
 先解码再处理会丢字节或直接抛错, 因此切分, 归一化和哈希都在 bytes 上完成.
 新合并条目在写入前丢弃非法 UTF-8; 不对可能仍被追加的目标整文件 rewrite
@@ -21,6 +26,9 @@ import argparse
 import hashlib
 import os
 import re
+import select
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -71,6 +79,9 @@ SOURCE_MARKER = re.compile(rb"^<!-- merged-worktree-memory source:.* -->$")
 # 协议才能绝对消除, 本脚本只能 fail-closed 本进程可观测窗口; 见任务范围.
 SOURCE_STABLE_ATTEMPTS = 5
 SOURCE_STABLE_DELAY_SECONDS = 0.1
+WATCH_STOP_TIMEOUT_SECONDS = 5.0
+WATCH_STOP_POLL_SECONDS = 0.05
+WATCH_PID = re.compile(rb"[1-9][0-9]*")
 
 
 class SourceSnapshots(dict[Path, bytes]):
@@ -83,6 +94,52 @@ class SourceSnapshots(dict[Path, bytes]):
     ) -> None:
         super().__init__(values or {})
         self.identities = dict(identities or {})
+
+
+class MergeResult:
+    """把 watcher 停止动作绑定到本轮实际核验过的来源目录身份."""
+
+    __slots__ = ("stop_watcher", "source_identity")
+
+    def __init__(
+        self, stop_watcher: bool, source_identity: tuple[int, ...] | None
+    ) -> None:
+        self.stop_watcher = stop_watcher
+        self.source_identity = source_identity
+
+
+class ProcessSnapshot:
+    """来自同一个 `/proc/<pid>` 的可复核进程身份和启动状态."""
+
+    __slots__ = (
+        "state",
+        "start_time",
+        "process_group",
+        "executable_identity",
+        "args",
+    )
+
+    def __init__(
+        self,
+        state: str,
+        start_time: str,
+        process_group: int,
+        executable_identity: tuple[int, int] | None,
+        args: list[str],
+    ) -> None:
+        self.state = state
+        self.start_time = start_time
+        self.process_group = process_group
+        self.executable_identity = executable_identity
+        self.args = args
+
+    def same_identity(self, other: ProcessSnapshot) -> bool:
+        return (
+            self.start_time == other.start_time
+            and self.process_group == other.process_group
+            and self.executable_identity == other.executable_identity
+            and self.args == other.args
+        )
 
 
 def die(message: str) -> None:
@@ -346,35 +403,15 @@ def scan_dirty_files(directory: Path, target_root: Path | None = None) -> tuple[
 
 def source_memory_identity(source_memory: Path) -> tuple[int, ...]:
     """返回来源 memory 目录的 (dev, ino); 缺失/软链/非常规路径直接失败."""
-    if os.name == "nt":
-        source_root = source_memory.parent.parent
-        try:
-            return directory_identity_nofollow(source_root, source_memory)
-        except OSError as error:
-            die_both(
-                f"来源 memory 消失、不安全或不可读: {source_memory}: {error}",
-                f"source memory disappeared, is unsafe, or unreadable: "
-                f"{source_memory}: {error}",
-            )
-
-    if source_memory.is_symlink():
-        die_both(
-            f"来源 memory 不得为符号链接: {source_memory}",
-            f"source memory must not be a symlink: {source_memory}",
-        )
+    source_root = source_memory.parent.parent
     try:
-        info = source_memory.stat()
+        return directory_identity_nofollow(source_root, source_memory)
     except OSError as error:
         die_both(
-            f"来源 memory 消失或不可读: {source_memory}: {error}",
-            f"source memory disappeared or unreadable: {source_memory}: {error}",
+            f"来源 memory 消失、不安全或不可读: {source_memory}: {error}",
+            f"source memory disappeared, is unsafe, or unreadable: "
+            f"{source_memory}: {error}",
         )
-    if not source_memory.is_dir():
-        die_both(
-            f"来源 memory 不是目录: {source_memory}",
-            f"source memory is not a directory: {source_memory}",
-        )
-    return info.st_dev, info.st_ino
 
 
 def list_source_memory_files(source_memory: Path) -> list[Path]:
@@ -551,6 +588,488 @@ def assert_source_unchanged(
                 f"source memory changed after merge: {path.name}; "
                 "refusing success so the worktree is not cleaned",
             )
+
+
+def read_watch_pid(source_root: str) -> int | None:
+    pid_path = Path(source_root) / ".memsearch" / ".watch.pid"
+    data = read_regular_file_if_exists_nofollow(Path(source_root), pid_path)
+    if data is None:
+        return None
+    stripped = data.strip()
+    if not WATCH_PID.fullmatch(stripped):
+        die_both(
+            f"MemSearch watcher PID 文件无效: {pid_path}",
+            f"invalid MemSearch watcher PID file: {pid_path}",
+        )
+    pid = int(stripped)
+    if pid <= 1 or pid == os.getpid():
+        die_both(
+            f"MemSearch watcher PID 不安全: {pid}",
+            f"unsafe MemSearch watcher PID: {pid}",
+        )
+    return pid
+
+
+def linux_process_snapshot(pid: int) -> ProcessSnapshot | None:
+    process_dir = Path("/proc") / str(pid)
+    try:
+        owner = process_dir.stat().st_uid
+        stat_data = (process_dir / "stat").read_text(encoding="ascii")
+        command_data = (process_dir / "cmdline").read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        die_both(
+            f"无法核验 MemSearch watcher PID {pid}: {error}",
+            f"cannot verify MemSearch watcher PID {pid}: {error}",
+        )
+    if owner != os.geteuid():
+        die_both(
+            f"MemSearch watcher PID {pid} 不属于当前用户",
+            f"MemSearch watcher PID {pid} is not owned by the current user",
+        )
+    try:
+        stat_fields = stat_data.rsplit(")", 1)[1].split()
+        state = stat_fields[0]
+        process_group = int(stat_fields[2])
+        start_time = stat_fields[19]
+    except (IndexError, ValueError):
+        die_both(
+            f"无法解析 MemSearch watcher PID {pid} 的进程状态",
+            f"cannot parse process state for MemSearch watcher PID {pid}",
+        )
+    args = [os.fsdecode(part) for part in command_data.split(b"\0") if part]
+    executable_identity: tuple[int, int] | None = None
+    if not state.startswith("Z"):
+        try:
+            executable_info = os.stat(process_dir / "exe")
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            die_both(
+                f"无法核验 MemSearch watcher PID {pid} 的可执行文件: {error}",
+                f"cannot verify executable for MemSearch watcher PID {pid}: {error}",
+            )
+        executable_identity = executable_info.st_dev, executable_info.st_ino
+    return ProcessSnapshot(
+        state, start_time, process_group, executable_identity, args
+    )
+
+
+def process_snapshot(pid: int) -> ProcessSnapshot | None:
+    """读取 Linux 原生 argv；其他平台不得回落到会丢 argv 边界的 `ps`."""
+    if sys.platform.startswith("linux") and Path("/proc").is_dir():
+        return linux_process_snapshot(pid)
+    die_both(
+        "当前平台无法安全核验仍存活的 MemSearch watcher; 拒绝清理 worktree",
+        "this platform cannot safely verify a live MemSearch watcher; "
+        "refusing to clean the worktree",
+    )
+
+
+def portable_process_state(pid: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        die_both(
+            f"无法核验 MemSearch watcher PID {pid} 的状态: {error}",
+            f"cannot verify state for MemSearch watcher PID {pid}: {error}",
+        )
+    state = result.stdout.strip().split(None, 1)
+    if result.returncode == 0 and state:
+        return state[0]
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except OSError as error:
+        die_both(
+            f"无法核验 MemSearch watcher PID {pid}: {error}",
+            f"cannot verify MemSearch watcher PID {pid}: {error}",
+        )
+    die_both(
+        f"无法读取仍存活的 MemSearch watcher PID {pid} 的状态",
+        f"cannot read state for live MemSearch watcher PID {pid}",
+    )
+
+
+def watcher_invocation_arguments(
+    args: list[str],
+) -> tuple[str, str, str | None] | None:
+    """返回 (MemSearch 入口, memory, 解释器); 只接受固定启动形态."""
+    if len(args) >= 3 and Path(args[0]).name == "memsearch" and args[1] == "watch":
+        return args[0], args[2], None
+    interpreter = Path(args[0]).name if args else ""
+    if not re.fullmatch(r"(?:python|pypy)(?:[0-9.]+)?(?:\.exe)?", interpreter):
+        return None
+    if (
+        len(args) >= 4
+        and Path(args[1]).name == "memsearch"
+        and args[2] == "watch"
+    ):
+        return args[1], args[3], args[0]
+    return None
+
+
+def lexical_absolute_path(path: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+def process_path(path: str, pid: int, *, search_path: bool) -> str | None:
+    candidate = path
+    if os.path.isabs(candidate):
+        return candidate
+    if os.sep in candidate or (os.altsep is not None and os.altsep in candidate):
+        try:
+            return os.path.join(os.readlink(f"/proc/{pid}/cwd"), candidate)
+        except OSError:
+            return None
+    return shutil.which(candidate) if search_path else None
+
+
+def path_identity(path: str | None) -> tuple[int, int] | None:
+    if path is None:
+        return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def invocation_is_trusted_memsearch(
+    invocation: tuple[str, str, str | None],
+    snapshot: ProcessSnapshot,
+    pid: int,
+) -> bool:
+    executable, _watched, interpreter = invocation
+    trusted = shutil.which("memsearch")
+    if trusted is None:
+        return False
+    trusted_identity = path_identity(trusted)
+    candidate_identity = path_identity(
+        process_path(executable, pid, search_path=True)
+    )
+    if trusted_identity is None or candidate_identity != trusted_identity:
+        return False
+    if interpreter is None:
+        return snapshot.executable_identity == trusted_identity
+    interpreter_identity = path_identity(
+        process_path(interpreter, pid, search_path=True)
+    )
+    return (
+        interpreter_identity is not None
+        and snapshot.executable_identity == interpreter_identity
+    )
+
+
+def watcher_matches_memory(
+    snapshot: ProcessSnapshot, source_memory: Path, pid: int
+) -> bool:
+    invocation = watcher_invocation_arguments(snapshot.args)
+    if invocation is None:
+        return False
+    _executable, watched, _interpreter = invocation
+    if not invocation_is_trusted_memsearch(invocation, snapshot, pid):
+        return False
+    if not os.path.isabs(watched):
+        try:
+            watched = os.path.join(os.readlink(f"/proc/{pid}/cwd"), watched)
+        except OSError:
+            return False
+    # 不用 realpath: 来源路径若在合并后被换成软链，不能借此把另一 worktree
+    # 的 watcher 解释成合法目标。目录身份另由 assert_stop_source_identity 固定。
+    return lexical_absolute_path(watched) == lexical_absolute_path(str(source_memory))
+
+
+def assert_stop_source_identity(
+    source_memory: Path, expected_identity: tuple[int, ...] | None
+) -> None:
+    if expected_identity is None:
+        try:
+            exists = directory_exists_nofollow(
+                source_memory.parent.parent, source_memory
+            )
+        except OSError as error:
+            die_both(
+                f"合并后来源 memory 路径不安全或不可读: {source_memory}: {error}",
+                f"source memory path is unsafe or unreadable after merge: "
+                f"{source_memory}: {error}",
+            )
+        if exists:
+            die_both(
+                f"合并后来源 memory 路径出现: {source_memory}",
+                f"source memory path appeared after merge: {source_memory}",
+            )
+        return
+    current_identity = source_memory_identity(source_memory)
+    if current_identity != expected_identity:
+        die_both(
+            f"停止 watcher 前来源 memory 目录被替换: {source_memory}",
+            f"source memory directory was replaced before stopping watcher: {source_memory}",
+        )
+
+
+def linux_process_group_members(process_group: int) -> set[int]:
+    members: set[int] = set()
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError as error:
+        die_both(
+            f"无法核验 MemSearch watcher 进程组 {process_group}: {error}",
+            f"cannot verify MemSearch watcher process group {process_group}: {error}",
+        )
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_data = (entry / "stat").read_text(encoding="ascii")
+            fields = stat_data.rsplit(")", 1)[1].split()
+            state = fields[0]
+            member_group = int(fields[2])
+        except FileNotFoundError:
+            continue
+        except (IndexError, OSError, ValueError) as error:
+            die_both(
+                f"无法核验进程组 {process_group} 的成员 {entry.name}: {error}",
+                f"cannot verify member {entry.name} of process group {process_group}: {error}",
+            )
+        if member_group == process_group and not state.startswith("Z"):
+            members.add(int(entry.name))
+    return members
+
+
+def pidfd_has_exited(pidfd: int) -> bool:
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    return bool(poller.poll(0))
+
+
+def wait_for_stopped_watcher(
+    pid: int, pidfd: int, expected: ProcessSnapshot
+) -> ProcessSnapshot | None:
+    deadline = time.monotonic() + WATCH_STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if pidfd_has_exited(pidfd):
+            return None
+        current = process_snapshot(pid)
+        if current is None:
+            return None
+        if not expected.same_identity(current):
+            die_both(
+                f"暂停核验期间 PID {pid} 的身份发生变化",
+                f"PID {pid} changed identity while being suspended",
+            )
+        if current.state.startswith(("T", "t")):
+            return current
+        time.sleep(WATCH_STOP_POLL_SECONDS)
+    die_both(
+        f"MemSearch watcher PID {pid} 无法暂停以完成安全核验",
+        f"MemSearch watcher PID {pid} could not be suspended for safe verification",
+    )
+
+
+def wait_for_process_group_exit(process_group: int, pid: int) -> bool:
+    deadline = time.monotonic() + WATCH_STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if not linux_process_group_members(process_group):
+            print(
+                t(
+                    f"已停止 MemSearch watcher: pid={pid}",
+                    f"Stopped MemSearch watcher: pid={pid}",
+                )
+            )
+            return True
+        time.sleep(WATCH_STOP_POLL_SECONDS)
+    die_both(
+        f"MemSearch watcher 进程组 {process_group} 在 "
+        f"{WATCH_STOP_TIMEOUT_SECONDS:g} 秒内未退出",
+        f"MemSearch watcher process group {process_group} did not exit within "
+        f"{WATCH_STOP_TIMEOUT_SECONDS:g} seconds",
+    )
+
+
+def stop_memsearch_watcher(
+    source_root: str,
+    dry_run: bool,
+    expected_source_identity: tuple[int, ...] | None,
+) -> bool:
+    pid = read_watch_pid(source_root)
+    if pid is None:
+        return False
+    source_memory = Path(source_root) / ".memsearch" / "memory"
+    if not (
+        sys.platform.startswith("linux")
+        and Path("/proc").is_dir()
+        and hasattr(os, "pidfd_open")
+        and hasattr(signal, "pidfd_send_signal")
+    ):
+        state = portable_process_state(pid)
+        if state is None or state.startswith("Z"):
+            print(
+                t(
+                    f"MemSearch watcher 已停止: pid={pid}",
+                    f"MemSearch watcher already stopped: pid={pid}",
+                )
+            )
+            return True
+        die_both(
+            "当前平台缺少安全停止 watcher 所需的 pidfd; 拒绝清理 worktree",
+            "this platform lacks pidfd support required to stop the watcher safely; "
+            "refusing to clean the worktree",
+        )
+    try:
+        pidfd = os.pidfd_open(pid, 0)
+    except ProcessLookupError:
+        print(
+            t(
+                f"MemSearch watcher 已停止: pid={pid}",
+                f"MemSearch watcher already stopped: pid={pid}",
+            )
+        )
+        return True
+    except OSError as error:
+        die_both(
+            f"无法固定 MemSearch watcher PID {pid}: {error}",
+            f"cannot pin MemSearch watcher PID {pid}: {error}",
+        )
+    try:
+        return stop_memsearch_watcher_pidfd(
+            source_memory, pid, pidfd, dry_run, expected_source_identity
+        )
+    finally:
+        os.close(pidfd)
+
+
+def stop_memsearch_watcher_pidfd(
+    source_memory: Path,
+    pid: int,
+    pidfd: int,
+    dry_run: bool,
+    expected_source_identity: tuple[int, ...] | None,
+) -> bool:
+    snapshot = process_snapshot(pid)
+    if snapshot is None or snapshot.state.startswith("Z"):
+        print(
+            t(
+                f"MemSearch watcher 已停止: pid={pid}",
+                f"MemSearch watcher already stopped: pid={pid}",
+            )
+        )
+        return True
+    if not watcher_matches_memory(snapshot, source_memory, pid):
+        die_both(
+            f"PID {pid} 不是监控来源 memory 的 MemSearch watcher; 拒绝终止进程",
+            f"PID {pid} is not the MemSearch watcher for the source memory; refusing to terminate it",
+        )
+    assert_stop_source_identity(source_memory, expected_source_identity)
+    if dry_run:
+        print(
+            t(
+                f"将停止 MemSearch watcher: pid={pid}",
+                f"Would stop MemSearch watcher: pid={pid}",
+            )
+        )
+        return True
+
+    process_group = snapshot.process_group
+    independent_group = process_group == pid
+    suspended = False
+    try:
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGSTOP)
+        except ProcessLookupError:
+            stopped_snapshot = None
+        else:
+            # SIGSTOP 一旦送达就必须保证失败路径也 SIGCONT, 不能等暂停核验成功
+            # 后再标记; 否则 wait/die 会把当前用户进程永久留在 T 状态.
+            suspended = True
+            stopped_snapshot = wait_for_stopped_watcher(pid, pidfd, snapshot)
+        if stopped_snapshot is None:
+            if independent_group:
+                die_both(
+                    f"MemSearch watcher 组长 PID {pid} 在安全暂停前退出，"
+                    "无法证明原进程组已经清空；拒绝信号并保留 worktree",
+                    f"MemSearch watcher group leader PID {pid} exited before safe "
+                    "suspension, so the original process group cannot be proven empty; "
+                    "refusing to signal it and preserving the worktree",
+                )
+            print(
+                t(
+                    f"MemSearch watcher 已停止: pid={pid}",
+                    f"MemSearch watcher already stopped: pid={pid}",
+                )
+            )
+            return True
+        assert_stop_source_identity(source_memory, expected_source_identity)
+
+        if independent_group:
+            # 组 ID 来自 pidfd 固定的进程快照；即使组长在 SIGTERM 后消失，
+            # 也必须继续等已经识别出的组全部清空，不能把 ESRCH 当整组成功。
+            if linux_process_group_members(process_group):
+                try:
+                    os.killpg(process_group, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            if suspended:
+                try:
+                    signal.pidfd_send_signal(pidfd, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+                suspended = False
+        else:
+            assert stopped_snapshot is not None
+            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            suspended = False
+    except ProcessLookupError:
+        # 非独立组只负责 pidfd 固定的 watcher 本身；其已退出即完成。
+        suspended = False
+        print(
+            t(
+                f"MemSearch watcher 已停止: pid={pid}",
+                f"MemSearch watcher already stopped: pid={pid}",
+            )
+        )
+        return True
+    except OSError as error:
+        die_both(
+            f"无法停止 MemSearch watcher PID {pid}: {error}",
+            f"cannot stop MemSearch watcher PID {pid}: {error}",
+        )
+    finally:
+        if suspended:
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGCONT)
+            except OSError:
+                pass
+
+    if independent_group:
+        return wait_for_process_group_exit(process_group, pid)
+
+    deadline = time.monotonic() + WATCH_STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if pidfd_has_exited(pidfd):
+            print(
+                t(
+                    f"已停止 MemSearch watcher: pid={pid}",
+                    f"Stopped MemSearch watcher: pid={pid}",
+                )
+            )
+            return True
+        time.sleep(WATCH_STOP_POLL_SECONDS)
+    die_both(
+        f"MemSearch watcher PID {pid} 在 {WATCH_STOP_TIMEOUT_SECONDS:g} 秒内未退出",
+        f"MemSearch watcher PID {pid} did not exit within {WATCH_STOP_TIMEOUT_SECONDS:g} seconds",
+    )
 
 
 def git_output(directory: str, *args: str) -> str | None:
@@ -776,7 +1295,7 @@ def merge_files(
         assert_source_unchanged(source_memory, snapshots, source_identity)
 
 
-def merge(source_root: str, target_root: str, dry_run: bool) -> None:
+def merge(source_root: str, target_root: str, dry_run: bool) -> MergeResult:
     source_memory = Path(source_root) / ".memsearch" / "memory"
 
     # git 返回物理路径而 --target 可能是逻辑路径, 同一目录的两种写法要判等.
@@ -794,27 +1313,19 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
         roots_are_equal = os.path.realpath(source_root) == os.path.realpath(target_root)
     if roots_are_equal:
         print(t("来源即主 worktree; 无需合并 memory.", "Source is the main worktree; no memory merge needed."))
-        return
+        return MergeResult(False, None)
 
     # 源 worktree 没有 .memsearch/memory 时是正常空操作: 常见于未装 memsearch,
     # 或已装但本 worktree 尚未产生记忆. 不创建任何目录, 以 0 退出.
-    if os.name == "nt":
-        try:
-            source_memory_exists = directory_exists_nofollow(
-                Path(source_root), source_memory
-            )
-        except OSError as error:
-            die_both(
-                f"来源 memory 路径不安全或不可读: {source_memory}: {error}",
-                f"source memory path is unsafe or unreadable: {source_memory}: {error}",
-            )
-    else:
-        source_memory_exists = source_memory.is_dir() and not source_memory.is_symlink()
-        if source_memory.is_symlink():
-            die_both(
-                f"来源 memory 不得为符号链接: {source_memory}",
-                f"source memory must not be a symlink: {source_memory}",
-            )
+    try:
+        source_memory_exists = directory_exists_nofollow(
+            Path(source_root), source_memory
+        )
+    except OSError as error:
+        die_both(
+            f"来源 memory 路径不安全或不可读: {source_memory}: {error}",
+            f"source memory path is unsafe or unreadable: {source_memory}: {error}",
+        )
     if not source_memory_exists:
         print(
             t(
@@ -822,7 +1333,7 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
                 f"Nothing to merge: {source_memory} does not exist",
             )
         )
-        return
+        return MergeResult(True, None)
 
     source_identity = source_memory_identity(source_memory)
     # 目录已存在时即使当前为空也要做稳定快照: 避免 Stop hook 稍后才创建首个文件
@@ -837,7 +1348,7 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
                     f"Nothing to merge: no memory files in {source_memory}",
                 )
             )
-            return
+            return MergeResult(True, source_identity)
         assert_source_unchanged(source_memory, snapshots, source_identity)
         print(
             t(
@@ -845,13 +1356,13 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
                 f"Nothing to merge: no memory files in {source_memory}",
             )
         )
-        return
+        return MergeResult(True, source_identity)
 
     if dry_run:
         merge_files(
             source_root, target_root, source_memory, snapshots, True, source_identity
         )
-        return
+        return MergeResult(True, source_identity)
 
     state_dir = Path(target_root) / ".memsearch"
     if os.name == "nt":
@@ -877,10 +1388,11 @@ def merge(source_root: str, target_root: str, dry_run: bool) -> None:
                         f"Nothing to merge: no memory files in {source_memory}",
                     )
                 )
-                return
+                return MergeResult(True, source_identity)
             merge_files(
                 source_root, target_root, source_memory, snapshots, False, source_identity
             )
+    return MergeResult(True, source_identity)
 
 
 def main() -> int:
@@ -892,10 +1404,13 @@ def main() -> int:
     parser = LocalizedArgumentParser(
         description=t(
             "把任务 worktree 的 .memsearch/memory 条目并入主 worktree. "
-            "新条目写入前清理非法 UTF-8; 目标既有文件只扫描, 在仍可能被追加时不改写.",
+            "新条目写入前清理非法 UTF-8; 目标既有文件只扫描, 在仍可能被追加时不改写. "
+            "Linux 成功后用 pidfd 停止经核验的来源 MemSearch watcher.",
             "Merge .memsearch/memory entries from a task worktree into the "
             "main worktree. New entries are UTF-8 cleaned on write; existing target "
-            "files are scanned but not rewritten while they may still receive appends.",
+            "files are scanned but not rewritten while they may still receive appends. "
+            "On Linux, pidfd is used to stop a verified source MemSearch watcher "
+            "after success.",
         )
     )
     parser.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
@@ -915,7 +1430,15 @@ def main() -> int:
 
     source_root, target_root = resolve_roots(args)
     try:
-        merge(source_root, target_root, args.dry_run)
+        merge_result = merge(source_root, target_root, args.dry_run)
+        if merge_result.stop_watcher and os.name != "nt":
+            watcher_checked = stop_memsearch_watcher(
+                source_root, args.dry_run, merge_result.source_identity
+            )
+            # watcher 停止期间 Stop hook 仍可能完成最后一次追加。停止后重新走
+            # 同一套稳定快照、去重合并和最终复核，再允许调用方删除 worktree。
+            if watcher_checked and not args.dry_run:
+                merge(source_root, target_root, False)
     except OSError as error:
         die_both(
             f"安全文件操作失败: {error}",
