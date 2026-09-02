@@ -2399,13 +2399,13 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         prefix=f"onevoke-{entry.task_id}-start-",
     )
     prompt = task_file_instruction(f"执行 Kanban 任务 {entry.task_id}.", task_file)
-    moved = move_entry(entry, root, "working")
-    name = window_name(entry, original)
     model_entry = config["models"]["kanban"][agent_name]
     invocation = process_invocation(
         program,
         [*agent_arguments(agent_name, model_entry, entry.kind, session), prompt],
     )
+    moved = move_entry(entry, root, "working")
+    name = window_name(entry, original)
 
     def record_terminal_location(outcome: LaunchOutcome) -> None:
         if plan.launcher == "herdr":

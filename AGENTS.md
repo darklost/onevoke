@@ -70,7 +70,7 @@ py -3 tests\test-windows-web.py
 py -3 -m py_compile bin\onevoke bin\onevoke_config.py bin\onevoke_fs.py bin\onevoke_process.py bin\onevoke_review.py bin\kanban bin\kanban_web.py bin\merge-worktree-memory.py tests\test-onevoke-config.py tests\test-onevoke-process.py tests\test-install-windows.py tests\test-windows-automation.py tests\test-windows-console.py tests\test-windows-fs.py tests\test-windows-review.py tests\test-windows-web.py
 ```
 
-测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; 四个 POSIX 审核测试用假 Codex/Claude/Grok/Cursor 二进制驱动, `tests/test-windows-review.py` 仍用假 Codex/Claude/Grok 二进制驱动, 均不调用真的 CLI, 也不产生网络请求. Windows 专项测试只在原生 Windows 运行, 其他平台会 skip; POSIX 的 pty/tmux 专项测试不作为 Windows 第一阶段门禁.
+测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; 四个 POSIX 审核测试用假 Codex/Claude/Grok/Cursor 二进制驱动, `tests/test-windows-review.py` 也用假 Codex/Claude/Grok/Cursor 二进制驱动, 均不调用真的 CLI, 也不产生网络请求. Windows 专项测试只在原生 Windows 运行, 其他平台会 skip; POSIX 的 pty/tmux 专项测试不作为 Windows 第一阶段门禁.
 
 `install.sh` 和 `install.ps1` 都复制 `bin/` 和 `rules/` 下全部普通文件, 仅在对应规则根的 `AGENTS.md` 不存在时创建受支持的链接入口. 无参数全局安装最后运行 welcome; POSIX `--project` 只写目标项目 `.onevoke/` 与本地 exclude, 跳过 welcome 和全局路径. Windows 安装器安装到 `~/.local/bin`, 不自动修改 `PATH`, 由 `.cmd` 包装器统一启用 UTF-8 后进入 Python 实现. 手工试验时, POSIX 必须设置临时 `HOME`, Windows 必须设置临时 `USERPROFILE`; 两个平台还必须同时设置临时 `ONEVOKE_CONFIG` 和 `KANBAN_DIR`, 不得修改真实配置或看板.
 

@@ -195,6 +195,34 @@ class WindowsConsoleLauncherTest(unittest.TestCase):
         self.assertFalse(self.document.exists())
         self.assertTrue((self.root / "working" / self.document.name).is_file())
 
+    def test_batch_invocation_failure_does_not_claim_task(self) -> None:
+        popen = mock.Mock()
+        with (
+            mock.patch.object(self.kanban, "load_config", return_value=self.config),
+            mock.patch.object(
+                self.kanban,
+                "resolve_agent_program",
+                return_value=self.onevoke_process.AgentProgram(
+                    r"C:\fake\codex.cmd", batch=True
+                ),
+            ),
+            mock.patch.object(
+                self.kanban,
+                "process_invocation",
+                side_effect=FileNotFoundError("missing cmd.exe"),
+            ),
+            mock.patch.object(self.kanban.subprocess, "Popen", popen),
+        ):
+            with self.assertRaises(FileNotFoundError):
+                self.kanban.command_start(
+                    Namespace(task=self.task_id, agent=None, launcher=None), self.root
+                )
+
+        popen.assert_not_called()
+        self.assertTrue(self.document.is_file())
+        self.assertEqual(self.original, self.document.read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "working" / self.document.name).exists())
+
     def assert_tmux_launcher_rejected(self, launcher: str | None) -> None:
         popen = mock.Mock()
         which = mock.Mock(return_value=r"C:\fake\codex.exe")
