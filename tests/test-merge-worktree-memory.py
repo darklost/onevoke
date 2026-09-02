@@ -924,6 +924,42 @@ class MergeTest(unittest.TestCase):
 
         self.assertIsNone(watcher.poll())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pidfd lifecycle")
+    def test_failed_suspend_wait_sends_sigcont(self) -> None:
+        self.write_source("a.md", b"### 09:30\n- resume after failed suspend\n")
+        watcher = self.start_fake_watcher(self.source_memory)
+        source_identity = merger.source_memory_identity(self.source_memory)
+        sent: list[int] = []
+        real_send = signal.pidfd_send_signal
+
+        def tracking_send(pidfd: int, sig: int) -> None:
+            sent.append(sig)
+            return real_send(pidfd, sig)
+
+        with (
+            mock.patch.object(
+                merger.signal, "pidfd_send_signal", side_effect=tracking_send
+            ),
+            mock.patch.object(
+                merger,
+                "wait_for_stopped_watcher",
+                side_effect=lambda *args, **kwargs: merger.die_both(
+                    "暂停核验失败", "suspend verification failed"
+                ),
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            merger.stop_memsearch_watcher(str(self.source), False, source_identity)
+
+        self.assertIn(signal.SIGSTOP, sent)
+        self.assertIn(signal.SIGCONT, sent)
+        self.assertLess(sent.index(signal.SIGSTOP), sent.index(signal.SIGCONT))
+        self.assertIsNone(watcher.poll())
+        snapshot = merger.process_snapshot(watcher.pid)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertFalse(snapshot.state.startswith(("T", "t")))
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process ownership")
     def test_process_owned_by_another_uid_is_rejected(self) -> None:
         foreign = mock.Mock(st_uid=os.geteuid() + 1)

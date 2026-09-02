@@ -986,6 +986,9 @@ def stop_memsearch_watcher_pidfd(
         except ProcessLookupError:
             stopped_snapshot = None
         else:
+            # SIGSTOP 一旦送达就必须保证失败路径也 SIGCONT, 不能等暂停核验成功
+            # 后再标记; 否则 wait/die 会把当前用户进程永久留在 T 状态.
+            suspended = True
             stopped_snapshot = wait_for_stopped_watcher(pid, pidfd, snapshot)
         if stopped_snapshot is None:
             if independent_group:
@@ -1003,7 +1006,6 @@ def stop_memsearch_watcher_pidfd(
                 )
             )
             return True
-        suspended = True
         assert_stop_source_identity(source_memory, expected_source_identity)
 
         if independent_group:
