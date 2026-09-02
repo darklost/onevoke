@@ -2582,7 +2582,7 @@ def herdr_session_reference(pane: dict) -> str | None:
     return reference if isinstance(reference, str) and reference else None
 
 
-def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None:
+def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> dict:
     pane = herdr_pane_info(herdr, pane_id)
     actual_agent = pane.get("agent")
     if actual_agent != session.agent:
@@ -2603,6 +2603,7 @@ def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None
             f"会话不匹配: 卡片={session.reference}, pane={actual_session or 'N/A'}",
             f"Session mismatch: task={session.reference}, pane={actual_session or 'N/A'}",
         ))
+    return pane
 
 
 def herdr_reverse_lookup(herdr: str, session: AgentSession) -> tuple[str, str]:
@@ -2705,17 +2706,103 @@ def agent_exit_command(agent: str) -> str:
 
 def herdr_error_code(result: subprocess.CompletedProcess) -> Optional[str]:
     """读取 herdr 结构化错误码; 不把任意 CLI 失败误判为 pane 已消失."""
-    try:
-        payload = json.loads(result.stdout)
-    except (TypeError, json.JSONDecodeError):
-        return None
-    error = payload.get("error") if isinstance(payload, dict) else None
-    code = error.get("code") if isinstance(error, dict) else None
-    return code if isinstance(code, str) else None
+    for output in (result.stderr, result.stdout):
+        try:
+            payload = json.loads(output)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        error = payload.get("error") if isinstance(payload, dict) else None
+        code = error.get("code") if isinstance(error, dict) else None
+        if isinstance(code, str):
+            return code
+    return None
+
+
+def herdr_tab_panes(herdr: str, tab_id: str) -> list[str]:
+    result = herdr_capture(herdr, "pane", "list")
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"herdr pane list 失败: {herdr_failure_detail(result)}",
+            f"herdr pane list failed: {herdr_failure_detail(result)}",
+        ))
+    data = herdr_json_result(result, "pane list")
+    panes = data.get("panes")
+    if not isinstance(panes, list):
+        raise KanbanError(t("herdr pane list 响应缺少 panes", "herdr pane list response has no panes"))
+    return [
+        pane_id
+        for pane in panes
+        if isinstance(pane, dict)
+        and herdr_public_id(pane.get("tab_id")) == tab_id
+        and (pane_id := herdr_public_id(pane.get("pane_id")))
+    ]
+
+
+def validate_herdr_dismiss_container(
+    herdr: str, tab_id: str, pane_id: str, pane: dict
+) -> None:
+    actual_tab = herdr_public_id(pane.get("tab_id"))
+    if actual_tab != tab_id:
+        raise KanbanError(t(
+            f"herdr pane 所属 tab 不匹配: 卡片={tab_id}, pane={actual_tab or 'N/A'}",
+            f"Herdr pane tab mismatch: task={tab_id}, pane={actual_tab or 'N/A'}",
+        ))
+    panes = herdr_tab_panes(herdr, tab_id)
+    if panes != [pane_id]:
+        raise KanbanError(t(
+            f"herdr tab 不只包含目标 pane, 拒绝关闭: tab={tab_id}, panes={','.join(panes) or 'N/A'}",
+            f"The Herdr tab does not contain only the target pane; refusing to close it: tab={tab_id}, panes={','.join(panes) or 'N/A'}",
+        ))
+
+
+def validate_tmux_dismiss_container(
+    tmux: str,
+    pane_id: str,
+    launcher: str,
+    expected_session_id: str,
+    expected_window_id: str,
+) -> None:
+    result = tmux_capture(
+        tmux,
+        "display-message",
+        "-p",
+        "-t",
+        pane_id,
+        "#{session_id}\t#{session_name}\t#{window_id}\t#{window_panes}",
+    )
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"tmux pane 容器探查失败: {result.stderr.strip() or f'exit {result.returncode}'}",
+            f"Failed to probe the tmux pane container: {result.stderr.strip() or f'exit {result.returncode}'}",
+        ))
+    fields = result.stdout.strip().split("\t")
+    if len(fields) != 4:
+        raise KanbanError(t(
+            "tmux pane 容器探查响应无效",
+            "tmux pane container probe returned an invalid response",
+        ))
+    actual_session_id, actual_session_name, actual_window_id, pane_count = fields
+    actual_session = (
+        actual_session_id if launcher == "tmux" else actual_session_name
+    )
+    if actual_session != expected_session_id or actual_window_id != expected_window_id:
+        raise KanbanError(t(
+            f"tmux pane 所属容器不匹配: 卡片={expected_session_id}:{expected_window_id}, pane={actual_session or 'N/A'}:{actual_window_id or 'N/A'}",
+            f"Tmux pane container mismatch: task={expected_session_id}:{expected_window_id}, pane={actual_session or 'N/A'}:{actual_window_id or 'N/A'}",
+        ))
+    if pane_count != "1":
+        raise KanbanError(t(
+            f"tmux window 不只包含目标 pane, 拒绝关闭: window={expected_window_id}, pane-count={pane_count or 'N/A'}",
+            f"The tmux window does not contain only the target pane; refusing to close it: window={expected_window_id}, pane-count={pane_count or 'N/A'}",
+        ))
 
 
 def herdr_wait_agent_exit(
-    herdr: str, pane_id: str, session: AgentSession, timeout: float
+    herdr: str,
+    tab_id: str,
+    pane_id: str,
+    session: AgentSession,
+    timeout: float,
 ) -> bool:
     """等原 Agent 从 pane 消失, 并返回 pane 是否仍存在."""
     deadline = time.monotonic() + timeout
@@ -2735,6 +2822,12 @@ def herdr_wait_agent_exit(
         )
         if result.returncode != 0:
             if herdr_error_code(result) == "pane_not_found":
+                panes = herdr_tab_panes(herdr, tab_id)
+                if panes:
+                    raise KanbanError(t(
+                        f"目标 herdr pane 已消失但 tab 仍包含其他 pane, 拒绝关闭: tab={tab_id}, panes={','.join(panes)}",
+                        f"The target Herdr pane disappeared while its tab still contains other panes; refusing to close it: tab={tab_id}, panes={','.join(panes)}",
+                    ))
                 return False
             raise KanbanError(t(
                 f"等待 Agent 退出时探查 pane 失败: {herdr_failure_detail(result)}",
@@ -2744,8 +2837,15 @@ def herdr_wait_agent_exit(
         pane = data.get("pane")
         if not isinstance(pane, dict) or herdr_public_id(pane.get("pane_id")) != pane_id:
             raise KanbanError(t("herdr pane get 响应无效", "herdr pane get returned an invalid response"))
+        actual_tab = herdr_public_id(pane.get("tab_id"))
+        if actual_tab != tab_id:
+            raise KanbanError(t(
+                f"等待退出时 herdr pane 已移到其他 tab: 期望={tab_id}, 实际={actual_tab or 'N/A'}",
+                f"The Herdr pane moved to another tab while waiting for exit: expected={tab_id}, actual={actual_tab or 'N/A'}",
+            ))
         actual_agent = pane.get("agent")
         if not actual_agent:
+            validate_herdr_dismiss_container(herdr, tab_id, pane_id, pane)
             return True
         if actual_agent != session.agent:
             raise KanbanError(t(
@@ -2802,6 +2902,8 @@ def tmux_window_exists(tmux: str, window_id: str) -> bool:
 
 def tmux_wait_agent_exit(
     tmux: str,
+    launcher: str,
+    session_id: str,
     window_id: str,
     pane_id: str,
     session: AgentSession,
@@ -2837,6 +2939,9 @@ def tmux_wait_agent_exit(
             raise KanbanError(t("tmux pane 探查响应无效", "tmux pane probe returned an invalid response"))
         command, dead = fields
         if dead == "1":
+            validate_tmux_dismiss_container(
+                tmux, pane_id, launcher, session_id, window_id
+            )
             return tmux_window_exists(tmux, window_id)
         if dead != "0":
             raise KanbanError(t(
@@ -2857,6 +2962,9 @@ def tmux_wait_agent_exit(
                 f"等待退出时 tmux pane 会话已变更: 卡片={session.reference}, pane={actual_session or 'N/A'}",
                 f"The tmux pane session changed while waiting for exit: task={session.reference}, pane={actual_session or 'N/A'}",
             ))
+        validate_tmux_dismiss_container(
+            tmux, pane_id, launcher, session_id, window_id
+        )
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
@@ -2895,10 +3003,11 @@ def command_dismiss(args: argparse.Namespace, root: Path) -> None:
             tab_id, pane_id = herdr_match.groups()
         else:
             tab_id, pane_id = herdr_reverse_lookup(herdr, session)
-        herdr_notify_target(herdr, pane_id, session)
+        pane = herdr_notify_target(herdr, pane_id, session)
+        validate_herdr_dismiss_container(herdr, tab_id, pane_id, pane)
         herdr_agent_prompt(herdr, pane_id, command)
         pane_exists = herdr_wait_agent_exit(
-            herdr, pane_id, session, args.timeout
+            herdr, tab_id, pane_id, session, args.timeout
         )
         if pane_exists:
             close_error = herdr_close_tab(herdr, tab_id)
@@ -2907,14 +3016,17 @@ def command_dismiss(args: argparse.Namespace, root: Path) -> None:
         channel = "herdr"
         container = tab_id
     elif tmux_match:
-        launcher, _tmux_session, window_id, pane_id = tmux_match.groups()
+        launcher, tmux_session, window_id, pane_id = tmux_match.groups()
         tmux = shutil.which("tmux")
         if not tmux:
             raise KanbanError(t("tmux 不在 PATH", "tmux is not in PATH"))
         tmux_notify_target(tmux, pane_id, session)
+        validate_tmux_dismiss_container(
+            tmux, pane_id, launcher, tmux_session, window_id
+        )
         tmux_send_agent_exit(tmux, pane_id, command)
         window_exists = tmux_wait_agent_exit(
-            tmux, window_id, pane_id, session, args.timeout
+            tmux, launcher, tmux_session, window_id, pane_id, session, args.timeout
         )
         if window_exists:
             close_error = tmux_close_window(tmux, window_id)

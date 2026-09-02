@@ -202,6 +202,16 @@ if [ "$1" = "display-message" ]; then
         fi
         exit 0
     fi
+    if [ "${5:-}" = '#{session_id}\t#{session_name}\t#{window_id}\t#{window_panes}' ]; then
+        target_session="${KANBAN_TMUX_TARGET_SESSION:-}"
+        [ -n "$target_session" ] || target_session='$42'
+        printf '%s\t%s\t%s\t%s\n' \
+            "$target_session" \
+            "${KANBAN_TMUX_TARGET_SESSION_NAME:-fake-session}" \
+            "${KANBAN_TMUX_TARGET_WINDOW:-@9}" \
+            "${KANBAN_TMUX_WINDOW_PANES:-1}"
+        exit 0
+    fi
     if [ "${5:-}" = '#{window_id}' ]; then
         if [ "${KANBAN_TMUX_WINDOW_GONE:-}" = "1" ]; then
             printf '%s\\n' "can't find window: @9" >&2
@@ -408,7 +418,7 @@ if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
     fi
     if [ -f "$KANBAN_HERDR_LOG.dismiss-sent" ] && [ "${KANBAN_HERDR_DISMISS_STUCK:-}" != "1" ]; then
         if [ "${KANBAN_HERDR_DISMISS_PANE_GONE:-}" = "1" ]; then
-            printf '%s\n' '{"id":"cli:pane:get","error":{"code":"pane_not_found","message":"gone"}}'
+            printf '%s\n' '{"id":"cli:pane:get","error":{"code":"pane_not_found","message":"gone"}}' >&2
             exit 1
         fi
         if [ -n "${KANBAN_HERDR_DISMISS_REPLACED_AGENT:-}" ]; then
@@ -416,11 +426,12 @@ if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
                 "$3" "$KANBAN_HERDR_DISMISS_REPLACED_AGENT"
             exit 0
         fi
-        printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"w1:t9","agent_status":"unknown"}}}\n' "$3"
+        printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"%s","agent_status":"unknown"}}}\n' \
+            "$3" "${KANBAN_HERDR_TAB_ID:-w1:t9}"
         exit 0
     fi
-    printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"w1:t9","agent":"%s","agent_status":"%s","agent_session":{"value":"%s"}}}}\n' \
-        "$3" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_STATUS:-idle}" "${KANBAN_HERDR_SESSION:-}"
+    printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"%s","agent":"%s","agent_status":"%s","agent_session":{"value":"%s"}}}}\n' \
+        "$3" "${KANBAN_HERDR_TAB_ID:-w1:t9}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_STATUS:-idle}" "${KANBAN_HERDR_SESSION:-}"
     exit 0
 fi
 if [ "$1" = "pane" ] && [ "$2" = "read" ]; then
@@ -438,8 +449,12 @@ if [ "$1" = "pane" ] && [ "$2" = "list" ]; then
         printf '%s\n' "$KANBAN_HERDR_LIST_JSON"
         exit 0
     fi
-    printf '{"id":"cli:pane:list","result":{"type":"pane_list","panes":[{"pane_id":"w1:p9","tab_id":"w1:t9","agent":"%s","agent_status":"idle","agent_session":{"kind":"id","source":"herdr:%s","value":"%s"}}]}}\n' \
-        "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_SESSION:-}"
+    if [ -f "$KANBAN_HERDR_LOG.dismiss-sent" ] && [ "${KANBAN_HERDR_DISMISS_PANE_GONE:-}" = "1" ]; then
+        printf '%s\n' '{"id":"cli:pane:list","result":{"type":"pane_list","panes":[]}}'
+        exit 0
+    fi
+    printf '{"id":"cli:pane:list","result":{"type":"pane_list","panes":[{"pane_id":"w1:p9","tab_id":"%s","agent":"%s","agent_status":"idle","agent_session":{"kind":"id","source":"herdr:%s","value":"%s"}}]}}\n' \
+        "${KANBAN_HERDR_TAB_ID:-w1:t9}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_SESSION:-}"
     exit 0
 fi
 if [ "$1" = "tab" ] && [ "$2" = "close" ]; then
@@ -891,6 +906,13 @@ exit 1
                 self.env["KANBAN_HERDR_SESSION"] = session.group(1)
             else:
                 self.env["KANBAN_TMUX_PANE_SESSION"] = session.group(1)
+        if launcher == "tmux-session":
+            window = re.search(
+                r"(?m)^- 窗口: tmux-session:([^:]+):",
+                working.read_text(encoding="utf-8"),
+            )
+            assert window is not None
+            self.env["KANBAN_TMUX_TARGET_SESSION_NAME"] = window.group(1)
         if launcher == "herdr":
             self.env["KANBAN_HERDR_AGENT"] = agent
         else:
@@ -2070,6 +2092,63 @@ exit 1
         result = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
 
         self.assertIn("tmux 会话不匹配", result.stderr)
+        self.assertEqual(before, done.read_bytes())
+        self.assertFalse((self.root / "tmux.log.instruction").exists())
+        self.assertFalse((self.root / "tmux.log.kill").exists())
+
+    def test_dismiss_herdr_rejects_moved_pane_or_multi_pane_tab(self) -> None:
+        task_id, done = self.make_done("dismiss-herdr-container", agent="claude")
+        before = done.read_bytes()
+        self.env["KANBAN_HERDR_TAB_ID"] = "w1:t8"
+
+        moved = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("所属 tab 不匹配", moved.stderr)
+        self.env["KANBAN_HERDR_TAB_ID"] = "w1:t9"
+        session = self.env["KANBAN_HERDR_SESSION"]
+        self.env["KANBAN_HERDR_LIST_JSON"] = json.dumps({
+            "id": "cli:pane:list",
+            "result": {
+                "type": "pane_list",
+                "panes": [
+                    {
+                        "pane_id": pane_id,
+                        "tab_id": "w1:t9",
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "agent_session": {"value": session},
+                    }
+                    for pane_id in ("w1:p9", "w1:p10")
+                ],
+            },
+        })
+
+        multiple = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("不只包含目标 pane", multiple.stderr)
+        self.assertEqual(before, done.read_bytes())
+        self.assertFalse((self.root / "herdr.log.prompt").exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_dismiss_tmux_rejects_moved_pane_or_multi_pane_window(self) -> None:
+        task_id, done = self.make_done(
+            "dismiss-tmux-container", agent="claude", launcher="tmux"
+        )
+        before = done.read_bytes()
+        cases = (
+            ("KANBAN_TMUX_TARGET_SESSION", "$99", "所属容器不匹配"),
+            ("KANBAN_TMUX_TARGET_WINDOW", "@8", "所属容器不匹配"),
+            ("KANBAN_TMUX_WINDOW_PANES", "2", "不只包含目标 pane"),
+        )
+        for name, value, message in cases:
+            with self.subTest(name=name):
+                self.env[name] = value
+                result = self.run_command(
+                    "dismiss", task_id, "--timeout", "61", succeeds=False
+                )
+                self.assertIn(message, result.stderr)
+                self.env.pop(name)
+
         self.assertEqual(before, done.read_bytes())
         self.assertFalse((self.root / "tmux.log.instruction").exists())
         self.assertFalse((self.root / "tmux.log.kill").exists())
