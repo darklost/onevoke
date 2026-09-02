@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -112,6 +113,46 @@ class WindowsConsoleLauncherTest(unittest.TestCase):
             options["creationflags"],
         )
         self.assertEqual(r"C:\fake\codex.exe", arguments[0][0])
+
+    def test_notify_payload_is_private_at_creation(self) -> None:
+        path = self.kanban.write_notify_message("sensitive finding")
+        try:
+            self.assertEqual("sensitive finding\n", path.read_text(encoding="utf-8"))
+            for target in (path.parent, path):
+                acl = subprocess.run(
+                    ["icacls.exe", str(target)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                self.assertEqual(0, acl.returncode, acl.stderr)
+                self.assertNotIn("(I)", acl.stdout)
+                self.assertEqual(1, acl.stdout.count("(F)"), acl.stdout)
+        finally:
+            self.kanban.remove_notify_message(path)
+
+    def test_notify_payload_rejects_reparse_temporary_root(self) -> None:
+        actual = self.project / "actual-temp"
+        actual.mkdir()
+        junction = self.project / "junction-temp"
+        linked = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(actual)],
+            text=True,
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertEqual(0, linked.returncode, linked.stderr)
+        try:
+            with mock.patch.object(self.kanban, "notification_temp_root", return_value=junction):
+                with self.assertRaises(self.kanban.UnsafePathError):
+                    self.kanban.write_notify_message("sensitive finding")
+            self.assertEqual([], list(actual.iterdir()))
+        finally:
+            os.rmdir(junction)
 
     def test_console_creation_failure_restores_todo_and_document(self) -> None:
         popen = mock.Mock(side_effect=OSError("cannot create console"))

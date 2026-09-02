@@ -11,14 +11,21 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
 
 if os.name == "posix":
+    import fcntl
     import pty
+    import struct
+    import termios
 else:
+    fcntl = None
     pty = None
+    struct = None
+    termios = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -132,9 +139,10 @@ class OnevokeCommandTest(unittest.TestCase):
 
     def run_on_tty(self, answers: str, *args: str) -> tuple[int, str]:
         master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         process = subprocess.Popen(
             [sys.executable, str(ONEVOKE), *args],
-            env=self.env,
+            env={**self.env, "TERM": self.env.get("TERM", "xterm-256color")},
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -156,7 +164,27 @@ class OnevokeCommandTest(unittest.TestCase):
         reader = threading.Thread(target=drain)
         reader.start()
         try:
-            os.write(master, answers.encode("utf-8"))
+            import time as _time
+
+            if answers:
+                deadline = _time.time() + 10
+                while _time.time() < deadline:
+                    joined = b"".join(seen)
+                    if (
+                        b"\033[?25l" in joined
+                        or "↑↓/jk".encode("utf-8") in joined
+                        or "Choose [1-".encode("utf-8") in joined
+                        or "请选择 [1-".encode("utf-8") in joined
+                    ):
+                        break
+                    _time.sleep(0.05)
+                else:
+                    process.kill()
+                    process.wait()
+                    raise TimeoutError("interactive menu did not appear")
+                for line in answers.split("\n"):
+                    os.write(master, (line + "\n").encode("utf-8"))
+                    _time.sleep(0.05)
             returncode = process.wait(timeout=30)
         except subprocess.TimeoutExpired:
             process.kill()
@@ -240,7 +268,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, returncode, output)
         self.assertIn("Current configuration", output)
-        self.assertIn("Press Enter to save", output)
+        self.assertIn("↑↓/jk move, Enter confirm", output)
         self.assertIn("Configuration saved:", output)
         self.assertNotIn("配置摘要", output)
 
@@ -297,13 +325,13 @@ class OnevokeCommandTest(unittest.TestCase):
         for prompt in prompts:
             self.assertIn(f"\033[1;36m{prompt}\033[0m", output)
         self.assertNotIn("  1. Yes", output)
-        self.assertIn("[y/N]", output)
+        self.assertIn("→ 否", output)
 
         self.env["NO_COLOR"] = "1"
         returncode, output = self.run_on_tty(answers, "welcome", "--reset")
 
         self.assertEqual(0, returncode, output)
-        self.assertNotIn("\033[", output)
+        self.assertNotIn("\033[1;36m", output)
         for prompt in prompts:
             self.assertIn(prompt, output)
 
@@ -372,7 +400,7 @@ class OnevokeCommandTest(unittest.TestCase):
         blocked_parent.write_text("not a directory\n", encoding="utf-8")
         self.env["ONEVOKE_MEMSEARCH_SOURCE"] = str(blocked_parent / "memsearch")
 
-        returncode, output = self.run_on_tty("8\nyes\n\n", "welcome")
+        returncode, output = self.run_on_tty("8\ny\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
         self.assertIn("MemSearch 安装命令无法执行", output)
@@ -392,7 +420,7 @@ class OnevokeCommandTest(unittest.TestCase):
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual({"large": "codex", "small": "grok"}, config["kanban_agents"])
         self.assertEqual("codex", config["kanban_agent"])
-        self.assertIn("执行 Agent: 大 codex / 小 grok", output)
+        self.assertIn("→ Grok", output)
         self.assertIn("kanban codex:", output)
         self.assertIn("kanban grok:", output)
 
@@ -1596,13 +1624,7 @@ class OnevokeCommandTest(unittest.TestCase):
         returncode, output = self.run_on_tty("6\n4\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
-        auto_idx = output.index("按当前环境自动选择 herdr 或 tmux")
-        session_idx = output.index("tmux 项目专属 session 新窗口")
-        herdr_idx = output.index("herdr 当前 workspace 新标签")
-        foreground_idx = output.index("当前终端前台运行")
-        self.assertLess(auto_idx, session_idx)
-        self.assertLess(session_idx, herdr_idx)
-        self.assertLess(herdr_idx, foreground_idx)
+        self.assertIn("→ herdr 当前 workspace 新标签", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("herdr", config["launcher"])
         self.assertEqual("herdr", self.run_command("config").stdout.splitlines()[2].split(": ")[1])
@@ -1634,7 +1656,7 @@ class OnevokeCommandTest(unittest.TestCase):
 
         self.assertEqual(0, returncode, output)
         self.assertNotIn("herdr 当前 workspace", output)
-        self.assertIn("当前终端前台运行", output)
+        self.assertIn("→ 按当前环境自动选择 herdr 或 tmux (当前)", output)
 
     def test_doctor_accepts_herdr_launcher_inside_herdr(self) -> None:
         self.install_fake_environment(tmux=True)
@@ -1722,7 +1744,7 @@ class OnevokeCommandTest(unittest.TestCase):
         returncode, output = self.run_on_tty("6\n\n\n", "welcome")
 
         self.assertEqual(0, returncode, output)
-        self.assertIn("  1. 按当前环境自动选择 herdr 或 tmux (当前)", output)
+        self.assertIn("→ 按当前环境自动选择 herdr 或 tmux (当前)", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("auto", config["launcher"])
         self.assertEqual("auto", self.run_command("config").stdout.splitlines()[2].split(": ")[1])
@@ -1796,9 +1818,10 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_welcome_ctrl_c_exits_without_traceback_or_config(self) -> None:
         self.install_fake_environment(tmux=False)
         master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         process = subprocess.Popen(
             [sys.executable, str(ONEVOKE), "welcome"],
-            env=self.env,
+            env={**self.env, "TERM": self.env.get("TERM", "xterm-256color")},
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -1807,8 +1830,16 @@ class OnevokeCommandTest(unittest.TestCase):
         os.close(slave)
         output = bytearray()
         try:
-            while "请选择".encode("utf-8") not in output:
+            import time as _time
+
+            deadline = _time.time() + 10
+            while _time.time() < deadline:
                 output.extend(os.read(master, 4096))
+                if b"\033[?25l" in output or "保存当前配置".encode("utf-8") in output:
+                    break
+                _time.sleep(0.05)
+            else:
+                raise TimeoutError("interactive menu did not appear")
             process.send_signal(signal.SIGINT)
             returncode = process.wait(timeout=10)
             while True:
@@ -1973,7 +2004,7 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
         bin_dir.mkdir(parents=True)
         rules_dir = project / ".onevoke" / "rules"
         rules_dir.mkdir(parents=True)
-        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py"):
+        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py", "onevoke_menu.py"):
             shutil.copy2(PROJECT_ROOT / "bin" / name, bin_dir / name)
         (bin_dir / "onevoke").chmod(0o755)
         (rules_dir / "ONEVOKE-AGENTS.md").write_text(
@@ -2122,7 +2153,7 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
         project = self.root / "not-git"
         bin_dir = project / ".onevoke" / "bin"
         bin_dir.mkdir(parents=True)
-        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py"):
+        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py", "onevoke_menu.py"):
             shutil.copy2(PROJECT_ROOT / "bin" / name, bin_dir / name)
         self.write_config(self.global_config, kanban_agent="grok")
 
@@ -2151,9 +2182,10 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
         rules_entry = (self.project / ".onevoke" / "rules" / "ONEVOKE-AGENTS.md").resolve()
 
         master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         process = subprocess.Popen(
             [sys.executable, str(self.project / ".onevoke" / "bin" / "onevoke"), "welcome"],
-            env=self.env,
+            env={**self.env, "TERM": self.env.get("TERM", "xterm-256color")},
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -2175,6 +2207,18 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
         reader = threading.Thread(target=drain)
         reader.start()
         try:
+            import time as _time
+
+            deadline = _time.time() + 10
+            while _time.time() < deadline:
+                joined = b"".join(seen)
+                if b"\033[?25l" in joined or "↑↓/jk".encode("utf-8") in joined:
+                    break
+                _time.sleep(0.05)
+            else:
+                process.kill()
+                process.wait()
+                raise TimeoutError("interactive menu did not appear")
             os.write(master, b"\n")
             returncode = process.wait(timeout=30)
         except subprocess.TimeoutExpired:

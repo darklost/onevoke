@@ -892,7 +892,7 @@ class WindowsReviewGateTest(unittest.TestCase):
         unsafe_log = self.root / "unsafe-cmd.txt"
         copied_bin = self.root / "installed R&D" / "bin"
         copied_bin.mkdir(parents=True)
-        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py"):
+        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py", "onevoke_menu.py"):
             shutil.copy2(PROJECT_ROOT / "bin" / name, copied_bin / name)
         (copied_bin / "onevoke_review.py").write_text(
             "import json, os, sys\n"
