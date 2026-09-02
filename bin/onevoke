@@ -38,6 +38,12 @@ from onevoke_config import (
     resolve_language,
     save_config,
 )
+from onevoke_menu import (
+    MenuCancelled,
+    MenuEnded,
+    curses_menu_available,
+    select_index,
+)
 
 apply_language_argument(sys.argv[1:])
 bind_effective_language()
@@ -667,16 +673,49 @@ def validate_configured_resources(
     return healthy
 
 
+def _choice_labels(choices: list[tuple[str, str]], default: str) -> list[str]:
+    labels: list[str] = []
+    for value, label in choices:
+        suffix = t(" (当前)", " (current)") if value == default else ""
+        labels.append(f"{label}{suffix}")
+    return labels
+
+
+def _announce_choice(prompt: str, label: str) -> None:
+    print(f"\n{color('1;36', prompt)}", file=sys.stderr)
+    print(f"  → {label}", file=sys.stderr)
+
+
 def ask_choice(prompt: str, choices: list[tuple[str, str]], default: str | None = None) -> str:
     if not choices:
         raise OnevokeError(t(f"没有可选项: {prompt}", f"No choices available: {prompt}"))
     if default not in {value for value, _ in choices}:
         default = choices[0][0]
+    default_index = next(index for index, (value, _) in enumerate(choices) if value == default)
+    labels = _choice_labels(choices, default)
+    if curses_menu_available():
+        footer = t(
+            "↑↓/jk 移动, Enter 确认, 数字跳转",
+            "↑↓/jk move, Enter confirm, digits jump",
+        )
+        try:
+            index = select_index(
+                prompt,
+                labels,
+                default_index=default_index,
+                footer=footer,
+            )
+        except MenuEnded as error:
+            raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed")) from error
+        except RuntimeError:
+            pass
+        else:
+            _announce_choice(prompt, labels[index])
+            return choices[index][0]
     while True:
         print(f"\n{color('1;36', prompt)}", file=sys.stderr)
-        for index, (_, label) in enumerate(choices, 1):
-            suffix = t(" (当前)", " (current)") if choices[index - 1][0] == default else ""
-            print(f"  {index}. {label}{suffix}", file=sys.stderr)
+        for index, label in enumerate(labels, 1):
+            print(f"  {index}. {label}", file=sys.stderr)
         print(
             t(
                 f"请选择 [1-{len(choices)}], 直接回车保留当前值: ",
@@ -698,6 +737,41 @@ def ask_choice(prompt: str, choices: list[tuple[str, str]], default: str | None 
 
 
 def ask_yes_no(prompt: str, default: bool = False) -> bool:
+    choices = [
+        (True, t("是", "Yes")),
+        (False, t("否", "No")),
+    ]
+    if curses_menu_available():
+        labels = [label for _, label in choices]
+        default_index = 0 if default else 1
+        footer = t(
+            "↑↓/jk 移动, Enter 确认, y/n 快捷",
+            "↑↓/jk move, Enter confirm, y/n shortcut",
+        )
+
+        def on_key(key: str) -> int | None:
+            lowered = key.lower()
+            if lowered == "y":
+                return 0
+            if lowered == "n":
+                return 1
+            return None
+
+        try:
+            index = select_index(
+                prompt,
+                labels,
+                default_index=default_index,
+                footer=footer,
+                on_key=on_key,
+            )
+        except MenuEnded as error:
+            raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed")) from error
+        except RuntimeError:
+            pass
+        else:
+            _announce_choice(prompt, labels[index])
+            return choices[index][0]
     marker = "Y/n" if default else "y/N"
     while True:
         print(
@@ -895,30 +969,21 @@ def edit_models(config: dict[str, Any]) -> None:
             )
 
     while True:
-        print(f"\n{color('1;36', t('模型与推理档位', 'Models and reasoning efforts'))}", file=sys.stderr)
+        choices: list[tuple[str, str]] = []
         for index, (label, entry, field, _) in enumerate(fields, 1):
             value = entry[field] or t("(CLI 默认)", "(CLI default)")
-            print(f"  {index}. {label}: {value}", file=sys.stderr)
-        print(
-            t(
-                f"请选择要修改的项目 [1-{len(fields)}], 直接回车返回: ",
-                f"Choose an item to change [1-{len(fields)}], or press Enter to return: ",
-            ),
-            end="",
-            file=sys.stderr,
-            flush=True,
+            choices.append((str(index), f"{label}: {value}"))
+        choices.append(("done", t("返回", "Return")))
+        selected = ask_choice(
+            t("模型与推理档位", "Models and reasoning efforts"),
+            choices,
+            "done",
         )
-        answer = sys.stdin.readline()
-        if not answer:
-            raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed"))
-        answer = answer.strip()
-        if not answer:
+        if selected == "done":
             return
-        if answer.isdigit() and 1 <= int(answer) <= len(fields):
-            _, entry, field, prompt = fields[int(answer) - 1]
-            entry[field] = ask_text(prompt, entry[field])
-            return
-        print(t("输入无效, 请重新选择.", "Invalid input; choose again."), file=sys.stderr)
+        _, entry, field, prompt = fields[int(selected) - 1]
+        entry[field] = ask_text(prompt, entry[field])
+        return
 
 
 def install_memsearch_for(agent: str) -> None:
@@ -1080,39 +1145,97 @@ def edit_launcher(config: dict[str, Any]) -> None:
         config["launcher"] = selected
 
 
-def print_welcome_menu(config: dict[str, Any]) -> None:
-    print(f"\n{color('1;36', t('当前配置', 'Current configuration'))}", file=sys.stderr)
-    print(f"  1. {t('执行 Agent', 'Execution Agent')}: {format_kanban_agents_summary(config)}", file=sys.stderr)
-    for index, role in enumerate(REVIEW_ROLES, 2):
-        print(f"  {index}. {role} Reviewer: {config['reviewers'][role]}", file=sys.stderr)
-    print(f"  6. {t('启动方式', 'Launcher')}: {config['launcher']}", file=sys.stderr)
-    print(f"  7. {t('模型与推理档位', 'Models and reasoning efforts')}", file=sys.stderr)
+def welcome_menu_prompt(config: dict[str, Any]) -> str:
+    lines = [t("当前配置", "Current configuration")]
     for kanban_agent in execution_agents_in_use(config):
         kanban_entry = config["models"]["kanban"][kanban_agent]
-        print(
-            f"     kanban {kanban_agent}: {format_kanban_model_summary(kanban_agent, kanban_entry)}",
-            file=sys.stderr,
+        lines.append(
+            f"  kanban {kanban_agent}: {format_kanban_model_summary(kanban_agent, kanban_entry)}"
         )
     for reviewer in dict.fromkeys(config["reviewers"].values()):
         entry = config["models"]["review"][reviewer]
-        print(
-            f"     review {reviewer}: {format_review_model_summary(entry)}",
-            file=sys.stderr,
-        )
+        lines.append(f"  review {reviewer}: {format_review_model_summary(entry)}")
+    return "\n".join(lines)
+
+
+def welcome_menu_choices(config: dict[str, Any]) -> list[tuple[str, str]]:
+    """总览选项: 1-10 编辑项, 另附保存/取消."""
     memory = t("启用", "enabled") if config["memsearch"]["enabled"] else t("未启用", "disabled")
-    print(f"  8. MemSearch: {memory}", file=sys.stderr)
-    print(
-        f"  9. {t('审核环节', 'Review stages')}: {format_review_stages_summary(config['review_stages'])}",
-        file=sys.stderr,
+    choices: list[tuple[str, str]] = [
+        ("1", f"{t('执行 Agent', 'Execution Agent')}: {format_kanban_agents_summary(config)}"),
+    ]
+    for index, role in enumerate(REVIEW_ROLES, 2):
+        choices.append((str(index), f"{role} Reviewer: {config['reviewers'][role]}"))
+    choices.extend(
+        (
+            ("6", f"{t('启动方式', 'Launcher')}: {config['launcher']}"),
+            ("7", t("模型与推理档位", "Models and reasoning efforts")),
+            ("8", f"MemSearch: {memory}"),
+            (
+                "9",
+                f"{t('审核环节', 'Review stages')}: {format_review_stages_summary(config['review_stages'])}",
+            ),
+            (
+                "10",
+                f"{t('默认语言', 'Default language')}: {format_language_summary(config['language'])}",
+            ),
+            ("save", t("保存当前配置", "Save current configuration")),
+            ("cancel", t("退出且不保存", "Quit without saving")),
+        )
     )
-    print(
-        f"  10. {t('默认语言', 'Default language')}: {format_language_summary(config['language'])}",
-        file=sys.stderr,
-    )
+    return choices
+
+
+def print_welcome_menu(config: dict[str, Any]) -> None:
+    print(f"\n{color('1;36', t('当前配置', 'Current configuration'))}", file=sys.stderr)
+    for value, label in welcome_menu_choices(config):
+        if value in {"save", "cancel"}:
+            continue
+        print(f"  {value}. {label}", file=sys.stderr)
+        if value == "7":
+            for kanban_agent in execution_agents_in_use(config):
+                kanban_entry = config["models"]["kanban"][kanban_agent]
+                print(
+                    f"     kanban {kanban_agent}: {format_kanban_model_summary(kanban_agent, kanban_entry)}",
+                    file=sys.stderr,
+                )
+            for reviewer in dict.fromkeys(config["reviewers"].values()):
+                entry = config["models"]["review"][reviewer]
+                print(
+                    f"     review {reviewer}: {format_review_model_summary(entry)}",
+                    file=sys.stderr,
+                )
     print(t("  直接回车保存当前配置; 输入 q 退出且不保存.", "  Press Enter to save; enter q to quit without saving."), file=sys.stderr)
 
 
 def ask_welcome_action(config: dict[str, Any]) -> str:
+    choices = welcome_menu_choices(config)
+    prompt = welcome_menu_prompt(config)
+    save_index = next(index for index, (value, _) in enumerate(choices) if value == "save")
+    if curses_menu_available():
+        labels = [label for _, label in choices]
+        footer = t(
+            "↑↓/jk 移动, Enter 确认, 数字跳转, q 取消",
+            "↑↓/jk move, Enter confirm, digits jump, q cancel",
+        )
+        try:
+            index = select_index(
+                prompt,
+                labels,
+                default_index=save_index,
+                footer=footer,
+                allow_cancel=True,
+            )
+        except MenuCancelled:
+            return "cancel"
+        except MenuEnded as error:
+            raise OnevokeError(t("输入已结束, 配置未更改", "Input ended; configuration was not changed")) from error
+        except RuntimeError:
+            pass
+        else:
+            selected = choices[index][0]
+            _announce_choice(t("当前配置", "Current configuration"), labels[index])
+            return selected
     while True:
         print_welcome_menu(config)
         print(
