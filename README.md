@@ -24,7 +24,7 @@ POSIX:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Windows 安装器把命令装到 `~/.local/bin`, 规则装到 `~/.agents`, 但不会修改用户 `PATH`. 请把 `~/.local/bin` (通常是 `%USERPROFILE%\.local\bin`) 加入 `PATH` 并重新打开终端; `onevoke`, `kanban`, 审核和记忆合并分别提供对应的 `.cmd` 交互入口. 安装器和这些入口都会实际验证 Python 3: `py -3` 存在但不可用时继续尝试 `python.exe`. Windows 批处理无法为任意参数提供无损 argv 边界: 自动化若要传 `&|<>^%!`, 引号或结尾反斜杠等数据, 必须用进程 API 的 argv 数组直接调用当前 Python 和安装目录里的 Python 入口, 例如 Python 调用方使用 `subprocess.run([sys.executable, str(Path.home() / ".local/bin/onevoke"), ...])`; 不得再经过 `.cmd` 或 PowerShell/cmd 命令字符串.
+Windows 安装器把命令装到 `~/.local/bin`, 规则装到 `~/.agents`, 但不会修改用户 `PATH`. 请把 `~/.local/bin` (通常是 `%USERPROFILE%\.local\bin`) 加入 `PATH` 并重新打开终端; `onevoke`, `kanban`, 审核和记忆合并分别提供对应的 `.cmd` 交互入口. 安装器和这些入口都会实际验证 Python 3: `py -3` 存在但不可用时继续尝试 `python.exe`, 再尝试 `python3.exe`. 0 字节的 WindowsApps 商店重定向别名会被跳过, 不会弹出商店; 已安装的商店版 Python 从其 AppX 安装目录解析. Windows 批处理无法为任意参数提供无损 argv 边界: 自动化若要传 `&|<>^%!`, 引号或结尾反斜杠等数据, 必须用进程 API 的 argv 数组直接调用当前 Python 和安装目录里的 Python 入口, 例如 Python 调用方使用 `subprocess.run([sys.executable, str(Path.home() / ".local/bin/onevoke"), ...])`; 不得再经过 `.cmd` 或 PowerShell/cmd 命令字符串.
 
 安装过程会显示当前配置菜单, 可按需修改默认 Agent、各角色 Reviewer、启动方式、模型与推理档位、MemSearch 或审核环节; 直接回车保存当前值, 输入 `q` 退出且不保存.
 审核在 POSIX 通过 `onevoke-review.sh`, Windows 人工显式调用可通过 `onevoke-review.cmd`; `onevoke review` 在 Windows 内部直接进入同目录的 `onevoke_review.py`, 避免批处理重解析任务文本. 这些路径共享唯一门禁实现; 新增 Reviewer 时扩展该实现, 不新增按 Agent 命名的脚本. 原生 Windows 上 Codex, Claude, Grok 与 Cursor CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` Agent 不会被 welcome、doctor、看板启动或审核执行.

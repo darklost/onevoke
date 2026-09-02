@@ -16,7 +16,7 @@ if exist "%SystemRoot%\py.exe" (
 )
 for %%D in ("%CD%\py.exe") do set "ONEVOKE_CURRENT_PY=%%~fD"
 for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" "$PATH:py.exe" 2^>nul') do (
-  if /i not "%%~fP"=="%ONEVOKE_CURRENT_PY%" (
+  if /i not "%%~fP"=="%ONEVOKE_CURRENT_PY%" if not "%%~zP"=="0" (
     "%%~fP" -3 -X utf8 -c "import sys; raise SystemExit(sys.version_info.major != 3)" >nul 2>nul
     if not errorlevel 1 (
       set "ONEVOKE_PYTHON_EXE=%%~fP"
@@ -26,7 +26,26 @@ for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" "$PATH:py.exe" 2^>nu
 )
 for %%D in ("%CD%\python.exe") do set "ONEVOKE_CURRENT_PYTHON=%%~fD"
 for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" "$PATH:python.exe" 2^>nul') do (
-  if /i not "%%~fP"=="%ONEVOKE_CURRENT_PYTHON%" (
+  if /i not "%%~fP"=="%ONEVOKE_CURRENT_PYTHON%" if not "%%~zP"=="0" (
+    "%%~fP" -X utf8 -c "import sys; raise SystemExit(sys.version_info.major != 3)" >nul 2>nul
+    if not errorlevel 1 (
+      set "ONEVOKE_PYTHON_EXE=%%~fP"
+      goto run_python
+    )
+  )
+)
+for %%D in ("%CD%\python3.exe") do set "ONEVOKE_CURRENT_PYTHON3=%%~fD"
+for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" "$PATH:python3.exe" 2^>nul') do (
+  if /i not "%%~fP"=="%ONEVOKE_CURRENT_PYTHON3%" if not "%%~zP"=="0" (
+    "%%~fP" -X utf8 -c "import sys; raise SystemExit(sys.version_info.major != 3)" >nul 2>nul
+    if not errorlevel 1 (
+      set "ONEVOKE_PYTHON_EXE=%%~fP"
+      goto run_python
+    )
+  )
+)
+for /f "delims=" %%P in ('"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Get-AppxPackage -Name PythonSoftwareFoundation.Python.* ^| Sort-Object Version -Descending ^| ForEach-Object { Join-Path $_.InstallLocation python.exe } ^| Where-Object { Test-Path -LiteralPath $_ } ^| Select-Object -First 1" 2^>nul') do (
+  if not "%%~zP"=="0" (
     "%%~fP" -X utf8 -c "import sys; raise SystemExit(sys.version_info.major != 3)" >nul 2>nul
     if not errorlevel 1 (
       set "ONEVOKE_PYTHON_EXE=%%~fP"
@@ -42,6 +61,7 @@ for %%P in ("%ONEVOKE_PYTHON%") do (
   set "ONEVOKE_PYTHON_EXE=%%~fP"
 )
 if not exist "%ONEVOKE_PYTHON_EXE%" goto python_missing
+for %%S in ("%ONEVOKE_PYTHON_EXE%") do if "%%~zS"=="0" goto python_missing
 "%ONEVOKE_PYTHON_EXE%" -X utf8 -c "import sys; raise SystemExit(sys.version_info.major != 3)" >nul 2>nul
 if errorlevel 1 goto python_missing
 

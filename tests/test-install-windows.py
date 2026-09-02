@@ -137,6 +137,37 @@ class WindowsInstallerTest(unittest.TestCase):
         )
         return path
 
+    def python3_only_path(self) -> str:
+        where_executable = shutil.which("where.exe")
+        self.assertIsNotNone(where_executable)
+        shutil.copy2(where_executable, self.fake_bin / "py.exe")
+        shutil.copy2(where_executable, self.fake_bin / "python.exe")
+        python3_dir = self.root / "python3-only"
+        python3_dir.mkdir(exist_ok=True)
+        python3 = python3_dir / "python3.exe"
+        source = Path(sys.executable)
+        shutil.copy2(source, python3)
+        for dll in source.parent.glob("python*.dll"):
+            shutil.copy2(dll, python3_dir / dll.name)
+        system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+        environment = os.environ.copy()
+        environment["PATH"] = os.pathsep.join((str(python3_dir), str(system32)))
+        probe = subprocess.run(
+            [
+                str(python3),
+                "-X",
+                "utf8",
+                "-c",
+                "import sys; raise SystemExit(sys.version_info.major != 3)",
+            ],
+            env=environment,
+            capture_output=True,
+            check=False,
+        )
+        if probe.returncode != 0:
+            self.skipTest("cannot execute a copied python3.exe")
+        return os.pathsep.join((str(self.fake_bin), str(python3_dir), str(system32)))
+
     def test_installer_copies_payload_keeps_then_removes_legacy_entries(self) -> None:
         home = self.root / "install-home"
         installed_bin = home / ".local" / "bin"
@@ -390,6 +421,55 @@ class WindowsInstallerTest(unittest.TestCase):
         self.assertEqual("Onevoke installed\n", result.stdout)
         self.assertNotIn("welcome did not complete", result.stderr)
 
+    def test_installer_falls_back_from_broken_py_and_python_to_python3(self) -> None:
+        home = self.root / "python3-fallback-home"
+        home.mkdir(parents=True)
+        self.write_valid_config(
+            home,
+            welcome_complete=True,
+            language="en",
+        )
+
+        result = self.run_installer(
+            home,
+            PATH=self.python3_only_path(),
+            ONEVOKE_LANG="cn",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertNotIn("welcome did not complete", result.stderr)
+
+    def test_installer_skips_zero_byte_python_and_tries_next(self) -> None:
+        home = self.root / "zero-byte-python-home"
+        home.mkdir(parents=True)
+        self.write_valid_config(
+            home,
+            welcome_complete=True,
+            language="en",
+        )
+        windows_apps = self.root / "Microsoft" / "WindowsApps"
+        windows_apps.mkdir(parents=True)
+        (windows_apps / "python.exe").write_bytes(b"")
+        (windows_apps / "python3.exe").write_bytes(b"")
+        isolated_path = os.pathsep.join(
+            (
+                str(windows_apps),
+                str(self.fake_bin),
+                str(Path(sys.executable).parent),
+            )
+        )
+
+        result = self.run_installer(
+            home,
+            PATH=isolated_path,
+            ONEVOKE_LANG="cn",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Onevoke installed\n", result.stdout)
+        self.assertNotIn("welcome did not complete", result.stderr)
+
     def test_installer_skips_current_directory_python_and_tries_next(self) -> None:
         home = self.root / "current-directory-python-home"
         home.mkdir(parents=True)
@@ -591,7 +671,7 @@ class WindowsInstallerTest(unittest.TestCase):
         shim_dir.mkdir()
         malicious_cwd = self.root / "untrusted-repository"
         malicious_cwd.mkdir()
-        for name in ("py.exe", "python.exe", "where.exe"):
+        for name in ("py.exe", "python.exe", "python3.exe", "where.exe"):
             shutil.copy2(os.environ["COMSPEC"], malicious_cwd / name)
         script = (
             "import json, sys\n"
@@ -621,6 +701,88 @@ class WindowsInstallerTest(unittest.TestCase):
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual(["safe argument"], json.loads(result.stdout))
+
+    def test_python_shims_fall_back_to_python3(self) -> None:
+        shim_dir = self.root / "python3 shim"
+        shim_dir.mkdir()
+        script = (
+            "import json, sys\n"
+            "print(json.dumps(sys.argv[1:], ensure_ascii=False))\n"
+        )
+        isolated_path = self.python3_only_path()
+        for shim_name, target_name in {
+            "onevoke.cmd": "onevoke",
+            "kanban.cmd": "kanban",
+            "merge-worktree-memory.cmd": "merge-worktree-memory.py",
+            "onevoke-review.cmd": "onevoke_review.py",
+        }.items():
+            shutil.copy2(PROJECT_ROOT / "bin" / shim_name, shim_dir / shim_name)
+            (shim_dir / target_name).write_text(script, encoding="utf-8")
+
+            with self.subTest(shim=shim_name):
+                environment = self.install_env(
+                    self.root / "python3-shim-home",
+                    PATH=isolated_path,
+                )
+                environment.pop("ONEVOKE_PYTHON", None)
+                result = subprocess.run(
+                    [str(shim_dir / shim_name), "python3 fallback"],
+                    env=environment,
+                    text=True,
+                    encoding="utf-8",
+                    errors="strict",
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(["python3 fallback"], json.loads(result.stdout))
+
+    def test_python_shims_skip_zero_byte_python_and_tries_next(self) -> None:
+        shim_dir = self.root / "zero-byte shim"
+        shim_dir.mkdir()
+        windows_apps = self.root / "Microsoft" / "WindowsApps"
+        windows_apps.mkdir(parents=True)
+        (windows_apps / "py.exe").write_bytes(b"")
+        (windows_apps / "python.exe").write_bytes(b"")
+        (windows_apps / "python3.exe").write_bytes(b"")
+        script = (
+            "import json, sys\n"
+            "print(json.dumps(sys.argv[1:], ensure_ascii=False))\n"
+        )
+        isolated_path = os.pathsep.join(
+            (
+                str(windows_apps),
+                str(self.fake_bin),
+                str(Path(sys.executable).parent),
+            )
+        )
+        for shim_name, target_name in {
+            "onevoke.cmd": "onevoke",
+            "kanban.cmd": "kanban",
+            "merge-worktree-memory.cmd": "merge-worktree-memory.py",
+        }.items():
+            shutil.copy2(PROJECT_ROOT / "bin" / shim_name, shim_dir / shim_name)
+            (shim_dir / target_name).write_text(script, encoding="utf-8")
+
+            with self.subTest(shim=shim_name):
+                environment = self.install_env(
+                    self.root / "zero-byte-shim-home",
+                    PATH=isolated_path,
+                )
+                environment.pop("ONEVOKE_PYTHON", None)
+                result = subprocess.run(
+                    [str(shim_dir / shim_name), "skip store alias"],
+                    env=environment,
+                    text=True,
+                    encoding="utf-8",
+                    errors="strict",
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(["skip store alias"], json.loads(result.stdout))
 
 
 if __name__ == "__main__":

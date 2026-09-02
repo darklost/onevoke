@@ -28,6 +28,50 @@ function Test-ReparsePoint {
   return ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
 }
 
+function Test-UnusablePythonAlias {
+  param([string]$Path)
+
+  # App Execution Aliases in WindowsApps are 0-byte reparse points. The
+  # DesktopAppInstaller / PythonRedirector stubs open the Microsoft Store;
+  # installed Store Python uses the same 0-byte alias shape. Never execute
+  # either form. Store CPython is recovered from the AppX install location.
+  try {
+    $item = Get-Item -LiteralPath $Path -Force
+  } catch {
+    return $true
+  }
+  return $item.Length -eq 0
+}
+
+function Get-StorePythonExecutables {
+  $paths = @()
+  try {
+    if ($null -eq (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue)) {
+      return @()
+    }
+    $packages = @(
+      Get-AppxPackage -Name "PythonSoftwareFoundation.Python.*" -ErrorAction SilentlyContinue
+    )
+  } catch {
+    return @()
+  }
+  foreach ($package in ($packages | Sort-Object Version -Descending)) {
+    if ([string]::IsNullOrWhiteSpace($package.InstallLocation)) {
+      continue
+    }
+    foreach ($name in @("python.exe", "python3.exe")) {
+      $candidate = Join-Path $package.InstallLocation $name
+      if (
+        [IO.File]::Exists($candidate) -and
+        -not (Test-UnusablePythonAlias $candidate)
+      ) {
+        $paths += $candidate
+      }
+    }
+  }
+  return $paths
+}
+
 function Get-PythonLaunchers {
   $specifications = @(
     [PSCustomObject]@{
@@ -36,6 +80,10 @@ function Get-PythonLaunchers {
     },
     [PSCustomObject]@{
       Name = "python.exe"
+      Arguments = @("-X", "utf8")
+    },
+    [PSCustomObject]@{
+      Name = "python3.exe"
       Arguments = @("-X", "utf8")
     }
   )
@@ -77,7 +125,8 @@ function Get-PythonLaunchers {
       if (
         $excludedCandidates.ContainsKey($pathKey) -or
         -not [IO.File]::Exists($absolute) -or
-        $seenPaths.ContainsKey($pathKey)
+        $seenPaths.ContainsKey($pathKey) -or
+        (Test-UnusablePythonAlias $absolute)
       ) {
         continue
       }
@@ -86,6 +135,22 @@ function Get-PythonLaunchers {
         Path = $absolute
         Arguments = @($specification.Arguments)
       }
+    }
+  }
+  foreach ($storePython in @(Get-StorePythonExecutables)) {
+    try {
+      $absolute = [IO.Path]::GetFullPath($storePython)
+    } catch {
+      continue
+    }
+    $pathKey = $absolute.ToLowerInvariant()
+    if ($seenPaths.ContainsKey($pathKey)) {
+      continue
+    }
+    $seenPaths[$pathKey] = $true
+    $launchers += [PSCustomObject]@{
+      Path = $absolute
+      Arguments = @("-X", "utf8")
     }
   }
   return $launchers
