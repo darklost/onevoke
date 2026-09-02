@@ -1386,7 +1386,11 @@ exit 1
         self.assertIn("回执=未确认", result.stdout)
         self.assertIn("已投递, 未在超时内确认", result.stderr)
         self.assertTrue((self.root / "working" / review.name).exists())
-        self.assertNotIn("--resume", "\n".join(self.herdr_arguments("prompt")))
+        prompted = self.herdr_arguments("prompt")
+        self.assertEqual(["agent", "prompt", "w1:p9"], prompted[:3])
+        self.assertEqual(4, len(prompted))
+        self.assertTrue(prompted[3].startswith("# onevoke-notify:"), prompted[3])
+        # 未确认不得再拉起第二个进程: resume 会把带 --resume 的 Agent 命令写进 run 日志.
         self.assertNotIn("--resume", "\n".join(self.herdr_arguments("run")))
         self.assertEqual(1, self.herdr_arguments("order").count("tab create"))
         match = re.search(r"消息文件=(\S+)", result.stdout)
