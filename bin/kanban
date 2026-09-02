@@ -2729,13 +2729,23 @@ def herdr_tab_panes(herdr: str, tab_id: str) -> list[str]:
     panes = data.get("panes")
     if not isinstance(panes, list):
         raise KanbanError(t("herdr pane list 响应缺少 panes", "herdr pane list response has no panes"))
-    return [
-        pane_id
-        for pane in panes
-        if isinstance(pane, dict)
-        and herdr_public_id(pane.get("tab_id")) == tab_id
-        and (pane_id := herdr_public_id(pane.get("pane_id")))
-    ]
+    matching: list[str] = []
+    for pane in panes:
+        if not isinstance(pane, dict):
+            raise KanbanError(t(
+                "herdr pane list 响应中的 pane 无效",
+                "herdr pane list response contains an invalid pane",
+            ))
+        current_tab = herdr_public_id(pane.get("tab_id"))
+        current_pane = herdr_public_id(pane.get("pane_id"))
+        if not current_tab or not current_pane:
+            raise KanbanError(t(
+                "herdr pane list 响应中的 pane 缺少有效 id",
+                "A pane in the herdr pane list response has no valid id",
+            ))
+        if current_tab == tab_id:
+            matching.append(current_pane)
+    return matching
 
 
 def validate_herdr_dismiss_container(

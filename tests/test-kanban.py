@@ -2130,6 +2130,33 @@ exit 1
         self.assertFalse((self.root / "herdr.log.prompt").exists())
         self.assertFalse((self.root / "herdr.log.close").exists())
 
+    def test_dismiss_herdr_rejects_incomplete_topology_response(self) -> None:
+        task_id, done = self.make_done("dismiss-herdr-invalid-pane", agent="claude")
+        session = self.env["KANBAN_HERDR_SESSION"]
+        self.env["KANBAN_HERDR_LIST_JSON"] = json.dumps({
+            "id": "cli:pane:list",
+            "result": {
+                "type": "pane_list",
+                "panes": [
+                    {
+                        "pane_id": "w1:p9",
+                        "tab_id": "w1:t9",
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "agent_session": {"value": session},
+                    },
+                    {"tab_id": "w1:t9"},
+                ],
+            },
+        })
+
+        result = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("pane 缺少有效 id", result.stderr)
+        self.assertTrue(done.exists())
+        self.assertFalse((self.root / "herdr.log.prompt").exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
     def test_dismiss_tmux_rejects_moved_pane_or_multi_pane_window(self) -> None:
         task_id, done = self.make_done(
             "dismiss-tmux-container", agent="claude", launcher="tmux"
