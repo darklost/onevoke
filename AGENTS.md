@@ -31,6 +31,8 @@
 - `tests/test-onevoke.py` 用临时 HOME 和伪终端覆盖 welcome、配置和 Reviewer 分发, 并覆盖项目安装上下文的成功与拒绝路径. `tests/test-onevoke-config.py` 覆盖安装上下文解析与项目 Git exclude 的成功和拒绝路径; `tests/test-onevoke-process.py` 覆盖跨平台 Agent 解析、临时任务文件与 Windows batch 参数编码. `tests/test-kanban.py` 覆盖看板生命周期 (含 `review` 状态迁移)、按规模选 Agent、`会话` 记录、`resume` 的四种 Agent 恢复参数、Codex rollout 检索与回滚、POSIX launcher (含 `tmux-session` 的建/复用/退避/回滚和 `herdr` 的成功、拒绝与回滚)、安装及初始化, 并用伪终端覆盖 TUI 启动退出. `tests/test-merge-worktree-memory.py` 覆盖跨平台记忆合并; 四个 agent 的 POSIX 审核测试覆盖共用门禁. `tests/test-install-windows.py`, `tests/test-windows-automation.py`, `tests/test-windows-console.py`, `tests/test-windows-fs.py`, `tests/test-windows-review.py`, `tests/test-windows-web.py` 分别覆盖 PowerShell 安装、不可用 `py.exe` 到 `python.exe` / `python3.exe` 的实际回退与 `.cmd` 入口、Windows 自动化文档的包装入口和 argv 边界、Windows console 领取/启动/PID/失败回滚、显式或配置 herdr 的拒绝、Win32 reparse/ACL/LockFileEx 文件安全 (含配置及 Git exclude 的 parent/leaf junction、FSCTL 原地切换、固定叶替换、创建时私有 DACL、创建碰撞、校验期写入/替换、无效配置 ACL、新建目录与相对 override)、Windows 审核 runtime 创建时 DACL、全生命周期 WRITE/DELETE 根句柄租约、根 FSCTL 切换拒绝、安全清理、临时根 reparse、隔离/超时/篡改检测与分发、原生 Windows Web 的 UTF-8 HTTP 端到端流程.
 - 运行时创建的 `kanban/` 是本机共享数据, 不属于仓库源码, 不得提交.
 
+- `bin/kanban` 的 `resume` 与 `notify` 恢复/接管通道通过共享窗口回写器记录新容器地址; 回写时重读卡片正文, foreground/console 在启动前把 `窗口` 归一为 launcher 名. 启动或存活校验失败时恢复调用前原文, 恢复写失败与原错误合并报告.
+
 ## Build, Test, and Development Commands
 
 本项目核心仅依赖 Python 标准库, 无构建步骤. POSIX 入口依赖 POSIX shell, 原生 Windows 安装入口依赖 PowerShell; Windows TUI 另要求运行时 Python 提供可用 curses 后端, 不是第一阶段必需能力.

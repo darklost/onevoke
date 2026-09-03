@@ -2160,6 +2160,19 @@ class LaunchFailure(KanbanError):
         self.close_error = close_error
 
 
+def record_window_location(plan: LaunchPlan, entry: Entry) -> Callable[[LaunchOutcome], None]:
+    """返回终端容器地址回写器; 触发时重读卡片以保留并发产生的正文变化."""
+    def record(outcome: LaunchOutcome) -> None:
+        if plan.launcher == "herdr":
+            location = f"herdr:{outcome.tab}:{outcome.pane}"
+        else:
+            location = f"{plan.launcher}:{plan.session}:{outcome.window}:{outcome.pane}"
+        current = read_document(entry)
+        write_text_atomic(entry.document, window_metadata(current, location), entry=entry)
+
+    return record
+
+
 def prepare_launch(launcher: str, project: Path, command: str) -> LaunchPlan:
     if os.name == "nt" and launcher in ("auto", "tmux", "tmux-session", "herdr"):
         raise KanbanError(t(
@@ -2423,17 +2436,6 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     moved = move_entry(entry, root, "working")
     name = window_name(entry, original)
 
-    def record_terminal_location(outcome: LaunchOutcome) -> None:
-        if plan.launcher == "herdr":
-            location = f"herdr:{outcome.tab}:{outcome.pane}"
-        else:
-            location = f"{plan.launcher}:{plan.session}:{outcome.window}:{outcome.pane}"
-        write_text_atomic(
-            moved.document,
-            window_metadata(updated, location),
-            entry=moved,
-        )
-
     def started_tmux_session() -> AgentSession:
         if session.reference:
             return session
@@ -2466,7 +2468,9 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             root,
             name,
             invocation,
-            record_terminal_location if plan.launcher in ("herdr", "tmux", "tmux-session") else None,
+            record_window_location(plan, moved)
+            if plan.launcher in ("herdr", "tmux", "tmux-session")
+            else None,
             started_tmux_session if plan.launcher in ("tmux", "tmux-session") else None,
             session,
         )
@@ -2554,11 +2558,20 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
     )
     moved = move_entry(entry, root, "working") if entry.state != "working" else entry
     try:
+        if plan.launcher in ("foreground", "console"):
+            write_text_atomic(
+                moved.document,
+                window_metadata(read_document(moved), plan.launcher),
+                entry=moved,
+            )
         outcome = launch_agent(
             plan,
             root,
             window_name(entry, text),
             invocation,
+            record_window_location(plan, moved)
+            if plan.launcher in ("herdr", "tmux", "tmux-session")
+            else None,
             pane_session_callback=(lambda: session)
             if plan.launcher in ("tmux", "tmux-session")
             else None,
@@ -3338,26 +3351,64 @@ def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout
         program,
         [*agent_arguments(session.agent, model_entry, entry.kind, session, resume=True), prompt],
     )
-    outcome = launch_agent(
-        plan,
-        root,
-        window_name(entry, text),
-        invocation,
-        pane_session_callback=(lambda: session)
-        if plan.launcher in ("tmux", "tmux-session")
-        else None,
-        agent_session=session,
-    )
+    try:
+        if plan.launcher in ("foreground", "console"):
+            write_text_atomic(
+                entry.document,
+                window_metadata(read_document(entry), plan.launcher),
+                entry=entry,
+            )
+        outcome = launch_agent(
+            plan,
+            root,
+            window_name(entry, text),
+            invocation,
+            record_window_location(plan, entry)
+            if plan.launcher in ("herdr", "tmux", "tmux-session")
+            else None,
+            pane_session_callback=(lambda: session)
+            if plan.launcher in ("tmux", "tmux-session")
+            else None,
+            agent_session=session,
+        )
+    except LaunchFailure as failure:
+        try:
+            write_text_atomic(entry.document, text, entry=entry)
+        except (KanbanError, OSError, UnicodeError) as rollback_error:
+            cleanup_detail = (
+                t(f"; 清理={failure.close_error}", f"; cleanup={failure.close_error}")
+                if failure.close_error
+                else ""
+            )
+            raise KanbanError(t(
+                f"{failure.error}{cleanup_detail}; 窗口回滚={rollback_error}",
+                f"{failure.error}{cleanup_detail}; window rollback={rollback_error}",
+            )) from rollback_error
+        if failure.close_error:
+            raise KanbanError(f"{failure.error}; {failure.close_error}") from failure.error
+        raise
     try:
         validate_resumed_agent(plan, outcome, session, timeout)
     except (KanbanError, OSError, UnicodeError, ValueError) as liveness_error:
+        cleanup_error = None
         try:
             cleanup_failed_resume(plan, outcome)
-        except (KanbanError, OSError) as cleanup_error:
-            raise KanbanError(t(
-                f"{liveness_error}; 清理={cleanup_error}",
-                f"{liveness_error}; cleanup={cleanup_error}",
-            )) from cleanup_error
+        except (KanbanError, OSError) as error:
+            cleanup_error = error
+        rollback_error = None
+        try:
+            write_text_atomic(entry.document, text, entry=entry)
+        except (KanbanError, OSError, UnicodeError) as error:
+            rollback_error = error
+        details = []
+        if cleanup_error is not None:
+            details.append(t(f"清理={cleanup_error}", f"cleanup={cleanup_error}"))
+        if rollback_error is not None:
+            details.append(t(f"窗口回滚={rollback_error}", f"window rollback={rollback_error}"))
+        if details:
+            raise KanbanError(f"{liveness_error}; " + "; ".join(details)) from (
+                rollback_error or cleanup_error
+            )
         raise
     return ResumeLaunch(plan, outcome)
 
