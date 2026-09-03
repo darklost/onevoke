@@ -40,6 +40,14 @@ class TmuxPaneProbe:
 
 
 @dataclass(frozen=True)
+class TmuxContainerFacts:
+    session_id: str
+    session_name: str
+    window_id: str
+    pane_count: str
+
+
+@dataclass(frozen=True)
 class HerdrPaneProbe:
     pane: Optional[dict]
     gone_detail: str = ""
@@ -153,3 +161,28 @@ def probe_tmux_pane(tmux: str, pane_id: str) -> TmuxPaneProbe:
 
 def tmux_pane_facts(tmux: str, pane_id: str) -> Optional[TmuxPaneFacts]:
     return probe_tmux_pane(tmux, pane_id).facts
+
+
+def probe_tmux_container(tmux: str, pane_id: str) -> TmuxContainerFacts:
+    result = subprocess.run(
+        [
+            tmux, "display-message", "-p", "-t", pane_id,
+            "#{session_id}\t#{session_name}\t#{window_id}\t#{window_panes}",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit {result.returncode}"
+        raise KanbanError(t(
+            f"tmux pane 容器探查失败: {detail}",
+            f"Failed to probe the tmux pane container: {detail}",
+        ))
+    fields = result.stdout.strip().split("\t")
+    if len(fields) != 4:
+        raise KanbanError(t(
+            "tmux pane 容器探查响应无效",
+            "tmux pane container probe returned an invalid response",
+        ))
+    return TmuxContainerFacts(*fields)

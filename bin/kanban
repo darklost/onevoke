@@ -60,6 +60,7 @@ from kanban_probe import (
     PANE_SESSION_OPTION,
     TMUX_GONE_MARKERS,
     probe_herdr_pane,
+    probe_tmux_container,
     probe_tmux_pane,
 )
 from kanban_liveness import (
@@ -70,6 +71,7 @@ from kanban_liveness import (
     TmuxPaneLocation,
     herdr_reverse_lookup,
     probe_task_liveness,
+    reverse_lookup_stale,
     tmux_reverse_lookup,
 )
 from kanban_takeover import (
@@ -2827,38 +2829,19 @@ def validate_tmux_dismiss_container(
     expected_session_id: str,
     expected_window_id: str,
 ) -> None:
-    result = tmux_capture(
-        tmux,
-        "display-message",
-        "-p",
-        "-t",
-        pane_id,
-        "#{session_id}\t#{session_name}\t#{window_id}\t#{window_panes}",
-    )
-    if result.returncode != 0:
-        raise KanbanError(t(
-            f"tmux pane 容器探查失败: {result.stderr.strip() or f'exit {result.returncode}'}",
-            f"Failed to probe the tmux pane container: {result.stderr.strip() or f'exit {result.returncode}'}",
-        ))
-    fields = result.stdout.strip().split("\t")
-    if len(fields) != 4:
-        raise KanbanError(t(
-            "tmux pane 容器探查响应无效",
-            "tmux pane container probe returned an invalid response",
-        ))
-    actual_session_id, actual_session_name, actual_window_id, pane_count = fields
+    facts = probe_tmux_container(tmux, pane_id)
     actual_session = (
-        actual_session_id if launcher == "tmux" else actual_session_name
+        facts.session_id if launcher == "tmux" else facts.session_name
     )
-    if actual_session != expected_session_id or actual_window_id != expected_window_id:
+    if actual_session != expected_session_id or facts.window_id != expected_window_id:
         raise KanbanError(t(
-            f"tmux pane 所属容器不匹配: 卡片={expected_session_id}:{expected_window_id}, pane={actual_session or 'N/A'}:{actual_window_id or 'N/A'}",
-            f"Tmux pane container mismatch: task={expected_session_id}:{expected_window_id}, pane={actual_session or 'N/A'}:{actual_window_id or 'N/A'}",
+            f"tmux pane 所属容器不匹配: 卡片={expected_session_id}:{expected_window_id}, pane={actual_session or 'N/A'}:{facts.window_id or 'N/A'}",
+            f"Tmux pane container mismatch: task={expected_session_id}:{expected_window_id}, pane={actual_session or 'N/A'}:{facts.window_id or 'N/A'}",
         ))
-    if pane_count != "1":
+    if facts.pane_count != "1":
         raise KanbanError(t(
-            f"tmux window 不只包含目标 pane, 拒绝关闭: window={expected_window_id}, pane-count={pane_count or 'N/A'}",
-            f"The tmux window does not contain only the target pane; refusing to close it: window={expected_window_id}, pane-count={pane_count or 'N/A'}",
+            f"tmux window 不只包含目标 pane, 拒绝关闭: window={expected_window_id}, pane-count={facts.pane_count or 'N/A'}",
+            f"The tmux window does not contain only the target pane; refusing to close it: window={expected_window_id}, pane-count={facts.pane_count or 'N/A'}",
         ))
 
 
@@ -3063,8 +3046,15 @@ def command_dismiss(args: argparse.Namespace, root: Path) -> None:
             raise KanbanError(t("herdr 不在 PATH", "herdr is not in PATH"))
         if herdr_match:
             tab_id, pane_id = herdr_match.groups()
+            probe = herdr_notify_probe(herdr, pane_id, session)
+            if probe.state == "stale":
+                _old_tab, pane_id = reverse_lookup_stale(
+                    probe.detail, lambda: herdr_reverse_lookup(herdr, session)
+                )
+                tab_id, pane_id = herdr_explicit_target(herdr, pane_id)
         else:
-            tab_id, pane_id = herdr_reverse_lookup(herdr, session)
+            _listed_tab, pane_id = herdr_reverse_lookup(herdr, session)
+            tab_id, pane_id = herdr_explicit_target(herdr, pane_id)
         pane = herdr_notify_target(herdr, pane_id, session)
         validate_herdr_dismiss_container(herdr, tab_id, pane_id, pane)
         herdr_agent_prompt(herdr, pane_id, command)
@@ -3082,6 +3072,15 @@ def command_dismiss(args: argparse.Namespace, root: Path) -> None:
         tmux = shutil.which("tmux")
         if not tmux:
             raise KanbanError(t("tmux 不在 PATH", "tmux is not in PATH"))
+        probe = tmux_notify_probe(tmux, pane_id, session)
+        if probe.state == "stale":
+            location = reverse_lookup_stale(
+                probe.detail, lambda: tmux_reverse_lookup(tmux, session)
+            )
+            pane_id = location.pane_id
+            facts = probe_tmux_container(tmux, pane_id)
+            tmux_session = facts.session_id if launcher == "tmux" else facts.session_name
+            window_id = facts.window_id
         tmux_notify_target(tmux, pane_id, session)
         validate_tmux_dismiss_container(
             tmux, pane_id, launcher, tmux_session, window_id

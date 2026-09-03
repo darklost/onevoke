@@ -11,7 +11,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol, TypeVar
 
 from kanban_probe import KanbanError, probe_herdr_pane, probe_tmux_pane
 from onevoke_config import EXECUTION_AGENTS, agent_executable_name, language_text
@@ -25,6 +25,7 @@ LIVENESS_UNKNOWN = "unknown"
 SESSION_REFERENCE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 HERDR_WINDOW_RE = re.compile(r"^herdr:([^:\s]+:[^:\s]+):([^:\s]+:[^:\s]+)$")
 TMUX_WINDOW_RE = re.compile(r"^(tmux|tmux-session):([^:\s]+):([^:\s]+):([^:\s]+)$")
+LookupResult = TypeVar("LookupResult")
 
 
 class TaskEntry(Protocol):
@@ -160,6 +161,18 @@ def tmux_reverse_lookup(tmux: str, session: TaskSession) -> TmuxPaneLocation:
             f"tmux session lookup is ambiguous: {session.reference}: {len(matches)} panes",
         ))
     return matches[0]
+
+
+def reverse_lookup_stale(
+    detail: str, lookup: Callable[[], LookupResult]
+) -> LookupResult:
+    try:
+        return lookup()
+    except (KanbanError, OSError, UnicodeError, ValueError) as error:
+        raise KanbanError(t(
+            f"地址过期: {detail}; 反查={error}",
+            f"stale address: {detail}; lookup={error}",
+        )) from error
 
 
 def _report(
