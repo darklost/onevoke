@@ -53,7 +53,7 @@ python3 tests/test-codex-review.py
 python3 tests/test-claude-review.py
 python3 tests/test-grok-review.py
 python3 tests/test-cursor-review.py
-python3 -m py_compile bin/onevoke bin/onevoke_config.py bin/onevoke_fs.py bin/onevoke_menu.py bin/onevoke_process.py bin/onevoke_review.py bin/onevoke_review_roles.py bin/kanban bin/kanban_probe.py bin/kanban_liveness.py bin/kanban_web.py bin/merge-worktree-memory.py tests/*.py
+python3 -m py_compile bin/onevoke bin/onevoke_config.py bin/onevoke_fs.py bin/onevoke_menu.py bin/onevoke_process.py bin/onevoke_review.py bin/onevoke_review_roles.py bin/kanban bin/kanban_probe.py bin/kanban_window.py bin/kanban_liveness.py bin/kanban_web.py bin/merge-worktree-memory.py tests/*.py
 sh -n install.sh && sh -n bin/onevoke-review.sh
 ```
 
@@ -72,7 +72,7 @@ py -3 tests\test-windows-console.py
 py -3 tests\test-windows-fs.py
 py -3 tests\test-windows-review.py
 py -3 tests\test-windows-web.py
-py -3 -m py_compile bin\onevoke bin\onevoke_config.py bin\onevoke_fs.py bin\onevoke_process.py bin\onevoke_review.py bin\onevoke_review_roles.py bin\kanban bin\kanban_probe.py bin\kanban_liveness.py bin\kanban_web.py bin\merge-worktree-memory.py tests\test-onevoke-config.py tests\test-onevoke-process.py tests\test-kanban-probe.py tests\test-install-windows.py tests\test-windows-automation.py tests\test-windows-console.py tests\test-windows-fs.py tests\test-windows-review.py tests\test-windows-web.py
+py -3 -m py_compile bin\onevoke bin\onevoke_config.py bin\onevoke_fs.py bin\onevoke_process.py bin\onevoke_review.py bin\onevoke_review_roles.py bin\kanban bin\kanban_probe.py bin\kanban_window.py bin\kanban_liveness.py bin\kanban_web.py bin\merge-worktree-memory.py tests\test-onevoke-config.py tests\test-onevoke-process.py tests\test-kanban-probe.py tests\test-install-windows.py tests\test-windows-automation.py tests\test-windows-console.py tests\test-windows-fs.py tests\test-windows-review.py tests\test-windows-web.py
 ```
 
 测试默认针对当前工作树. `tests/test-kanban.py` 可用 `KANBAN_COMMAND` 指向别的入口; 四个 POSIX 审核测试用假 Codex/Claude/Grok/Cursor 二进制驱动, `tests/test-windows-review.py` 也用假 Codex/Claude/Grok/Cursor 二进制驱动, 均不调用真的 CLI, 也不产生网络请求. Windows 专项测试只在原生 Windows 运行, 其他平台会 skip; POSIX 的 pty/tmux 专项测试不作为 Windows 第一阶段门禁.
