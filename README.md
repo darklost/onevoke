@@ -4,13 +4,31 @@
 
 ![Onevoke 工作流](docs/workflow.svg)
 
-## 1. 安装
+## 1. 新手指引
+
+4 步上手:
+
+1. 新建一个 agent 会话, 在里面讨论需求, 说清楚目标, 验收条件和不做的范围.
+2. 需求确认后, 在该会话里要求用看板流程完成任务:
+
+```text
+需求已确认. 请用 kanban new & start 创建任务卡并启动.
+```
+
+3. 有多个需求时, 对每个需求重复步骤 1-2, 一次安排一个任务.
+4. 用 TUI 查看所有任务的状态:
+
+```sh
+kanban tui
+```
+
+## 2. 安装
 
 需要 Python 3, Git, 以及 Codex, Claude, Grok 或 Cursor 中至少一个. POSIX 系统还需要 POSIX shell; 原生 Windows 使用 PowerShell.
 
 Onevoke 有两种安装作用域, 共用同一套规则和程序, 不维护两套模板, 安装时也不改写 Markdown 正文. 当前读取的 `ONEVOKE-AGENTS.md` 入口位置决定作用域; 两种安装同时存在时, 项目入口和项目绝对命令优先.
 
-### 1.1 全局安装
+### 2.1 全局安装
 
 POSIX:
 
