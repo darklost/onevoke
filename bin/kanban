@@ -48,6 +48,16 @@ from onevoke_process import (
     resolve_agent_program,
     task_file_instruction,
 )
+from kanban_probe import (
+    KanbanError,
+    PANE_SESSION_OPTION,
+    TMUX_GONE_MARKERS,
+    TmuxPaneFacts,
+    herdr_probe_pane,
+    probe_herdr_pane,
+    probe_tmux_pane,
+    tmux_pane_facts,
+)
 import kanban_web
 from onevoke_fs import (
     UnsafePathError,
@@ -97,10 +107,6 @@ READY_SECTIONS = ("任务目标", "预期成果", "验收条件", "不在本轮�
 ARCHIVE_RESULTS = {"completed", "cancelled", "duplicate", "wontfix"}
 AGENT_NAMES = EXECUTION_AGENTS
 NO_TITLE = t("(无标题)", "(untitled)")
-
-
-class KanbanError(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -1519,8 +1525,6 @@ def tmux_session_id(tmux: str) -> str:
 
 
 PROJECT_SESSION_OPTION = "@onevoke_project"
-PANE_SESSION_OPTION = "@onevoke_session"
-TMUX_GONE_MARKERS = ("can't find", "no server running", "no sessions")
 PROJECT_SESSION_CANDIDATES = 9
 
 
@@ -1935,14 +1939,6 @@ class AgentSession:
 
     def render(self) -> str:
         return f"{self.agent} {self.reference}".strip()
-
-
-@dataclass(frozen=True)
-class TmuxPaneFacts:
-    command: str
-    in_mode: str
-    dead: str
-    session_marker: str
 
 
 @dataclass(frozen=True)
@@ -2639,28 +2635,13 @@ def resolved_task_session(entry: Entry, text: str) -> AgentSession:
 def herdr_pane_info(
     herdr: str, pane_id: str, *, timeout: Optional[float] = None
 ) -> dict:
-    pane = herdr_probe_pane(herdr, pane_id, timeout=timeout)
-    if pane is None:
-        raise KanbanError(t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}"))
-    return pane
-
-
-def herdr_probe_pane(
-    herdr: str, pane_id: str, *, timeout: Optional[float] = None
-) -> Optional[dict]:
-    result = herdr_capture(herdr, "pane", "get", pane_id, timeout=timeout)
-    if result.returncode != 0:
-        if herdr_error_code(result) == "pane_not_found":
-            return None
+    probe = probe_herdr_pane(herdr, pane_id, timeout=timeout)
+    if probe.pane is None:
         raise KanbanError(t(
-            f"pane 不存在: {pane_id}: {herdr_failure_detail(result)}",
-            f"pane does not exist: {pane_id}: {herdr_failure_detail(result)}",
+            f"pane 不存在: {pane_id}: {probe.gone_detail}",
+            f"pane does not exist: {pane_id}: {probe.gone_detail}",
         ))
-    data = herdr_json_result(result, "pane get")
-    pane = data.get("pane")
-    if not isinstance(pane, dict) or herdr_public_id(pane.get("pane_id")) != pane_id:
-        raise KanbanError(t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}"))
-    return pane
+    return probe.pane
 
 
 def herdr_session_reference(pane: dict) -> str | None:
@@ -2670,9 +2651,7 @@ def herdr_session_reference(pane: dict) -> str | None:
 
 
 def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> dict:
-    pane = herdr_probe_pane(herdr, pane_id)
-    if pane is None:
-        raise KanbanError(t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}"))
+    pane = herdr_pane_info(herdr, pane_id)
     actual_agent = pane.get("agent")
     if actual_agent != session.agent:
         raise KanbanError(t(
@@ -2696,11 +2675,15 @@ def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> dict
 
 
 def herdr_notify_probe(herdr: str, pane_id: str, session: AgentSession) -> NotifyTargetProbe:
-    pane = herdr_probe_pane(herdr, pane_id)
-    if pane is None:
+    pane_probe = probe_herdr_pane(herdr, pane_id)
+    if pane_probe.pane is None:
         return NotifyTargetProbe(
-            "stale", t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}")
+            "stale", t(
+                f"pane 不存在: {pane_id}: {pane_probe.gone_detail}",
+                f"pane does not exist: {pane_id}: {pane_probe.gone_detail}",
+            )
         )
+    pane = pane_probe.pane
     actual_agent = pane.get("agent")
     if actual_agent != session.agent:
         return NotifyTargetProbe("stale", t(
@@ -2769,41 +2752,14 @@ def herdr_explicit_target(herdr: str, pane_id: str) -> tuple[str, str]:
     return tab_id, pane_id
 
 
-def tmux_pane_facts(tmux: str, pane_id: str) -> Optional[TmuxPaneFacts]:
-    result = tmux_capture(
-        tmux,
-        "display-message",
-        "-p",
-        "-t",
-        pane_id,
-        "#{pane_current_command}\t#{pane_in_mode}\t#{pane_dead}",
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip()
-        if any(marker in detail.lower() for marker in TMUX_GONE_MARKERS):
-            return None
-        raise KanbanError(t(
-            f"tmux pane 不存在: {pane_id}: {detail or f'exit {result.returncode}'}",
-            f"tmux pane does not exist: {pane_id}: {detail or f'exit {result.returncode}'}",
-        ))
-    fields = result.stdout.strip().split("\t")
-    if len(fields) != 3:
-        raise KanbanError(t("tmux pane 探查响应无效", "tmux pane probe returned an invalid response"))
-    command, in_mode, dead = fields
-    identity = tmux_capture(
-        tmux, "show-options", "-p", "-v", "-t", pane_id, PANE_SESSION_OPTION
-    )
-    session_marker = identity.stdout.strip() if identity.returncode == 0 else ""
-    return TmuxPaneFacts(command, in_mode, dead, session_marker)
-
-
 def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
-    facts = tmux_pane_facts(tmux, pane_id)
-    if facts is None:
+    probe = probe_tmux_pane(tmux, pane_id)
+    if probe.facts is None:
         raise KanbanError(t(
-            f"tmux pane 不存在: {pane_id}",
-            f"tmux pane does not exist: {pane_id}",
+            f"tmux pane 不存在: {pane_id}: {probe.gone_detail}",
+            f"tmux pane does not exist: {pane_id}: {probe.gone_detail}",
         ))
+    facts = probe.facts
     if facts.dead != "0":
         raise KanbanError(t(f"tmux pane 已退出: {pane_id}", f"tmux pane is dead: {pane_id}"))
     if facts.in_mode != "0":
@@ -2827,11 +2783,13 @@ def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
 
 
 def tmux_notify_probe(tmux: str, pane_id: str, session: AgentSession) -> NotifyTargetProbe:
-    facts = tmux_pane_facts(tmux, pane_id)
-    if facts is None:
+    pane_probe = probe_tmux_pane(tmux, pane_id)
+    if pane_probe.facts is None:
         return NotifyTargetProbe("stale", t(
-            f"tmux pane 不存在: {pane_id}", f"tmux pane does not exist: {pane_id}"
+            f"tmux pane 不存在: {pane_id}: {pane_probe.gone_detail}",
+            f"tmux pane does not exist: {pane_id}: {pane_probe.gone_detail}",
         ))
+    facts = pane_probe.facts
     if facts.dead != "0":
         return NotifyTargetProbe("stale", t(
             f"tmux pane 已退出: {pane_id}", f"tmux pane is dead: {pane_id}"

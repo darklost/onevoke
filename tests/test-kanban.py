@@ -7862,7 +7862,7 @@ class KanbanProjectInstallTest(unittest.TestCase):
             "kanban",
             "onevoke_config.py",
             "onevoke_fs.py",
-            "onevoke_process.py",
+            "kanban_probe.py", "onevoke_process.py",
             "kanban_web.py",
             "kanban_tui.py",
         ):
