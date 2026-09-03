@@ -48,6 +48,13 @@ from onevoke_process import (
     resolve_agent_program,
     task_file_instruction,
 )
+from kanban_window import (
+    create_location_recorder,
+    render_start_metadata,
+    render_window_metadata,
+    restore_window_text,
+    resume_failure_message,
+)
 from kanban_probe import (
     KanbanError,
     PANE_SESSION_OPTION,
@@ -1447,58 +1454,11 @@ def command_pick(args: argparse.Namespace, root: Path) -> None:
 
 
 def start_metadata(text: str, agent: str, session: "AgentSession", window: str) -> str:
-    for name, value in (
-        ("负责人", agent),
-        ("开始时间", datetime.now().strftime("%Y-%m-%d %H:%M")),
-    ):
-        pattern = rf"(?m)^- {name}:\s*$"
-        if len(re.findall(pattern, text)) != 1:
-            raise KanbanError(t(f"任务文档缺少唯一元数据字段: {name}", f"Task document must contain exactly one metadata field: {name}"))
-        text = re.sub(pattern, f"- {name}: {value}", text, count=1)
-    # 会话字段是后加的: 旧模板没有该行时插在负责人之后, 不要求用户改写旧卡.
-    session_lines = re.findall(rf"(?m)^- {SESSION_FIELD}:.*$", text)
-    if len(session_lines) > 1:
-        raise KanbanError(t(f"任务文档缺少唯一元数据字段: {SESSION_FIELD}", f"Task document must contain exactly one metadata field: {SESSION_FIELD}"))
-    rendered = f"- {SESSION_FIELD}: {session.render()}"
-    if session_lines:
-        text = re.sub(rf"(?m)^- {SESSION_FIELD}:.*$", lambda _match: rendered, text, count=1)
-    else:
-        text = re.sub(r"(?m)^(- 负责人: .*)$", lambda match: f"{match.group(1)}\n{rendered}", text, count=1)
-    # 窗口字段与会话字段一起后加. 已有字段也归一到会话之后, 让读取方有稳定布局.
-    window_lines = re.findall(rf"(?m)^- {WINDOW_FIELD}:.*$", text)
-    if len(window_lines) > 1:
-        raise KanbanError(t(f"任务文档缺少唯一元数据字段: {WINDOW_FIELD}", f"Task document must contain exactly one metadata field: {WINDOW_FIELD}"))
-    if window_lines:
-        text = re.sub(rf"(?m)^- {WINDOW_FIELD}:.*\n?", "", text, count=1)
-    rendered_window = f"- {WINDOW_FIELD}: {window}".rstrip()
-    return re.sub(
-        rf"(?m)^(- {SESSION_FIELD}:.*)$",
-        lambda match: f"{match.group(1)}\n{rendered_window}",
-        text,
-        count=1,
-    )
+    return render_start_metadata(text, agent, session.render(), window, KanbanError)
 
 
 def window_metadata(text: str, value: str) -> str:
-    lines = re.findall(rf"(?m)^- {WINDOW_FIELD}:.*$", text)
-    if len(lines) > 1:
-        raise KanbanError(t(f"任务文档缺少唯一元数据字段: {WINDOW_FIELD}", f"Task document must contain exactly one metadata field: {WINDOW_FIELD}"))
-    if not lines:
-        session_lines = re.findall(rf"(?m)^- {SESSION_FIELD}:.*$", text)
-        if len(session_lines) != 1:
-            raise KanbanError(t(f"任务文档缺少唯一元数据字段: {SESSION_FIELD}", f"Task document must contain exactly one metadata field: {SESSION_FIELD}"))
-        return re.sub(
-            rf"(?m)^(- {SESSION_FIELD}:.*)$",
-            lambda match: f"{match.group(1)}\n- {WINDOW_FIELD}: {value}",
-            text,
-            count=1,
-        )
-    return re.sub(
-        rf"(?m)^- {WINDOW_FIELD}:.*$",
-        lambda _match: f"- {WINDOW_FIELD}: {value}",
-        text,
-        count=1,
-    )
+    return render_window_metadata(text, value, KanbanError)
 
 
 TMUX_SESSION_HINT = "tmux new -A -s onevoke"
@@ -2176,16 +2136,9 @@ class LaunchFailure(KanbanError):
 
 
 def record_window_location(plan: LaunchPlan, entry: Entry) -> Callable[[LaunchOutcome], None]:
-    """返回终端容器地址回写器; 触发时重读卡片以保留并发产生的正文变化."""
-    def record(outcome: LaunchOutcome) -> None:
-        if plan.launcher == "herdr":
-            location = f"herdr:{outcome.tab}:{outcome.pane}"
-        else:
-            location = f"{plan.launcher}:{plan.session}:{outcome.window}:{outcome.pane}"
-        current = read_document(entry)
-        write_text_atomic(entry.document, window_metadata(current, location), entry=entry)
-
-    return record
+    return create_location_recorder(
+        plan, entry, read_document, write_text_atomic, window_metadata
+    )
 
 
 def prepare_launch(launcher: str, project: Path, command: str) -> LaunchPlan:
@@ -2594,6 +2547,9 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
         )
     except LaunchFailure as failure:
         rollback_launch(root, moved, entry.state, failure, text)
+        raise
+    except (KanbanError, OSError, UnicodeError, ValueError) as error:
+        rollback_launch(root, moved, entry.state, LaunchFailure(error, None), text)
         raise
     try:
         validate_resumed_agent(plan, outcome, session, args.timeout)
@@ -3468,20 +3424,12 @@ def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout
             agent_session=session,
         )
     except LaunchFailure as failure:
-        try:
-            write_text_atomic(entry.document, text, entry=entry)
-        except (KanbanError, OSError, UnicodeError) as rollback_error:
-            cleanup_detail = (
-                t(f"; 清理={failure.close_error}", f"; cleanup={failure.close_error}")
-                if failure.close_error
-                else ""
-            )
-            raise KanbanError(t(
-                f"{failure.error}{cleanup_detail}; 窗口回滚={rollback_error}",
-                f"{failure.error}{cleanup_detail}; window rollback={rollback_error}",
-            )) from rollback_error
-        if failure.close_error:
-            raise KanbanError(f"{failure.error}; {failure.close_error}") from failure.error
+        rollback_error = restore_window_text(
+            entry, text, write_text_atomic, (KanbanError, OSError, UnicodeError)
+        )
+        message = resume_failure_message(failure.error, failure.close_error, rollback_error)
+        if message:
+            raise KanbanError(message) from (rollback_error or failure.error)
         raise
     try:
         validate_resumed_agent(plan, outcome, session, timeout)
@@ -3491,20 +3439,12 @@ def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout
             cleanup_failed_resume(plan, outcome)
         except (KanbanError, OSError) as error:
             cleanup_error = error
-        rollback_error = None
-        try:
-            write_text_atomic(entry.document, text, entry=entry)
-        except (KanbanError, OSError, UnicodeError) as error:
-            rollback_error = error
-        details = []
-        if cleanup_error is not None:
-            details.append(t(f"清理={cleanup_error}", f"cleanup={cleanup_error}"))
-        if rollback_error is not None:
-            details.append(t(f"窗口回滚={rollback_error}", f"window rollback={rollback_error}"))
-        if details:
-            raise KanbanError(f"{liveness_error}; " + "; ".join(details)) from (
-                rollback_error or cleanup_error
-            )
+        rollback_error = restore_window_text(
+            entry, text, write_text_atomic, (KanbanError, OSError, UnicodeError)
+        )
+        message = resume_failure_message(liveness_error, cleanup_error, rollback_error)
+        if message:
+            raise KanbanError(message) from (rollback_error or cleanup_error)
         raise
     return ResumeLaunch(plan, outcome)
 

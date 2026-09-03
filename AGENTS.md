@@ -32,6 +32,7 @@
 - 运行时创建的 `kanban/` 是本机共享数据, 不属于仓库源码, 不得提交.
 
 - `bin/kanban` 的 `resume` 与 `notify` 恢复/接管通道通过共享窗口回写器记录新容器地址; 回写时重读卡片正文, foreground/console 在启动前把 `窗口` 归一为 launcher 名. 启动或存活校验失败时恢复调用前原文, 恢复写失败与原错误合并报告.
+- `bin/kanban_window.py` 承载看板启动元数据与窗口回写的共享辅助逻辑; `tests/kanban_window_writeback_tests.py` 作为 `tests/test-kanban.py` 的测试 mixin 覆盖窗口回写回归, 保持主 CLI 与主测试文件不继续净增.
 
 ## Build, Test, and Development Commands
 
