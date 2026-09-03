@@ -21,7 +21,10 @@ REVIEWER_AGENT = "codex"
 
 FAKE_CODEX = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_CODEX_ARGV"
-cat > "$FAKE_CODEX_STDIN"
+instruction=$(cat)
+prompt=${instruction#*task file at }
+prompt=${prompt%%; read the complete file first*}
+cat "$prompt" > "$FAKE_CODEX_STDIN"
 
 out=""
 while [ "$#" -gt 0 ]; do

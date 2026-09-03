@@ -40,6 +40,14 @@ from onevoke_config import (
     language_text,
     load_config,
 )
+from onevoke_process import (
+    AgentProgram,
+    ProcessInvocation,
+    create_task_file,
+    process_invocation,
+    resolve_agent_program,
+    task_file_instruction,
+)
 import kanban_web
 from onevoke_fs import (
     UnsafePathError,
@@ -1899,6 +1907,13 @@ HERDR_WINDOW_RE = re.compile(r"^herdr:([^:\s]+:[^:\s]+):([^:\s]+:[^:\s]+)$")
 TMUX_WINDOW_RE = re.compile(r"^(tmux|tmux-session):([^:\s]+):([^:\s]+):([^:\s]+)$")
 NOTIFY_DEFAULT_TIMEOUT = 120.0
 NOTIFY_POLL_INTERVAL = 0.1
+DISMISS_STATES = ("done", "archived")
+AGENT_EXIT_COMMANDS = {
+    "claude": "/exit",
+    "codex": "/exit",
+    "grok": "/quit",
+    "cursor": "/quit",
+}
 START_SESSION_DISCOVERY_TIMEOUT = 10.0
 HERDR_SESSION_REPORT_BUDGET = 1.0
 HERDR_SESSION_REPORT_SOCKET_TIMEOUT = 0.25
@@ -1921,9 +1936,16 @@ class AgentSession:
         return f"{self.agent} {self.reference}".strip()
 
 
-def cursor_create_chat(binary: str) -> str:
+def cursor_create_chat(program: AgentProgram) -> str:
+    invocation = process_invocation(program, ("create-chat",))
     try:
-        result = subprocess.run([binary, "create-chat"], text=True, capture_output=True, check=False)
+        result = subprocess.run(
+            invocation.argv,
+            env=invocation.environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
     except OSError as error:
         raise KanbanError(t(f"cursor-agent create-chat 失败: {error}", f"cursor-agent create-chat failed: {error}")) from error
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -1937,11 +1959,11 @@ def cursor_create_chat(binary: str) -> str:
     return chat_id
 
 
-def new_agent_session(agent: str, binary: str) -> AgentSession:
+def new_agent_session(agent: str, program: AgentProgram) -> AgentSession:
     if agent in ("claude", "grok"):
         return AgentSession(agent, str(uuid.uuid4()))
     if agent == "cursor":
-        return AgentSession(agent, cursor_create_chat(binary))
+        return AgentSession(agent, cursor_create_chat(program))
     return AgentSession(agent, "")
 
 
@@ -1967,7 +1989,14 @@ def codex_sessions_root() -> Path:
 
 def codex_prompt_prefixes(task_id: str) -> tuple[str, ...]:
     """start/resume 交给执行 Agent 的 prompt 开头; 主控会话里只是提到任务 ID 的消息不算."""
-    return (f"执行 Kanban 任务 {task_id}.", f"继续 Kanban 任务 {task_id}.")
+    start = f"执行 Kanban 任务 {task_id}"
+    resume = f"继续 Kanban 任务 {task_id}"
+    return (
+        f"{start}; full instructions are in the UTF-8 task file at ",
+        f"{resume}; full instructions are in the UTF-8 task file at ",
+        f"{start}.",
+        f"{resume}.",
+    )
 
 
 def codex_rollout_mentions_task(path: Path, task_id: str) -> Optional[str]:
@@ -2037,9 +2066,8 @@ def find_codex_session(task_id: str) -> str:
     ))
 
 
-def agent_command(
+def agent_arguments(
     agent: str,
-    binary: str,
     model_entry: Dict[str, str],
     kind: str,
     session: AgentSession,
@@ -2054,7 +2082,7 @@ def agent_command(
     if agent == "cursor":
         model = model_entry["large_model" if kind == "large" else "small_model"]
         model_args = ["--model", model] if model else []
-        return [binary, *model_args, "--trust", "--force", "--resume", session.reference]
+        return [*model_args, "--trust", "--force", "--resume", session.reference]
     model = model_entry["model"]
     effort = model_entry["large_effort" if kind == "large" else "small_effort"]
     model_args = ["--model", model] if model else []
@@ -2066,30 +2094,25 @@ def agent_command(
             "--dangerously-bypass-approvals-and-sandbox",
         ]
         if resume:
-            return [binary, "resume", *options, session.reference]
-        return [binary, *options]
+            return ["resume", *options, session.reference]
+        return options
     session_args = ["--resume" if resume else "--session-id", session.reference]
     if agent == "claude":
-        return [binary, *model_args, "--effort", effort, "--dangerously-skip-permissions", *session_args]
+        return [*model_args, "--effort", effort, "--dangerously-skip-permissions", *session_args]
     if agent == "grok":
-        return [binary, *model_args, "--effort", effort, "--permission-mode", "bypassPermissions", *session_args]
+        return [*model_args, "--effort", effort, "--permission-mode", "bypassPermissions", *session_args]
     raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
 
 
-def resolve_agent_binary(agent_name: str) -> str:
+def require_agent_program(agent_name: str) -> AgentProgram:
     executable_name = agent_executable_name(agent_name)
-    agent = shutil.which(executable_name)
-    if not agent:
-        raise KanbanError(t(
-            f"Agent 不在 PATH: {executable_name}",
-            f"Agent is not in PATH: {executable_name}",
-        ))
-    if os.name == "nt" and Path(agent).suffix.lower() != ".exe":
-        raise KanbanError(t(
-            f"Windows Agent 必须是原生 .exe, 不会执行可能重解析参数的入口: {agent}",
-            f"Windows Agent must be a native .exe; refusing an entry point that can reparse arguments: {agent}",
-        ))
-    return agent
+    program = resolve_agent_program(executable_name)
+    if program:
+        return program
+    raise KanbanError(t(
+        f"Agent 不在 PATH: {executable_name}",
+        f"Agent is not in PATH: {executable_name}",
+    ))
 
 
 @dataclass(frozen=True)
@@ -2186,7 +2209,7 @@ def launch_agent(
     plan: LaunchPlan,
     root: Path,
     name: str,
-    agent_argv: list[str],
+    invocation: ProcessInvocation,
     location_callback: Optional[Callable[[LaunchOutcome], None]] = None,
     pane_session_callback: Optional[Callable[[], AgentSession]] = None,
     agent_session: Optional[AgentSession] = None,
@@ -2197,15 +2220,20 @@ def launch_agent(
     try:
         if plan.launcher == "foreground":
             try:
-                process = subprocess.Popen(agent_argv, cwd=root.parent)
+                process = subprocess.Popen(
+                    invocation.argv,
+                    cwd=root.parent,
+                    env=invocation.environment,
+                )
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
             return LaunchOutcome(process=process)
         if plan.launcher == "console":
             try:
                 process = subprocess.Popen(
-                    agent_argv,
+                    invocation.argv,
                     cwd=root.parent,
+                    env=invocation.environment,
                     creationflags=(
                         subprocess.CREATE_NEW_CONSOLE
                         | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -2215,7 +2243,7 @@ def launch_agent(
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
             return LaunchOutcome(process=process)
-        command = shlex.join(agent_argv)
+        command = shlex.join(invocation.argv)
         if plan.launcher == "herdr":
             created_tab, pane_id = herdr_create_tab(
                 plan.herdr_bin, plan.herdr_workspace, str(root.parent), name
@@ -2357,8 +2385,8 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     config = effective_config(load_config())
     agent_name = args.agent or kanban_agent_for(config, entry.kind)
     plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "start")
-    agent = resolve_agent_binary(agent_name)
-    session = new_agent_session(agent_name, agent)
+    program = require_agent_program(agent_name)
+    session = new_agent_session(agent_name, program)
     previous_codex_sessions: set[str] = set()
     if agent_name == "codex" and plan.launcher in ("tmux", "tmux-session"):
         try:
@@ -2373,11 +2401,18 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         session,
         "" if plan.launcher in ("herdr", "tmux", "tmux-session") else plan.launcher,
     )
-    prompt = start_agent_prompt(entry.task_id, current_install_paths(), task_group_from(original))
+    task_file = create_task_file(
+        start_agent_prompt(entry.task_id, current_install_paths(), task_group_from(original)),
+        prefix=f"onevoke-{entry.task_id}-start-",
+    )
+    prompt = task_file_instruction(f"执行 Kanban 任务 {entry.task_id}.", task_file)
+    model_entry = config["models"]["kanban"][agent_name]
+    invocation = process_invocation(
+        program,
+        [*agent_arguments(agent_name, model_entry, entry.kind, session), prompt],
+    )
     moved = move_entry(entry, root, "working")
     name = window_name(entry, original)
-    model_entry = config["models"]["kanban"][agent_name]
-    agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind, session), prompt]
 
     def record_terminal_location(outcome: LaunchOutcome) -> None:
         if plan.launcher == "herdr":
@@ -2421,7 +2456,7 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             plan,
             root,
             name,
-            agent_argv,
+            invocation,
             record_terminal_location if plan.launcher in ("herdr", "tmux", "tmux-session") else None,
             started_tmux_session if plan.launcher in ("tmux", "tmux-session") else None,
             session,
@@ -2490,7 +2525,7 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
     session = session_from(text)
     config = effective_config(load_config())
     plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "resume")
-    agent = resolve_agent_binary(session.agent)
+    program = require_agent_program(session.agent)
     if session.agent == "codex":
         session = AgentSession("codex", find_codex_session(entry.task_id))
     elif not session.reference:
@@ -2498,16 +2533,23 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
             f"任务卡的 {session.agent} 会话缺少 id, 无法唤醒",
             f"Task session for {session.agent} has no id; cannot resume",
         ))
-    prompt = resume_agent_prompt(entry.task_id, message, current_install_paths())
+    task_file = create_task_file(
+        resume_agent_prompt(entry.task_id, message, current_install_paths()),
+        prefix=f"onevoke-{entry.task_id}-resume-",
+    )
+    prompt = task_file_instruction(f"继续 Kanban 任务 {entry.task_id}.", task_file)
     model_entry = config["models"]["kanban"][session.agent]
-    agent_argv = [*agent_command(session.agent, agent, model_entry, entry.kind, session, resume=True), prompt]
+    invocation = process_invocation(
+        program,
+        [*agent_arguments(session.agent, model_entry, entry.kind, session, resume=True), prompt],
+    )
     moved = move_entry(entry, root, "working") if entry.state != "working" else entry
     try:
         outcome = launch_agent(
             plan,
             root,
             window_name(entry, text),
-            agent_argv,
+            invocation,
             pane_session_callback=(lambda: session)
             if plan.launcher in ("tmux", "tmux-session")
             else None,
@@ -2575,7 +2617,7 @@ def herdr_session_reference(pane: dict) -> str | None:
     return reference if isinstance(reference, str) and reference else None
 
 
-def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None:
+def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> dict:
     pane = herdr_pane_info(herdr, pane_id)
     actual_agent = pane.get("agent")
     if actual_agent != session.agent:
@@ -2596,6 +2638,7 @@ def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> None
             f"会话不匹配: 卡片={session.reference}, pane={actual_session or 'N/A'}",
             f"Session mismatch: task={session.reference}, pane={actual_session or 'N/A'}",
         ))
+    return pane
 
 
 def herdr_reverse_lookup(herdr: str, session: AgentSession) -> tuple[str, str]:
@@ -2687,6 +2730,359 @@ def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
             f"tmux 会话不匹配: 卡片={session.reference}, pane={actual_session}",
             f"tmux session mismatch: task={session.reference}, pane={actual_session}",
         ))
+
+
+def agent_exit_command(agent: str) -> str:
+    try:
+        return AGENT_EXIT_COMMANDS[agent]
+    except KeyError as error:
+        raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}")) from error
+
+
+def herdr_error_code(result: subprocess.CompletedProcess) -> Optional[str]:
+    """读取 herdr 结构化错误码; 不把任意 CLI 失败误判为 pane 已消失."""
+    for output in (result.stderr, result.stdout):
+        try:
+            payload = json.loads(output)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        error = payload.get("error") if isinstance(payload, dict) else None
+        code = error.get("code") if isinstance(error, dict) else None
+        if isinstance(code, str):
+            return code
+    return None
+
+
+def herdr_tab_panes(herdr: str, tab_id: str) -> list[str]:
+    result = herdr_capture(herdr, "pane", "list")
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"herdr pane list 失败: {herdr_failure_detail(result)}",
+            f"herdr pane list failed: {herdr_failure_detail(result)}",
+        ))
+    data = herdr_json_result(result, "pane list")
+    panes = data.get("panes")
+    if not isinstance(panes, list):
+        raise KanbanError(t("herdr pane list 响应缺少 panes", "herdr pane list response has no panes"))
+    matching: list[str] = []
+    for pane in panes:
+        if not isinstance(pane, dict):
+            raise KanbanError(t(
+                "herdr pane list 响应中的 pane 无效",
+                "herdr pane list response contains an invalid pane",
+            ))
+        current_tab = herdr_public_id(pane.get("tab_id"))
+        current_pane = herdr_public_id(pane.get("pane_id"))
+        if not current_tab or not current_pane:
+            raise KanbanError(t(
+                "herdr pane list 响应中的 pane 缺少有效 id",
+                "A pane in the herdr pane list response has no valid id",
+            ))
+        if current_tab == tab_id:
+            matching.append(current_pane)
+    return matching
+
+
+def validate_herdr_dismiss_container(
+    herdr: str, tab_id: str, pane_id: str, pane: dict
+) -> None:
+    actual_tab = herdr_public_id(pane.get("tab_id"))
+    if actual_tab != tab_id:
+        raise KanbanError(t(
+            f"herdr pane 所属 tab 不匹配: 卡片={tab_id}, pane={actual_tab or 'N/A'}",
+            f"Herdr pane tab mismatch: task={tab_id}, pane={actual_tab or 'N/A'}",
+        ))
+    panes = herdr_tab_panes(herdr, tab_id)
+    if panes != [pane_id]:
+        raise KanbanError(t(
+            f"herdr tab 不只包含目标 pane, 拒绝关闭: tab={tab_id}, panes={','.join(panes) or 'N/A'}",
+            f"The Herdr tab does not contain only the target pane; refusing to close it: tab={tab_id}, panes={','.join(panes) or 'N/A'}",
+        ))
+
+
+def validate_tmux_dismiss_container(
+    tmux: str,
+    pane_id: str,
+    launcher: str,
+    expected_session_id: str,
+    expected_window_id: str,
+) -> None:
+    result = tmux_capture(
+        tmux,
+        "display-message",
+        "-p",
+        "-t",
+        pane_id,
+        "#{session_id}\t#{session_name}\t#{window_id}\t#{window_panes}",
+    )
+    if result.returncode != 0:
+        raise KanbanError(t(
+            f"tmux pane 容器探查失败: {result.stderr.strip() or f'exit {result.returncode}'}",
+            f"Failed to probe the tmux pane container: {result.stderr.strip() or f'exit {result.returncode}'}",
+        ))
+    fields = result.stdout.strip().split("\t")
+    if len(fields) != 4:
+        raise KanbanError(t(
+            "tmux pane 容器探查响应无效",
+            "tmux pane container probe returned an invalid response",
+        ))
+    actual_session_id, actual_session_name, actual_window_id, pane_count = fields
+    actual_session = (
+        actual_session_id if launcher == "tmux" else actual_session_name
+    )
+    if actual_session != expected_session_id or actual_window_id != expected_window_id:
+        raise KanbanError(t(
+            f"tmux pane 所属容器不匹配: 卡片={expected_session_id}:{expected_window_id}, pane={actual_session or 'N/A'}:{actual_window_id or 'N/A'}",
+            f"Tmux pane container mismatch: task={expected_session_id}:{expected_window_id}, pane={actual_session or 'N/A'}:{actual_window_id or 'N/A'}",
+        ))
+    if pane_count != "1":
+        raise KanbanError(t(
+            f"tmux window 不只包含目标 pane, 拒绝关闭: window={expected_window_id}, pane-count={pane_count or 'N/A'}",
+            f"The tmux window does not contain only the target pane; refusing to close it: window={expected_window_id}, pane-count={pane_count or 'N/A'}",
+        ))
+
+
+def herdr_wait_agent_exit(
+    herdr: str,
+    tab_id: str,
+    pane_id: str,
+    session: AgentSession,
+    timeout: float,
+) -> bool:
+    """等原 Agent 从 pane 消失, 并返回 pane 是否仍存在."""
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise KanbanError(t(
+                f"等待 Agent 退出超时: {pane_id}",
+                f"Timed out waiting for the Agent to exit: {pane_id}",
+            ))
+        result = herdr_capture(
+            herdr,
+            "pane",
+            "get",
+            pane_id,
+            timeout=remaining,
+        )
+        if result.returncode != 0:
+            if herdr_error_code(result) == "pane_not_found":
+                panes = herdr_tab_panes(herdr, tab_id)
+                if panes:
+                    raise KanbanError(t(
+                        f"目标 herdr pane 已消失但 tab 仍包含其他 pane, 拒绝关闭: tab={tab_id}, panes={','.join(panes)}",
+                        f"The target Herdr pane disappeared while its tab still contains other panes; refusing to close it: tab={tab_id}, panes={','.join(panes)}",
+                    ))
+                return False
+            raise KanbanError(t(
+                f"等待 Agent 退出时探查 pane 失败: {herdr_failure_detail(result)}",
+                f"Failed to probe the pane while waiting for the Agent to exit: {herdr_failure_detail(result)}",
+            ))
+        data = herdr_json_result(result, "pane get")
+        pane = data.get("pane")
+        if not isinstance(pane, dict) or herdr_public_id(pane.get("pane_id")) != pane_id:
+            raise KanbanError(t("herdr pane get 响应无效", "herdr pane get returned an invalid response"))
+        actual_tab = herdr_public_id(pane.get("tab_id"))
+        if actual_tab != tab_id:
+            raise KanbanError(t(
+                f"等待退出时 herdr pane 已移到其他 tab: 期望={tab_id}, 实际={actual_tab or 'N/A'}",
+                f"The Herdr pane moved to another tab while waiting for exit: expected={tab_id}, actual={actual_tab or 'N/A'}",
+            ))
+        actual_agent = pane.get("agent")
+        if not actual_agent:
+            validate_herdr_dismiss_container(herdr, tab_id, pane_id, pane)
+            return True
+        if actual_agent != session.agent:
+            raise KanbanError(t(
+                f"等待退出时 pane 已换成其他 Agent: 期望={session.agent}, 实际={actual_agent}",
+                f"The pane changed to another Agent while waiting for exit: expected={session.agent}, actual={actual_agent}",
+            ))
+        actual_session = herdr_session_reference(pane)
+        if actual_session and actual_session != session.reference:
+            raise KanbanError(t(
+                f"等待退出时 pane 会话已变更: 卡片={session.reference}, pane={actual_session}",
+                f"The pane session changed while waiting for exit: task={session.reference}, pane={actual_session}",
+            ))
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
+
+
+def tmux_send_agent_exit(tmux: str, pane_id: str, command: str) -> None:
+    for arguments in (
+        ("send-keys", "-t", pane_id, "-l", command),
+        ("send-keys", "-t", pane_id, "Enter"),
+    ):
+        result = tmux_capture(tmux, *arguments)
+        if result.returncode != 0:
+            raise KanbanError(t(
+                f"tmux 投递 Agent 退出指令失败: {result.stderr.strip() or f'exit {result.returncode}'}",
+                f"tmux failed to deliver the Agent exit command: {result.stderr.strip() or f'exit {result.returncode}'}",
+            ))
+
+
+def tmux_window_exists(tmux: str, window_id: str) -> bool:
+    result = tmux_capture(
+        tmux, "display-message", "-p", "-t", window_id, "#{window_id}"
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        missing = detail.lower()
+        if any(
+            marker in missing
+            for marker in ("can't find window", "no server running", "no sessions")
+        ):
+            return False
+        raise KanbanError(t(
+            f"tmux window 探查失败: {detail or f'exit {result.returncode}'}",
+            f"Failed to probe the tmux window: {detail or f'exit {result.returncode}'}",
+        ))
+    if result.stdout.strip() != window_id:
+        raise KanbanError(t(
+            f"tmux window 探查响应无效: {result.stdout.strip() or 'N/A'}",
+            f"tmux window probe returned an invalid response: {result.stdout.strip() or 'N/A'}",
+        ))
+    return True
+
+
+def tmux_wait_agent_exit(
+    tmux: str,
+    launcher: str,
+    session_id: str,
+    window_id: str,
+    pane_id: str,
+    session: AgentSession,
+    timeout: float,
+) -> bool:
+    """等目标 pane 退出, 并返回所在 window 是否仍存在."""
+    deadline = time.monotonic() + timeout
+    expected = Path(agent_executable_name(session.agent)).name
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise KanbanError(t(
+                f"等待 Agent 退出超时: {pane_id}",
+                f"Timed out waiting for the Agent to exit: {pane_id}",
+            ))
+        result = tmux_capture(
+            tmux,
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            "#{pane_current_command}\t#{pane_dead}",
+        )
+        if result.returncode != 0:
+            if not tmux_window_exists(tmux, window_id):
+                return False
+            raise KanbanError(t(
+                f"目标 tmux pane 已消失但 window 仍存在, 拒绝关闭: pane={pane_id}, window={window_id}",
+                f"The target tmux pane disappeared while its window still exists; refusing to close it: pane={pane_id}, window={window_id}",
+            ))
+        fields = result.stdout.strip().split("\t")
+        if len(fields) != 2:
+            raise KanbanError(t("tmux pane 探查响应无效", "tmux pane probe returned an invalid response"))
+        command, dead = fields
+        if dead == "1":
+            validate_tmux_dismiss_container(
+                tmux, pane_id, launcher, session_id, window_id
+            )
+            return tmux_window_exists(tmux, window_id)
+        if dead != "0":
+            raise KanbanError(t(
+                f"tmux pane 死亡状态无效: {dead or 'N/A'}",
+                f"tmux pane returned an invalid dead state: {dead or 'N/A'}",
+            ))
+        if command != expected:
+            raise KanbanError(t(
+                f"等待退出时 tmux 前台进程已变更: 期望={expected}, 实际={command or 'N/A'}",
+                f"The tmux foreground process changed while waiting for exit: expected={expected}, actual={command or 'N/A'}",
+            ))
+        identity = tmux_capture(
+            tmux, "show-options", "-p", "-v", "-t", pane_id, PANE_SESSION_OPTION
+        )
+        actual_session = identity.stdout.strip() if identity.returncode == 0 else ""
+        if actual_session != session.reference:
+            raise KanbanError(t(
+                f"等待退出时 tmux pane 会话已变更: 卡片={session.reference}, pane={actual_session or 'N/A'}",
+                f"The tmux pane session changed while waiting for exit: task={session.reference}, pane={actual_session or 'N/A'}",
+            ))
+        validate_tmux_dismiss_container(
+            tmux, pane_id, launcher, session_id, window_id
+        )
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
+
+
+def command_dismiss(args: argparse.Namespace, root: Path) -> None:
+    entry = locate(load_board(root), args.task)
+    if entry.state not in DISMISS_STATES:
+        raise KanbanError(t(
+            f"只能遣散 {' 或 '.join(DISMISS_STATES)} 中的任务; {entry.task_id} 在 {entry.state}",
+            f"Only tasks in {' or '.join(DISMISS_STATES)} can be dismissed; {entry.task_id} is in {entry.state}",
+        ))
+    validate_liveness_timeout(args.timeout, "dismiss")
+    if os.name == "nt":
+        raise KanbanError(t(
+            "Windows 当前没有可遣散的终端直投通道",
+            "Windows currently has no direct terminal channel for dismiss",
+        ))
+    text = read_document(entry)
+    window = metadata_from(text, WINDOW_FIELD)
+    herdr_match = HERDR_WINDOW_RE.fullmatch(window)
+    tmux_match = TMUX_WINDOW_RE.fullmatch(window)
+    if window and not herdr_match and not tmux_match:
+        raise KanbanError(t(
+            f"任务没有可遣散的终端容器: {window}",
+            f"Task has no dismissible terminal container: {window}",
+        ))
+    session = resolved_task_session(entry, text)
+    command = agent_exit_command(session.agent)
+
+    if herdr_match or not window:
+        herdr = shutil.which("herdr")
+        if not herdr:
+            raise KanbanError(t("herdr 不在 PATH", "herdr is not in PATH"))
+        if herdr_match:
+            tab_id, pane_id = herdr_match.groups()
+        else:
+            tab_id, pane_id = herdr_reverse_lookup(herdr, session)
+        pane = herdr_notify_target(herdr, pane_id, session)
+        validate_herdr_dismiss_container(herdr, tab_id, pane_id, pane)
+        herdr_agent_prompt(herdr, pane_id, command)
+        pane_exists = herdr_wait_agent_exit(
+            herdr, tab_id, pane_id, session, args.timeout
+        )
+        if pane_exists:
+            close_error = herdr_close_tab(herdr, tab_id)
+            if close_error:
+                raise KanbanError(close_error)
+        channel = "herdr"
+        container = tab_id
+    elif tmux_match:
+        launcher, tmux_session, window_id, pane_id = tmux_match.groups()
+        tmux = shutil.which("tmux")
+        if not tmux:
+            raise KanbanError(t("tmux 不在 PATH", "tmux is not in PATH"))
+        tmux_notify_target(tmux, pane_id, session)
+        validate_tmux_dismiss_container(
+            tmux, pane_id, launcher, tmux_session, window_id
+        )
+        tmux_send_agent_exit(tmux, pane_id, command)
+        window_exists = tmux_wait_agent_exit(
+            tmux, launcher, tmux_session, window_id, pane_id, session, args.timeout
+        )
+        if window_exists:
+            close_error = tmux_close_window(tmux, window_id)
+            if close_error:
+                raise KanbanError(close_error)
+        channel = launcher
+        container = window_id
+    print(t(
+        f"已遣散: {entry.task_id}\t通道={channel}\t关闭容器={container}",
+        f"dismissed: {entry.task_id}\tchannel={channel}\tclosed-container={container}",
+    ))
 
 
 def notification_temp_root() -> Path:
@@ -2899,15 +3295,22 @@ def notify_via_resume(entry: Entry, text: str, message: str, root: Path, timeout
     session = resolved_task_session(entry, text)
     config = effective_config(load_config())
     plan = prepare_launch(config["launcher"], root.parent.resolve(), "notify")
-    agent = resolve_agent_binary(session.agent)
+    program = require_agent_program(session.agent)
     model_entry = config["models"]["kanban"][session.agent]
-    prompt = notify_resume_prompt(entry.task_id, message, current_install_paths())
-    agent_argv = [*agent_command(session.agent, agent, model_entry, entry.kind, session, resume=True), prompt]
+    task_file = create_task_file(
+        notify_resume_prompt(entry.task_id, message, current_install_paths()),
+        prefix=f"onevoke-{entry.task_id}-notify-",
+    )
+    prompt = task_file_instruction(f"继续 Kanban 任务 {entry.task_id}.", task_file)
+    invocation = process_invocation(
+        program,
+        [*agent_arguments(session.agent, model_entry, entry.kind, session, resume=True), prompt],
+    )
     outcome = launch_agent(
         plan,
         root,
         window_name(entry, text),
-        agent_argv,
+        invocation,
         pane_session_callback=(lambda: session)
         if plan.launcher in ("tmux", "tmux-session")
         else None,
@@ -3248,7 +3651,10 @@ def tui_page_context() -> dict:
         "no_match": t("无匹配", "no match"),
         "terminal_init_failed": t("终端初始化失败", "failed to initialize terminal"),
         "unknown_theme": t("未知主题", "unknown theme"),
-        "state_labels": WEB_STATUS_LABELS[lang],
+        "state_labels": {
+            **WEB_STATUS_LABELS[lang],
+            "review": t("审核中", "Review"),
+        },
         "size_labels": WEB_SIZE_LABELS[lang],
     }
 
@@ -3535,6 +3941,19 @@ def parser() -> argparse.ArgumentParser:
         help=t("等待直投回执与恢复存活的超时秒数, 默认 120", "seconds to wait for direct acknowledgement and resumed-agent liveness; default 120"),
     )
 
+    dismiss_parser = commands.add_parser(
+        "dismiss",
+        help=t("优雅退出已完成任务的 Agent 并关闭终端容器", "gracefully exit the Agent of a completed task and close its terminal container"),
+    )
+    dismiss_parser.add_argument("task", metavar=t("任务", "task"))
+    dismiss_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=NOTIFY_DEFAULT_TIMEOUT,
+        metavar=t("秒", "seconds"),
+        help=t("等待 Agent 退出的超时秒数, 默认 120", "seconds to wait for the Agent to exit; default 120"),
+    )
+
     check_parser = commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
     check_parser.add_argument(
         "--all",
@@ -3667,6 +4086,8 @@ def main() -> int:
             command_resume(args, root)
         elif args.command == "notify":
             command_notify(args, root)
+        elif args.command == "dismiss":
+            command_dismiss(args, root)
         elif args.command == "check":
             return command_check(args, root)
         elif args.command == "subscribe":

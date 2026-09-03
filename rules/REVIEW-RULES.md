@@ -4,7 +4,7 @@
 
 ## Reviewer 选择
 
-- 支持 Codex, Claude, Grok 与 Cursor 四个 reviewer. POSIX 的平台公开审核入口是命令根下的 `onevoke-review.sh`; 原生 Windows 的人工交互入口是命令根下的 `onevoke-review.cmd`, 命令根下的 `onevoke review` 的程序化分发直接进入同目录的 `onevoke_review.py`. 这些路径共享单一门禁实现. Windows Reviewer CLI 必须解析为原生 `.exe`, `.cmd`/`.bat` 一律视为不可用. 除下表的 CLI 与隔离参数外, 本文件全部规则对四者一致. 新增 reviewer 时扩展 Python 实现的 agent 适配层和配置枚举, 不新增按 agent 命名的脚本. 项目安装必须使用命令根绝对入口, 禁止改用 PATH 中的全局同名命令.
+- 支持 Codex, Claude, Grok 与 Cursor 四个 reviewer. POSIX 的平台公开审核入口是命令根下的 `onevoke-review.sh`; 原生 Windows 的人工交互入口是命令根下的 `onevoke-review.cmd`, 命令根下的 `onevoke review` 的程序化分发直接进入同目录的 `onevoke_review.py`. 这些路径共享单一门禁实现. Windows 优先使用 Reviewer `.exe`; 只有 `.cmd`/`.bat` 时通过显式 `cmd.exe /d /s /v:off /c` 和四种 reviewer 适配层的参数编码启动. 这不是任意批处理脚本的通用调用契约. 除下表的 CLI 与隔离参数外, 本文件全部规则对四者一致. 新增 reviewer 时扩展 Python 实现的 agent 适配层和配置枚举, 不新增按 agent 命名的脚本. 项目安装必须使用命令根绝对入口, 禁止改用 PATH 中的全局同名命令.
 
 | reviewer | agent 参数 | CLI | 入口的隔离参数 |
 |---|---|---|---|
@@ -13,7 +13,7 @@
 | Grok | `grok` | `grok` | `--sandbox read-only`, `--no-memory`, `--no-subagents` |
 | Cursor | `cursor` | `cursor-agent` | `--print --output-format json --trust`; `CURSOR_CONFIG_DIR` 与 `CURSOR_DATA_DIR` 指向本轮隔离 runtime; 无 `--sandbox` / `--mode ask` |
 
-- Codex, Claude 与 Grok 在只读隔离下运行: Codex 在目标 worktree 内跑只读 shell; Claude 与 Grok 在 worktree 外的 runtime 目录运行, 只读访问目标树并只开放读取, 搜索类工具. Cursor 不做事前阻断, 只把配置和会话目录隔离到 runtime, 只读约束由 prompt 承担, 兜底是审核结束后的工作树闸门; 工作树外的写入不在该闸门范围内. Claude 使用目标树外的任务 spec 时, 先把该文件快照到仅当前用户可访问的 runtime 目录, 不授权原文件父目录. runtime 目录在 POSIX 用 `0700`; Windows 必须相对固定临时根句柄以 `CREATE_NEW` 创建, 创建瞬间即使用关闭继承且只允许当前用户访问的受保护 DACL, 随机名碰撞安全重试, 不得先发布继承 ACL 的目录再收紧. Windows runtime 根句柄不得共享 WRITE/DELETE, 且必须持续持有到敏感文件写入、Reviewer 运行、进程树收集和 worktree 校验完成, 同时阻止改名与原地切换为 reparse point; 退出时从该固定句柄逐层 no-follow 且有界清理, reparse point、占用、预算耗尽或其他清理失败必须使审核失败, 禁静默遗留. 禁为了统一实现或适配 Windows 而交换或放宽各套隔离参数. Cursor 在原生 Windows 上若不是 `.exe` 则按现有规则不可用, 不另开 Windows 路径.
+- Codex, Claude 与 Grok 在只读隔离下运行: Codex 在目标 worktree 内跑只读 shell; Claude 与 Grok 在 worktree 外的 runtime 目录运行, 只读访问目标树并只开放读取, 搜索类工具. Cursor 不做事前阻断, 只把配置和会话目录隔离到 runtime, 只读约束由 prompt 承担, 兜底是审核结束后的工作树闸门; 工作树外的写入不在该闸门范围内. 完整审核 prompt 在所有平台写入 UTF-8 任务文件, Reviewer 只通过一句短指令取得其路径; Grok 保留自身的 `--prompt-file` 入口. 该任务文件不做 POSIX 权限或 Windows ACL 检查与收紧, 但它位于已有审核 runtime 时仍随 runtime 边界管理. 任何 Reviewer 退出后都必须对其进程组强制收尽, 收不尽即审核失败. 对自身必然拉起帮手进程且不等其收尾的 Reviewer (当前只有 Cursor), 只有脱离父链的 detached 后代才判为残留并拒绝结果, Reviewer 自身尚未收尾的子进程不拒绝; 其余 Reviewer 保持「退出瞬间进程组非空即拒绝」. 工作树闸门只看 Git 可见状态: 目标树中被 `.gitignore` 排除的路径 (例如 memsearch 的 `.memsearch/`) 不参与该判定, 也不因审核期间被写入而使审核失败. Claude 使用目标树外的任务 spec 时, 先把该文件快照到仅当前用户可访问的 runtime 目录, 不授权原文件父目录. runtime 目录在 POSIX 用 `0700`; Windows 必须相对固定临时根句柄以 `CREATE_NEW` 创建, 创建瞬间即使用关闭继承且只允许当前用户访问的受保护 DACL, 随机名碰撞安全重试, 不得先发布继承 ACL 的目录再收紧. Windows runtime 根句柄不得共享 WRITE/DELETE, 且必须持续持有到敏感文件写入、Reviewer 运行、进程树收集和 worktree 校验完成, 同时阻止改名与原地切换为 reparse point; 退出时从该固定句柄逐层 no-follow 且有界清理, reparse point、占用、预算耗尽或其他清理失败必须使审核失败, 禁静默遗留. 禁为了统一实现或适配 Windows 而交换或放宽各套隔离参数.
 - `PM`, `CSA`, `Hacker`, `QA` 分别选择 reviewer, 按优先级取该角色第一个明确指定的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则; (4) 配置文件中该角色的取值. 前三档都未指定时运行命令根下的 `onevoke review` 读取第 (4) 档, 配置不存在时回落到 Codex. 第 (3) 档只对本节的 reviewer 取值有效, 不改变入口的通用优先级链; 该档文件未载入且当前任务需要判定时读取它, 读不到按未指定处理.
 - 不同角色可以使用不同 reviewer. 同一角色的修复重跑和结论确认必须继续使用该角色本轮选定的 reviewer; 中途更换时该角色已有结论作废并重跑该阶段, 已通过的其他角色不因此作废.
 - 下文的「reviewer」和「reviewer CLI」均指当前审核角色选定的那一个; 「审核入口」指当前平台的 `onevoke-review.sh` 或 `onevoke-review.cmd`, 两者共同进入 `onevoke_review.py`.

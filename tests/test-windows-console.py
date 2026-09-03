@@ -47,9 +47,11 @@ class WindowsConsoleLauncherTest(unittest.TestCase):
         sys.path.insert(0, str(BIN_DIR))
         try:
             import onevoke_config
+            import onevoke_process
         finally:
             sys.path.pop(0)
         cls.onevoke_config = onevoke_config
+        cls.onevoke_process = onevoke_process
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -82,7 +84,11 @@ class WindowsConsoleLauncherTest(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch.object(self.kanban, "load_config", return_value=self.config),
-            mock.patch.object(self.kanban.shutil, "which", return_value=r"C:\fake\codex.exe"),
+            mock.patch.object(
+                self.kanban,
+                "resolve_agent_program",
+                return_value=self.onevoke_process.AgentProgram(r"C:\fake\codex.exe"),
+            ),
             mock.patch.object(self.kanban.subprocess, "Popen", popen),
             redirect_stdout(output),
         ):
@@ -165,21 +171,56 @@ class WindowsConsoleLauncherTest(unittest.TestCase):
         self.assertEqual(self.original, self.document.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / self.document.name).exists())
 
-    def test_console_rejects_batch_agent_before_claiming_task(self) -> None:
+    def test_console_launches_batch_agent_through_cmd(self) -> None:
+        popen = mock.Mock(return_value=mock.Mock(pid=4243))
+        with (
+            mock.patch.object(self.kanban, "load_config", return_value=self.config),
+            mock.patch.object(
+                self.kanban,
+                "resolve_agent_program",
+                return_value=self.onevoke_process.AgentProgram(
+                    r"C:\fake\codex.cmd", batch=True
+                ),
+            ),
+            mock.patch.object(self.kanban.subprocess, "Popen", popen),
+        ):
+            self.kanban.command_start(
+                Namespace(task=self.task_id, agent=None, launcher=None), self.root
+            )
+
+        arguments, options = popen.call_args
+        self.assertEqual(("/d", "/s", "/v:off", "/c"), arguments[0][1:5])
+        self.assertNotIn("codex.cmd", arguments[0][5])
+        self.assertTrue(any("codex.cmd" in value for value in options["env"].values()))
+        self.assertFalse(self.document.exists())
+        self.assertTrue((self.root / "working" / self.document.name).is_file())
+
+    def test_batch_invocation_failure_does_not_claim_task(self) -> None:
         popen = mock.Mock()
         with (
             mock.patch.object(self.kanban, "load_config", return_value=self.config),
-            mock.patch.object(self.kanban.shutil, "which", return_value=r"C:\fake\codex.cmd"),
+            mock.patch.object(
+                self.kanban,
+                "resolve_agent_program",
+                return_value=self.onevoke_process.AgentProgram(
+                    r"C:\fake\codex.cmd", batch=True
+                ),
+            ),
+            mock.patch.object(
+                self.kanban,
+                "process_invocation",
+                side_effect=FileNotFoundError("missing cmd.exe"),
+            ),
             mock.patch.object(self.kanban.subprocess, "Popen", popen),
         ):
-            with self.assertRaises(self.kanban.KanbanError) as raised:
+            with self.assertRaises(FileNotFoundError):
                 self.kanban.command_start(
                     Namespace(task=self.task_id, agent=None, launcher=None), self.root
                 )
 
-        self.assertIn(".exe", str(raised.exception))
         popen.assert_not_called()
         self.assertTrue(self.document.is_file())
+        self.assertEqual(self.original, self.document.read_text(encoding="utf-8"))
         self.assertFalse((self.root / "working" / self.document.name).exists())
 
     def assert_tmux_launcher_rejected(self, launcher: str | None) -> None:

@@ -22,11 +22,24 @@ FAKE_CURSOR = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_CURSOR_ARGV"
 printf '%s\\n' "$CURSOR_CONFIG_DIR" > "$FAKE_CURSOR_CONFIG_DIR"
 printf '%s\\n' "$CURSOR_DATA_DIR" > "$FAKE_CURSOR_DATA_DIR"
-cat > "$FAKE_CURSOR_PROMPT"
+instruction=$(cat)
+prompt=${instruction#*task file at }
+prompt=${prompt%%; read the complete file first*}
+cat "$prompt" > "$FAKE_CURSOR_PROMPT"
 pwd -P > "$FAKE_CURSOR_CWD"
 
 if [ -n "${FAKE_CURSOR_TAMPER:-}" ]; then
     printf '%s\\n' 'tampered' > "$FAKE_CURSOR_TAMPER"
+fi
+if [ -n "${FAKE_CURSOR_OWN_CHILD:-}" ]; then
+    # Reviewer 自己的子进程: 留在进程组里, 父链仍指向 Reviewer, Reviewer 不等它.
+    sleep 30 &
+    sleep 1
+fi
+if [ -n "${FAKE_CURSOR_DETACHED_CHILD:-}" ]; then
+    # detached 后代: 双 fork 脱离父链但留在进程组里, 打算熬过 Reviewer 退出.
+    ( sleep 30 & ) &
+    sleep 1
 fi
 if [ -n "${FAKE_CURSOR_FAIL:-}" ]; then
     printf '%s\\n' 'fake cursor failure' >&2
@@ -121,6 +134,28 @@ class CursorReviewGateTest(unittest.TestCase):
         return self.review(
             str(self.repo), self.base, self.head, "QA", "确认改动正确", **overrides
         )
+
+    def test_reviewer_own_unreaped_children_do_not_reject_the_report(self) -> None:
+        """Reviewer 退出瞬间自己的子进程还在, 属于正常收尾, 不该拒绝结果.
+
+        cursor-agent 的 worker-server 和它经 npx 拉起的 language server 就是这一类:
+        cursor 主进程退出时并不等它们, 于是进程组在那一瞬间必然非空.
+        """
+
+        result = self.default_review(FAKE_CURSOR_OWN_CHILD="1")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("REPORT BODY", result.stdout)
+        self.assertNotIn("background child processes", result.stderr)
+
+    def test_detached_descendant_still_rejects_the_report(self) -> None:
+        """双 fork 脱离父链的后代仍然判为残留, 安全边界不变."""
+
+        result = self.default_review(FAKE_CURSOR_DETACHED_CHILD="1")
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("background child processes", result.stderr)
+        self.assertNotIn("REPORT BODY", result.stdout)
 
     def test_missing_arguments_report_usage(self) -> None:
         result = self.review()

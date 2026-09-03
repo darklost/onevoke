@@ -32,6 +32,8 @@ class WindowsAutomationDocumentationTest(unittest.TestCase):
         self.assertIn("不得固定假设 `py -3` 可用", git_rules)
         self.assertIn("系统 py.exe -3", git_rules)
         self.assertIn("PATH 中 python.exe", git_rules)
+        self.assertIn("PATH 中 python3.exe", git_rules)
+        self.assertIn("0 字节 WindowsApps 别名", git_rules)
         self.assertIn(
             '& "$env:USERPROFILE\\.local\\bin\\onevoke-review.cmd"',
             review_rules,

@@ -11,6 +11,7 @@ import os
 import re
 import runpy
 import select
+import shlex
 import shutil
 import socket
 import stat
@@ -192,6 +193,34 @@ if [ "$1" = "display-message" ]; then
         printf '%s\t%s\t%s\\n' "${current:-codex}" "${KANBAN_TMUX_IN_MODE:-0}" "${KANBAN_TMUX_DEAD:-0}"
         exit 0
     fi
+    if [ "${5:-}" = '#{pane_current_command}\t#{pane_dead}' ]; then
+        current="${KANBAN_TMUX_CURRENT_COMMAND:-codex}"
+        if [ -f "$KANBAN_TMUX_LOG.dismiss-sent" ] && [ "${KANBAN_TMUX_DISMISS_STUCK:-}" != "1" ]; then
+            [ "${KANBAN_TMUX_WINDOW_GONE:-}" != "1" ] || exit 1
+            printf '%s\t1\\n' "${KANBAN_TMUX_DISMISS_REPLACED_COMMAND:-$current}"
+        else
+            printf '%s\t0\\n' "$current"
+        fi
+        exit 0
+    fi
+    if [ "${5:-}" = '#{session_id}\t#{session_name}\t#{window_id}\t#{window_panes}' ]; then
+        target_session="${KANBAN_TMUX_TARGET_SESSION:-}"
+        [ -n "$target_session" ] || target_session='$42'
+        printf '%s\t%s\t%s\t%s\n' \
+            "$target_session" \
+            "${KANBAN_TMUX_TARGET_SESSION_NAME:-fake-session}" \
+            "${KANBAN_TMUX_TARGET_WINDOW:-@9}" \
+            "${KANBAN_TMUX_WINDOW_PANES:-1}"
+        exit 0
+    fi
+    if [ "${5:-}" = '#{window_id}' ]; then
+        if [ "${KANBAN_TMUX_WINDOW_GONE:-}" = "1" ]; then
+            printf '%s\\n' "can't find window: @9" >&2
+            exit 1
+        fi
+        printf '%s\\n' '@9'
+        exit 0
+    fi
     printf '%s\\n' '$42'
     exit 0
 fi
@@ -235,6 +264,9 @@ if [ "$1" = "send-keys" ]; then
     printf '%s\\n' "$@" >> "$KANBAN_TMUX_LOG.send"
     if [ "$4" = "-l" ]; then
         printf '%s\\n' "$5" > "$KANBAN_TMUX_LOG.instruction"
+        case "$5" in
+            /exit|/quit) : > "$KANBAN_TMUX_LOG.dismiss-sent" ;;
+        esac
     fi
     [ "${KANBAN_TMUX_SEND_FAIL:-}" = "1" ] && exit 1
     exit 0
@@ -263,7 +295,7 @@ if [ "$1" = "respawn-pane" ]; then
             printf '%s\\n' \
                 '{"type":"session_meta","payload":{"id":"fake-codex-session"}}' \
                 > "$session_dir/rollout-$task.jsonl"
-            printf '{"type":"event_msg","payload":{"type":"user_message","message":"执行 Kanban 任务 %s."}}\\n' \
+            printf '{"type":"event_msg","payload":{"type":"user_message","message":"执行 Kanban 任务 %s; full instructions are in the UTF-8 task file at /tmp/task.md; read the complete file first and follow it exactly."}}\\n' \
                 "$task" >> "$session_dir/rollout-$task.jsonl"
         fi
     fi
@@ -361,6 +393,9 @@ if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
         printf '%s\\n' 'fake herdr agent prompt failure' >&2
         exit 1
     fi
+    case "$4" in
+        /exit|/quit) : > "$KANBAN_HERDR_LOG.dismiss-sent" ;;
+    esac
     exit 0
 fi
 if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
@@ -382,8 +417,22 @@ if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
         printf '%s\n' 'fake pane not found' >&2
         exit 1
     fi
-    printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"w1:t9","agent":"%s","agent_status":"%s","agent_session":{"value":"%s"}}}}\n' \
-        "$3" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_STATUS:-idle}" "${KANBAN_HERDR_SESSION:-}"
+    if [ -f "$KANBAN_HERDR_LOG.dismiss-sent" ] && [ "${KANBAN_HERDR_DISMISS_STUCK:-}" != "1" ]; then
+        if [ "${KANBAN_HERDR_DISMISS_PANE_GONE:-}" = "1" ]; then
+            printf '%s\n' '{"id":"cli:pane:get","error":{"code":"pane_not_found","message":"gone"}}' >&2
+            exit 1
+        fi
+        if [ -n "${KANBAN_HERDR_DISMISS_REPLACED_AGENT:-}" ]; then
+            printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"w1:t9","agent":"%s","agent_status":"idle","agent_session":{"value":"replacement-session"}}}}\n' \
+                "$3" "$KANBAN_HERDR_DISMISS_REPLACED_AGENT"
+            exit 0
+        fi
+        printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"%s","agent_status":"unknown"}}}\n' \
+            "$3" "${KANBAN_HERDR_TAB_ID:-w1:t9}"
+        exit 0
+    fi
+    printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"%s","agent":"%s","agent_status":"%s","agent_session":{"value":"%s"}}}}\n' \
+        "$3" "${KANBAN_HERDR_TAB_ID:-w1:t9}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_STATUS:-idle}" "${KANBAN_HERDR_SESSION:-}"
     exit 0
 fi
 if [ "$1" = "pane" ] && [ "$2" = "read" ]; then
@@ -401,8 +450,12 @@ if [ "$1" = "pane" ] && [ "$2" = "list" ]; then
         printf '%s\n' "$KANBAN_HERDR_LIST_JSON"
         exit 0
     fi
-    printf '{"id":"cli:pane:list","result":{"type":"pane_list","panes":[{"pane_id":"w1:p9","tab_id":"w1:t9","agent":"%s","agent_status":"idle","agent_session":{"kind":"id","source":"herdr:%s","value":"%s"}}]}}\n' \
-        "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_SESSION:-}"
+    if [ -f "$KANBAN_HERDR_LOG.dismiss-sent" ] && [ "${KANBAN_HERDR_DISMISS_PANE_GONE:-}" = "1" ]; then
+        printf '%s\n' '{"id":"cli:pane:list","result":{"type":"pane_list","panes":[]}}'
+        exit 0
+    fi
+    printf '{"id":"cli:pane:list","result":{"type":"pane_list","panes":[{"pane_id":"w1:p9","tab_id":"%s","agent":"%s","agent_status":"idle","agent_session":{"kind":"id","source":"herdr:%s","value":"%s"}}]}}\n' \
+        "${KANBAN_HERDR_TAB_ID:-w1:t9}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_SESSION:-}"
     exit 0
 fi
 if [ "$1" = "tab" ] && [ "$2" = "close" ]; then
@@ -819,6 +872,14 @@ exit 1
         return (self.root / "tmux.log.command").read_text(encoding="utf-8").rstrip("\n")
 
     @staticmethod
+    def task_file_from_command(command: str) -> Path:
+        prompt = shlex.split(command)[-1]
+        match = re.search(r"task file at (.+); read the complete file first", prompt)
+        if match is None:
+            raise AssertionError(f"task file pointer missing from command: {command}")
+        return Path(match.group(1))
+
+    @staticmethod
     def set_branch(path: Path, branch: str) -> None:
         text = path.read_text(encoding="utf-8")
         path.write_text(text.replace("- 任务分支:\n", f"- 任务分支: {branch}\n", 1), encoding="utf-8")
@@ -835,6 +896,41 @@ exit 1
         self.set_branch(working, slug)
         self.run_command("move", task_id, "review")
         return task_id, self.root / "review" / task.name
+
+    def make_done(
+        self, slug: str, agent: str = "claude", launcher: str = "herdr"
+    ) -> tuple[str, Path]:
+        if launcher == "herdr":
+            self.install_fake_herdr()
+        else:
+            self.install_fake_launchers()
+        task_id, task = self.make_todo(slug)
+        self.run_command("start", "--launcher", launcher, "--agent", agent, task_id)
+        working = self.root / "working" / task.name
+        session = re.search(
+            rf"(?m)^- 会话: {agent} (\S+)$", working.read_text(encoding="utf-8")
+        )
+        if session is not None:
+            if launcher == "herdr":
+                self.env["KANBAN_HERDR_SESSION"] = session.group(1)
+            else:
+                self.env["KANBAN_TMUX_PANE_SESSION"] = session.group(1)
+        if launcher == "tmux-session":
+            window = re.search(
+                r"(?m)^- 窗口: tmux-session:([^:]+):",
+                working.read_text(encoding="utf-8"),
+            )
+            assert window is not None
+            self.env["KANBAN_TMUX_TARGET_SESSION_NAME"] = window.group(1)
+        if launcher == "herdr":
+            self.env["KANBAN_HERDR_AGENT"] = agent
+        else:
+            self.env["KANBAN_TMUX_CURRENT_COMMAND"] = (
+                "cursor-agent" if agent == "cursor" else agent
+            )
+        self.complete(working)
+        self.run_command("move", task_id, "done")
+        return task_id, self.root / "done" / task.name
 
     def test_new_template_includes_session_and_window_fields(self) -> None:
         task_id, task = self.make_todo("template-session")
@@ -964,8 +1060,10 @@ exit 1
         self.assertIn("--dangerously-skip-permissions", command)
         self.assertIn("--effort medium", command)
         self.assertIn(f"继续 Kanban 任务 {task_id}", command)
-        self.assertIn("QA finding: 补齐空输入校验", command)
-        self.assertIn(f"kanban show {task_id}", command)
+        self.assertNotIn("QA finding: 补齐空输入校验", command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn("QA finding: 补齐空输入校验", task_content)
+        self.assertIn(f"kanban show {task_id}", task_content)
         tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
         self.assertEqual("kb-任务-resume-claude", tmux_args[tmux_args.index("-n") + 1])
 
@@ -982,8 +1080,9 @@ exit 1
         self.run_command("resume", task_id, "--message-file", str(findings))
 
         command = self.last_launch_command()
-        self.assertIn("越界读取", command)
-        self.assertIn("缺少验收 3", command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn("越界读取", task_content)
+        self.assertIn("缺少验收 3", task_content)
         self.assertRegex(command, r"--resume [0-9a-f-]{36}")
 
     def test_resume_requires_exactly_one_message_source(self) -> None:
@@ -1030,7 +1129,12 @@ exit 1
         decoy = rollout("rollout-2026-09-01T10-00-00-aaaa.jsonl", "aaaaaaaa-0000-0000-0000-000000000001", f"执行 Kanban 任务 {other_id}.")
         # 主控自己的会话只是提到任务 ID, 不是 start prompt, 即使更新也不能被选中.
         orchestrator = rollout("rollout-2026-09-01T11-00-00-cccc.jsonl", "cccccccc-0000-0000-0000-000000000003", f"请用 kanban start 启动 {task_id} 并跟踪")
-        target = rollout("rollout-2026-09-01T09-00-00-bbbb.jsonl", "bbbbbbbb-0000-0000-0000-000000000002", f"执行 Kanban 任务 {task_id}. 先运行 kanban rules")
+        target = rollout(
+            "rollout-2026-09-01T09-00-00-bbbb.jsonl",
+            "bbbbbbbb-0000-0000-0000-000000000002",
+            f"执行 Kanban 任务 {task_id}; full instructions are in the UTF-8 task file at "
+            "/tmp/onevoke-task.md; read the complete file first and follow it exactly.",
+        )
         os.utime(target, (1_700_000_000, 1_700_000_000))
         os.utime(decoy, (1_700_000_500, 1_700_000_500))
         os.utime(orchestrator, (1_700_000_900, 1_700_000_900))
@@ -1222,15 +1326,17 @@ exit 1
 
         self.run_command("start", task_id)
         group_command = self.last_launch_command()
+        group_content = self.task_file_from_command(group_command).read_text(encoding="utf-8")
         self.run_command("start", single_id)
         single_command = self.last_launch_command()
+        single_content = self.task_file_from_command(single_command).read_text(encoding="utf-8")
 
-        self.assertIn(f"kanban move {task_id} review", group_command)
-        self.assertIn("汇入组集成分支", group_command)
-        self.assertIn("由任务组主控负责", group_command)
-        self.assertNotIn("审核、集成和看板收尾.", group_command)
-        self.assertIn("审核、集成和看板收尾", single_command)
-        self.assertNotIn("review", single_command)
+        self.assertIn(f"kanban move {task_id} review", group_content)
+        self.assertIn("汇入组集成分支", group_content)
+        self.assertIn("由任务组主控负责", group_content)
+        self.assertNotIn("审核、集成和看板收尾.", group_content)
+        self.assertIn("审核、集成和看板收尾", single_content)
+        self.assertNotIn("review", single_content)
 
     def test_resume_relaunches_cursor_with_its_chat(self) -> None:
         fake_bin = self.install_fake_launchers()
@@ -1253,7 +1359,8 @@ exit 1
         self.assertIn("--model cursor-grok-4.6-high", command)
         self.assertIn("--trust", command)
         self.assertIn("--force", command)
-        self.assertIn("QA finding: 修复空指针", command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn("QA finding: 修复空指针", task_content)
         self.assertTrue(working.exists())
 
     def test_notify_delivers_private_payload_and_waits_for_herdr_ack(self) -> None:
@@ -1934,6 +2041,304 @@ exit 1
         self.assertIn("超时", bad_timeout.stderr)
         self.assertIn("大于 60", short_timeout.stderr)
 
+    def test_dismiss_herdr_exits_agent_before_closing_tab_without_mutating_card(self) -> None:
+        task_id, done = self.make_done("dismiss-herdr", agent="claude")
+        before = done.read_bytes()
+
+        result = self.run_command("dismiss", task_id, "--timeout", "61")
+
+        self.assertEqual(before, done.read_bytes())
+        self.assertIn(f"已遣散: {task_id}\t通道=herdr\t关闭容器=w1:t9", result.stdout)
+        self.assertEqual(
+            ["agent", "prompt", "w1:p9", "/exit"], self.herdr_arguments("prompt")
+        )
+        self.assertEqual(["tab", "close", "w1:t9"], self.herdr_arguments("close"))
+        order = self.herdr_arguments("order")
+        last_get = max(index for index, item in enumerate(order) if item == "pane get")
+        self.assertLess(order.index("agent prompt"), last_get)
+
+    def test_dismiss_tmux_uses_agent_command_and_closes_surviving_window(self) -> None:
+        task_id, done = self.make_done(
+            "dismiss-tmux", agent="cursor", launcher="tmux"
+        )
+        before = done.read_bytes()
+
+        result = self.run_command("dismiss", task_id, "--timeout", "61")
+
+        self.assertEqual(before, done.read_bytes())
+        self.assertIn(f"已遣散: {task_id}\t通道=tmux\t关闭容器=@9", result.stdout)
+        self.assertEqual(
+            "/quit", (self.root / "tmux.log.instruction").read_text(encoding="utf-8").strip()
+        )
+        self.assertEqual(
+            ["kill-window", "-t", "@9"],
+            (self.root / "tmux.log.kill").read_text(encoding="utf-8").splitlines(),
+        )
+
+    def test_dismiss_tmux_accepts_a_window_that_closed_with_the_agent(self) -> None:
+        task_id, _done = self.make_done(
+            "dismiss-tmux-gone", agent="grok", launcher="tmux-session"
+        )
+        self.env["KANBAN_TMUX_WINDOW_GONE"] = "1"
+
+        result = self.run_command("dismiss", task_id, "--timeout", "61")
+
+        self.assertIn("通道=tmux-session\t关闭容器=@9", result.stdout)
+        self.assertEqual(
+            "/quit", (self.root / "tmux.log.instruction").read_text(encoding="utf-8").strip()
+        )
+        self.assertFalse((self.root / "tmux.log.kill").exists())
+
+    def test_dismiss_accepts_archived_card_and_a_herdr_pane_that_closed(self) -> None:
+        task_id, done = self.make_done("dismiss-archived", agent="claude")
+        self.run_command("move", task_id, "archived")
+        archived = self.root / "archived" / done.name
+        before = archived.read_bytes()
+        self.env["KANBAN_HERDR_DISMISS_PANE_GONE"] = "1"
+
+        result = self.run_command("dismiss", task_id, "--timeout", "61")
+
+        self.assertIn("通道=herdr\t关闭容器=w1:t9", result.stdout)
+        self.assertEqual(before, archived.read_bytes())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_dismiss_tmux_identity_mismatch_does_not_send_or_close(self) -> None:
+        task_id, done = self.make_done(
+            "dismiss-tmux-identity", agent="claude", launcher="tmux"
+        )
+        before = done.read_bytes()
+        self.env["KANBAN_TMUX_PANE_SESSION"] = "wrong-session"
+
+        result = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("tmux 会话不匹配", result.stderr)
+        self.assertEqual(before, done.read_bytes())
+        self.assertFalse((self.root / "tmux.log.instruction").exists())
+        self.assertFalse((self.root / "tmux.log.kill").exists())
+
+    def test_dismiss_herdr_rejects_moved_pane_or_multi_pane_tab(self) -> None:
+        task_id, done = self.make_done("dismiss-herdr-container", agent="claude")
+        before = done.read_bytes()
+        self.env["KANBAN_HERDR_TAB_ID"] = "w1:t8"
+
+        moved = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("所属 tab 不匹配", moved.stderr)
+        self.env["KANBAN_HERDR_TAB_ID"] = "w1:t9"
+        session = self.env["KANBAN_HERDR_SESSION"]
+        self.env["KANBAN_HERDR_LIST_JSON"] = json.dumps({
+            "id": "cli:pane:list",
+            "result": {
+                "type": "pane_list",
+                "panes": [
+                    {
+                        "pane_id": pane_id,
+                        "tab_id": "w1:t9",
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "agent_session": {"value": session},
+                    }
+                    for pane_id in ("w1:p9", "w1:p10")
+                ],
+            },
+        })
+
+        multiple = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("不只包含目标 pane", multiple.stderr)
+        self.assertEqual(before, done.read_bytes())
+        self.assertFalse((self.root / "herdr.log.prompt").exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_dismiss_herdr_rejects_incomplete_topology_response(self) -> None:
+        task_id, done = self.make_done("dismiss-herdr-invalid-pane", agent="claude")
+        session = self.env["KANBAN_HERDR_SESSION"]
+        self.env["KANBAN_HERDR_LIST_JSON"] = json.dumps({
+            "id": "cli:pane:list",
+            "result": {
+                "type": "pane_list",
+                "panes": [
+                    {
+                        "pane_id": "w1:p9",
+                        "tab_id": "w1:t9",
+                        "agent": "claude",
+                        "agent_status": "idle",
+                        "agent_session": {"value": session},
+                    },
+                    {"tab_id": "w1:t9"},
+                ],
+            },
+        })
+
+        result = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("pane 缺少有效 id", result.stderr)
+        self.assertTrue(done.exists())
+        self.assertFalse((self.root / "herdr.log.prompt").exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_dismiss_tmux_rejects_moved_pane_or_multi_pane_window(self) -> None:
+        task_id, done = self.make_done(
+            "dismiss-tmux-container", agent="claude", launcher="tmux"
+        )
+        before = done.read_bytes()
+        cases = (
+            ("KANBAN_TMUX_TARGET_SESSION", "$99", "所属容器不匹配"),
+            ("KANBAN_TMUX_TARGET_WINDOW", "@8", "所属容器不匹配"),
+            ("KANBAN_TMUX_WINDOW_PANES", "2", "不只包含目标 pane"),
+        )
+        for name, value, message in cases:
+            with self.subTest(name=name):
+                self.env[name] = value
+                result = self.run_command(
+                    "dismiss", task_id, "--timeout", "61", succeeds=False
+                )
+                self.assertIn(message, result.stderr)
+                self.env.pop(name)
+
+        self.assertEqual(before, done.read_bytes())
+        self.assertFalse((self.root / "tmux.log.instruction").exists())
+        self.assertFalse((self.root / "tmux.log.kill").exists())
+
+    def test_dismiss_timeout_after_delivery_does_not_close_container(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id, done = self.make_done("dismiss-timeout", agent="claude")
+        entry = kanban.Entry(task_id, "done", done, done, "small")
+        args = argparse.Namespace(task=task_id, timeout=61)
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "load_board", return_value={}):
+                with mock.patch.object(kanban, "locate", return_value=entry):
+                    with mock.patch.object(
+                        kanban,
+                        "herdr_wait_agent_exit",
+                        side_effect=kanban.KanbanError("等待 Agent 退出超时"),
+                    ):
+                        with mock.patch.object(kanban, "herdr_close_tab") as close:
+                            with self.assertRaisesRegex(kanban.KanbanError, "超时"):
+                                kanban.command_dismiss(args, self.root)
+        close.assert_not_called()
+        self.assertEqual(
+            ["agent", "prompt", "w1:p9", "/exit"], self.herdr_arguments("prompt")
+        )
+
+    def test_dismiss_rejects_unfinished_or_busy_tasks_without_partial_action(self) -> None:
+        self.install_fake_herdr()
+        task_id, task = self.make_todo("dismiss-working")
+        self.run_command("start", "--launcher", "herdr", "--agent", "claude", task_id)
+
+        unfinished = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("working", unfinished.stderr)
+        self.assertFalse((self.root / "herdr.log.prompt").exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+        working = self.root / "working" / task.name
+        session = re.search(
+            r"(?m)^- 会话: claude (\S+)$", working.read_text(encoding="utf-8")
+        ).group(1)
+        self.complete(working)
+        self.run_command("move", task_id, "done")
+        self.env["KANBAN_HERDR_AGENT"] = "claude"
+        self.env["KANBAN_HERDR_SESSION"] = session
+        self.env["KANBAN_HERDR_STATUS"] = "working"
+
+        busy = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("状态不可投递", busy.stderr)
+        self.assertFalse((self.root / "herdr.log.prompt").exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_dismiss_legacy_herdr_card_uses_unique_lookup_without_writing_window(self) -> None:
+        task_id, done = self.make_done("dismiss-legacy", agent="grok")
+        text = re.sub(
+            r"(?m)^- 窗口:.*\n", "", done.read_text(encoding="utf-8"), count=1
+        )
+        done.write_text(text, encoding="utf-8")
+        before = done.read_bytes()
+
+        self.run_command("dismiss", task_id, "--timeout", "61")
+
+        self.assertEqual(before, done.read_bytes())
+        self.assertEqual(["pane", "list"], self.herdr_arguments("list"))
+        self.assertEqual(
+            ["agent", "prompt", "w1:p9", "/quit"], self.herdr_arguments("prompt")
+        )
+
+    def test_dismiss_legacy_herdr_card_rejects_ambiguous_lookup(self) -> None:
+        task_id, done = self.make_done("dismiss-ambiguous", agent="claude")
+        text = re.sub(
+            r"(?m)^- 窗口:.*\n", "", done.read_text(encoding="utf-8"), count=1
+        )
+        done.write_text(text, encoding="utf-8")
+        session = self.env["KANBAN_HERDR_SESSION"]
+        self.env["KANBAN_HERDR_LIST_JSON"] = json.dumps(
+            {
+                "id": "cli:pane:list",
+                "result": {
+                    "type": "pane_list",
+                    "panes": [
+                        {
+                            "pane_id": f"w1:p{index}",
+                            "tab_id": f"w1:t{index}",
+                            "agent": "claude",
+                            "agent_status": "idle",
+                            "agent_session": {"value": session},
+                        }
+                        for index in (1, 2)
+                    ],
+                },
+            }
+        )
+
+        result = self.run_command("dismiss", task_id, "--timeout", "61", succeeds=False)
+
+        self.assertIn("匹配不唯一", result.stderr)
+        self.assertFalse((self.root / "herdr.log.prompt").exists())
+        self.assertFalse((self.root / "herdr.log.close").exists())
+
+    def test_dismiss_rejects_process_launchers_and_invalid_timeouts(self) -> None:
+        task_id, done = self.make_done("dismiss-process", agent="claude")
+        text = done.read_text(encoding="utf-8")
+        for launcher in ("foreground", "console"):
+            done.write_text(
+                re.sub(r"(?m)^- 窗口:.*$", f"- 窗口: {launcher}", text, count=1),
+                encoding="utf-8",
+            )
+            result = self.run_command(
+                "dismiss", task_id, "--timeout", "61", succeeds=False
+            )
+            self.assertIn("没有可遣散的终端容器", result.stderr)
+        for timeout in ("60", "nan"):
+            result = self.run_command(
+                "dismiss", task_id, "--timeout", timeout, succeeds=False
+            )
+            self.assertIn("超时", result.stderr)
+        self.assertFalse((self.root / "herdr.log.prompt").exists())
+
+    def test_dismiss_exit_command_table_and_windows_rejection(self) -> None:
+        kanban = self.load_kanban_module()
+        self.assertEqual(
+            {
+                "claude": "/exit",
+                "codex": "/exit",
+                "grok": "/quit",
+                "cursor": "/quit",
+            },
+            {agent: kanban.agent_exit_command(agent) for agent in kanban.AGENT_NAMES},
+        )
+        task_id, done = self.make_done("dismiss-windows", agent="claude")
+        args = argparse.Namespace(task=task_id, timeout=61)
+        entry = kanban.Entry(task_id, "done", done, done, "small")
+        with mock.patch.object(kanban, "load_board", return_value={}):
+            with mock.patch.object(kanban, "locate", return_value=entry):
+                with mock.patch.object(kanban.os, "name", "nt"):
+                    with mock.patch.object(kanban, "herdr_agent_prompt") as prompt:
+                        with self.assertRaisesRegex(kanban.KanbanError, "Windows"):
+                            kanban.command_dismiss(args, self.root)
+        prompt.assert_not_called()
+        self.assertTrue(done.exists())
+
     def test_tmux_persists_window_before_agent_can_mutate_card(self) -> None:
         self.install_fake_launchers()
         task_id, task = self.make_todo("tmux-order")
@@ -2057,9 +2462,11 @@ exit 1
         self.assertIn('model_reasoning_effort="medium"', command)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn(task_id, command)
-        self.assertIn("先运行 kanban rules", command)
-        self.assertIn("遵守目标项目 AGENTS.md", command)
-        self.assertNotIn(".onevoke/bin/kanban", command)
+        self.assertNotIn("先运行 kanban rules", command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn("先运行 kanban rules", task_content)
+        self.assertIn("遵守目标项目 AGENTS.md", task_content)
+        self.assertNotIn(".onevoke/bin/kanban", task_content)
 
     def test_start_window_name_folds_title_and_truncates(self) -> None:
         task_id, task = self.make_todo("window-name")
@@ -4548,6 +4955,17 @@ N/A
         bad = self.run_command("web", "--refresh", "0", succeeds=False)
         self.assertIn("扫描间隔", bad.stderr)
 
+    def test_tui_uses_in_review_label_without_changing_web_label(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_tui_labels_test")
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual("审核中", kanban["tui_page_context"]()["state_labels"]["review"])
+        web_labels = json.loads(kanban["web_page_context"]()["status_labels_json"])
+        self.assertEqual("待审核", web_labels["review"])
+
     def test_tui_help_and_rejects_invalid_or_noninteractive_use(self) -> None:
         help_text = self.run_command("tui", "--help").stdout
         self.assertIn("--single", help_text)
@@ -7001,6 +7419,14 @@ class PosixProjectInstallerTest(unittest.TestCase):
 class KanbanProjectInstallTest(unittest.TestCase):
     """项目安装入口必须使用主 worktree `.onevoke/`, 且不得回落全局资源."""
 
+    @staticmethod
+    def task_file_from_command(command: str) -> Path:
+        prompt = shlex.split(command)[-1]
+        match = re.search(r"task file at (.+); read the complete file first", prompt)
+        if match is None:
+            raise AssertionError(f"task file pointer missing from command: {command}")
+        return Path(match.group(1))
+
     def setUp(self) -> None:
         self.language = mock.patch.dict(os.environ, {"ONEVOKE_LANG": "zh"})
         self.language.start()
@@ -7082,6 +7508,7 @@ class KanbanProjectInstallTest(unittest.TestCase):
             "kanban",
             "onevoke_config.py",
             "onevoke_fs.py",
+            "onevoke_process.py",
             "kanban_web.py",
             "kanban_tui.py",
         ):
@@ -7386,10 +7813,11 @@ printf '%s\\t%s\\n' '@9' '%9'
         self.assertTrue((board / "working" / f"{task_id}.md").is_file())
         command = (self.root / "tmux.log.command").read_text(encoding="utf-8").rstrip("\n")
         self.assertIn(str(fake_bin / "grok"), command)
-        self.assertIn(str(entry), command)
-        self.assertIn(str(main / "AGENTS.md"), command)
+        task_content = self.task_file_from_command(command).read_text(encoding="utf-8")
+        self.assertIn(str(entry), task_content)
+        self.assertIn(str(main / "AGENTS.md"), task_content)
         self.assertIn(str(main), (self.root / "tmux.log").read_text(encoding="utf-8"))
-        self.assertNotIn("先运行 kanban rules", command)
+        self.assertNotIn("先运行 kanban rules", task_content)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,18 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import IO, NoReturn
 
-from onevoke_config import configured_language, effective_config
+from onevoke_config import (
+    configured_language,
+    effective_config,
+)
+from onevoke_process import (
+    AgentProgram,
+    ProcessInvocation,
+    process_invocation,
+    resolve_agent_program,
+    task_file_instruction,
+    write_task_file,
+)
 from onevoke_fs import (
     PrivateTemporaryDirectoryCleanupError,
     private_temporary_directory_nofollow,
@@ -38,6 +49,8 @@ from onevoke_fs import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENTRYPOINT_NAME = "onevoke-review.cmd" if os.name == "nt" else "onevoke-review.sh"
 TRUE_VALUES = ("1", "yes", "true")
+# Reviewer 进程树归属的采样间隔 (秒); 见 ReviewerProcessTree.
+TREE_OBSERVE_INTERVAL = 0.2
 WINDOWS_JOB_BOOTSTRAP = "--onevoke-windows-job-bootstrap"
 
 
@@ -256,6 +269,9 @@ class AgentSettings:
     runtime_error_name: str
     output_name: str
     inspection_rules: str
+    # Reviewer CLI 会为自己拉起帮手进程 (worker, language server 等), 主进程退出时
+    # 不等它们收尾. 见 stop_process_tree 对残留判定的说明.
+    spawns_helper_processes: bool = False
 
 
 @dataclass(frozen=True)
@@ -270,7 +286,7 @@ class ReviewContext:
     task_spec: Path | None
     review_context: str
     reviewed: str | None
-    executable: str
+    program: AgentProgram
     temp_root: Path
 
 
@@ -429,6 +445,7 @@ def agent_settings(agent: str) -> AgentSettings:
                 "Prefer read-only inspection. Do not modify the target worktree; "
                 "the review gate fails if HEAD moves or the worktree is dirty."
             ),
+            "helpers": True,
         },
     }
     definition = definitions.get(agent)
@@ -475,6 +492,7 @@ def agent_settings(agent: str) -> AgentSettings:
         runtime_error_name=runtime_name,
         output_name=str(definition["output_name"]),
         inspection_rules=str(definition["inspection"]),
+        spawns_helper_processes=bool(definition.get("helpers", False)),
     )
 
 
@@ -696,20 +714,12 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
             )
         )
 
-    executable = shutil.which(settings.executable)
-    if executable is None:
+    program = resolve_agent_program(settings.executable)
+    if program is None:
         raise GateError(
             t(
                 f"{settings.name} CLI 不可用: {settings.executable}",
                 f"{settings.name} CLI is unavailable: {settings.executable}",
-            ),
-            127,
-        )
-    if os.name == "nt" and Path(executable).suffix.lower() != ".exe":
-        raise GateError(
-            t(
-                f"{settings.name} CLI 必须是原生 .exe, 不会执行可能重解析参数的入口: {executable}",
-                f"{settings.name} CLI must be a native .exe; refusing an entry point that can reparse arguments: {executable}",
             ),
             127,
         )
@@ -724,7 +734,7 @@ def validate_context(agent: str, arguments: list[str]) -> ReviewContext:
         task_spec=task_spec,
         review_context=review_context,
         reviewed=reviewed,
-        executable=executable,
+        program=program,
         temp_root=temp_root,
     )
 
@@ -909,10 +919,9 @@ def build_prompt(context: ReviewContext, evidence_file: Path, task_context: str)
 
 
 def launch_process(
-    arguments: list[str],
+    invocation: ProcessInvocation,
     *,
     cwd: Path,
-    environment: dict[str, str],
     stdin: IO[bytes],
     stdout: IO[bytes],
     stderr: IO[bytes],
@@ -921,9 +930,9 @@ def launch_process(
     if os.name != "nt":
         options["start_new_session"] = True
         return subprocess.Popen(
-            arguments,
+            invocation.argv,
             cwd=cwd,
-            env=environment,
+            env=invocation.environment,
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
@@ -949,10 +958,10 @@ def launch_process(
                 str(Path(__file__).resolve()),
                 WINDOWS_JOB_BOOTSTRAP,
                 event_name,
-                *arguments,
+                *invocation.argv,
             ],
             cwd=cwd,
-            env=environment,
+            env=invocation.environment,
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
@@ -984,6 +993,122 @@ def launch_process(
     finally:
         if not event_transferred and event_kernel32 is not None and event_handle:
             close_windows_handle(event_kernel32, event_handle)
+
+
+def snapshot_process_table() -> dict[int, tuple[int, int, bool]]:
+    """返回 ``pid -> (ppid, pgid, is_zombie)`` 的全系统快照.
+
+    Linux 直接读 ``/proc``, 其余 POSIX 回落到 ``ps``. 无法取得快照时返回空 dict,
+    调用方必须按 fail-closed 处理.
+    """
+
+    table: dict[int, tuple[int, int, bool]] = {}
+    proc = Path("/proc")
+    if sys.platform.startswith("linux") and proc.is_dir():
+        try:
+            entries = tuple(proc.iterdir())
+        except OSError:
+            return {}
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                record = (entry / "stat").read_text(encoding="ascii")
+            except (OSError, UnicodeError):
+                # 进程在遍历期间退出属于正常竞态, 不影响其余成员的判定.
+                continue
+            command_end = record.rfind(")")
+            if command_end < 0:
+                continue
+            fields = record[command_end + 2 :].split()
+            if len(fields) < 3:
+                continue
+            try:
+                table[int(entry.name)] = (int(fields[1]), int(fields[2]), fields[0] == "Z")
+            except ValueError:
+                continue
+        return table
+    try:
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,pgid=,state="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if listing.returncode != 0:
+        return {}
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        try:
+            table[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3].startswith("Z"))
+        except ValueError:
+            continue
+    return table
+
+
+class ReviewerProcessTree:
+    """记录 Reviewer 存活期间, 进程组里哪些成员属于 Reviewer 自己的进程树.
+
+    门禁要拦的是 detached 后代: 它在 Reviewer 还活着时就双 fork 脱离父链,
+    目的是熬过 Reviewer 退出并继续改动目标. 而 Reviewer 自己的子进程 (例如
+    cursor-agent 的 worker-server 与它经 npx 拉起的 language server) 在主进程
+    退出的那一瞬间必然仍在组内 — Reviewer 并不等它们收尾. 只看退出瞬间进程组
+    是否非空, 这两类无法区分, 于是正常审核被恒定拒绝.
+
+    Reviewer 退出后其子进程立刻被 init 收养, 父链信息随即丢失, 所以父子关系
+    只能在 Reviewer 存活期间采样. 每次采样从组长出发做可达性推导: 能经父链回到
+    组长的成员登记为「自身进程树」, 组内但不可达的成员就是已经脱离父链的
+    detached 后代, 永不登记.
+
+    登记是单调的: 一个 pid 一旦被观察到属于自身进程树就保持可信. 双 fork 的
+    脱离在微秒级完成, 采样几乎不可能把它拍在中间态; 即便拍到, 收尾仍然对整组
+    发 SIGKILL, 容器边界不变, 变的只是「是否信任本次审核结果」这一判定.
+    """
+
+    def __init__(self, leader_pid: int) -> None:
+        self.leader_pid = leader_pid
+        self.own_tree: set[int] = {leader_pid}
+        self.observed = False
+
+    def observe(self) -> None:
+        table = snapshot_process_table()
+        if not table:
+            return
+        self.observed = True
+        pending = {
+            pid
+            for pid, (_, process_group, zombie) in table.items()
+            if process_group == self.leader_pid and not zombie and pid not in self.own_tree
+        }
+        progressed = True
+        while progressed:
+            progressed = False
+            for pid in tuple(pending):
+                if table[pid][0] in self.own_tree:
+                    self.own_tree.add(pid)
+                    pending.discard(pid)
+                    progressed = True
+
+    def unattributed_members(self) -> tuple[int, ...] | None:
+        """返回组内无法归属到 Reviewer 自身进程树的存活成员.
+
+        无法取得进程快照时返回 ``None``, 由调用方 fail-closed.
+        """
+
+        table = snapshot_process_table()
+        if not table:
+            return None
+        return tuple(
+            sorted(
+                pid
+                for pid, (_, process_group, zombie) in table.items()
+                if process_group == self.leader_pid and not zombie and pid not in self.own_tree
+            )
+        )
 
 
 def stop_process_tree(process: subprocess.Popen[bytes]) -> bool:
@@ -1037,41 +1162,37 @@ def stop_process_tree(process: subprocess.Popen[bytes]) -> bool:
 
     def process_group_has_live_members() -> bool:
         # Linux can leave orphaned zombies visible when PID 1 does not reap
-        # promptly (notably in minimal containers). /proc lets us distinguish
-        # those inert entries from members that could still touch the target.
-        proc = Path("/proc")
-        if sys.platform.startswith("linux") and proc.is_dir():
-            try:
-                entries = tuple(proc.iterdir())
-            except OSError:
-                return process_group_exists()
-            for entry in entries:
-                if not entry.name.isdigit():
-                    continue
-                try:
-                    record = (entry / "stat").read_text(encoding="ascii")
-                except (OSError, UnicodeError):
-                    continue
-                command_end = record.rfind(")")
-                if command_end < 0:
-                    continue
-                fields = record[command_end + 2 :].split()
-                if len(fields) < 3:
-                    continue
-                state, process_group = fields[0], fields[2]
-                if process_group == str(process.pid) and state != "Z":
-                    return True
-            return False
-        return process_group_exists()
+        # promptly (notably in minimal containers). The process table lets us
+        # distinguish those inert entries from members that could still touch
+        # the target.
+        table = snapshot_process_table()
+        if not table:
+            return process_group_exists()
+        return any(
+            process_group == process.pid and not zombie
+            for _, (_, process_group, zombie) in table.items()
+        )
 
     group_exists = process_group_exists()
-    had_lingering_processes = group_exists
     if not group_exists:
         process.wait()
         return False
+    # 默认判定保持最严: 组内非空即拒绝. 只有 spawns_helper_processes 的 Reviewer
+    # 才装 tracker — 它们的 CLI 必然为自己拉起帮手进程并且不等其收尾, 严格判定会
+    # 把每一次正常审核都拒掉. 这类 Reviewer 改用父链归属: tracker 在 Reviewer 存活
+    # 期间采样过父子关系, 能把 Reviewer 自身进程树和已脱离父链, 打算熬过 Reviewer
+    # 的 detached 后代分开, 后者照旧拒绝. 拿不到 tracker 或拿不到进程快照时
+    # fail-closed, 回到严格判定.
+    tracker = getattr(process, "_onevoke_process_tree", None)
+    if isinstance(tracker, ReviewerProcessTree) and tracker.observed:
+        unattributed = tracker.unattributed_members()
+        had_lingering_processes = unattributed is None or bool(unattributed)
+    else:
+        had_lingering_processes = True
     # Do not give a detached descendant a grace period in which it can mutate
     # the target after its Reviewer parent has exited. A forceful group kill is
-    # the POSIX equivalent of TerminateJobObject for this security boundary.
+    # the POSIX equivalent of TerminateJobObject for this security boundary, and
+    # it is applied to every member regardless of how it was attributed above.
     # An orphaned zombie can remain visible under the old PGID until init reaps
     # it, but it cannot execute after SIGKILL.
     try:
@@ -1130,7 +1251,7 @@ def reviewer_arguments(
     runtime: Path,
     output_file: Path,
     prompt_file: Path,
-) -> tuple[list[str], Path, dict[str, str]]:
+) -> tuple[ProcessInvocation, Path]:
     settings = context.settings
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
@@ -1138,7 +1259,6 @@ def reviewer_arguments(
     if context.agent == "codex":
         environment["CODEX_HOME"] = str(settings.review_home.resolve())
         arguments = [
-            context.executable,
             "exec",
             "--cd",
             str(context.root),
@@ -1156,11 +1276,10 @@ def reviewer_arguments(
             str(output_file),
             "-",
         ]
-        return arguments, context.root, environment
+        return process_invocation(context.program, arguments, environment), context.root
     if context.agent == "claude":
         environment["CLAUDE_CONFIG_DIR"] = str(settings.review_home.resolve())
         arguments = [
-            context.executable,
             "--print",
             "--output-format",
             "json",
@@ -1179,12 +1298,11 @@ def reviewer_arguments(
             "--effort",
             settings.effort,
         ]
-        return arguments, runtime, environment
+        return process_invocation(context.program, arguments, environment), runtime
     if context.agent == "cursor":
         environment["CURSOR_CONFIG_DIR"] = str(runtime)
         environment["CURSOR_DATA_DIR"] = str(runtime)
         arguments = [
-            context.executable,
             "--print",
             "--output-format",
             "json",
@@ -1193,7 +1311,7 @@ def reviewer_arguments(
             str(context.root),
             *model,
         ]
-        return arguments, runtime, environment
+        return process_invocation(context.program, arguments, environment), runtime
     if context.agent != "grok":
         raise GateError(
             t(
@@ -1203,7 +1321,6 @@ def reviewer_arguments(
         )
     environment["GROK_HOME"] = str(settings.review_home.resolve())
     arguments = [
-        context.executable,
         "--cwd",
         str(runtime),
         *model,
@@ -1237,7 +1354,7 @@ def reviewer_arguments(
         "--prompt-file",
         str(prompt_file),
     ]
-    return arguments, context.root, environment
+    return process_invocation(context.program, arguments, environment), context.root
 
 
 def monitor_process(
@@ -1247,7 +1364,15 @@ def monitor_process(
 ) -> tuple[int, bool]:
     started = time.monotonic()
     next_check = started + context.settings.check_interval
+    # Reviewer 退出后子进程立刻被 init 收养, 父链信息随即丢失; 归属只能趁
+    # Reviewer 还活着时采样, 供 stop_process_tree 区分自身进程树和 detached 后代.
+    tracker: ReviewerProcessTree | None = None
+    if os.name != "nt" and context.settings.spawns_helper_processes:
+        tracker = ReviewerProcessTree(process.pid)
+        setattr(process, "_onevoke_process_tree", tracker)
     while process.poll() is None:
+        if tracker is not None:
+            tracker.observe()
         now = time.monotonic()
         elapsed = int(now - started)
         if now - started >= context.settings.max_runtime:
@@ -1268,7 +1393,23 @@ def monitor_process(
             )
             print_error_tail(error_file)
             next_check += context.settings.check_interval
-        time.sleep(min(0.1 if os.name == "nt" else 1.0, max(0.01, context.settings.max_runtime - (now - started))))
+        remaining = min(0.1 if os.name == "nt" else 1.0, max(0.01, context.settings.max_runtime - (now - started)))
+        if tracker is None:
+            time.sleep(remaining)
+            continue
+        # 归属采样要比监督心跳密, 否则中间父进程可能在两次采样之间创建又退出,
+        # 让一条正常的 Reviewer 子进程链看起来像是脱离了父链.
+        deadline = time.monotonic() + remaining
+        while True:
+            slice_seconds = min(TREE_OBSERVE_INTERVAL, deadline - time.monotonic())
+            if slice_seconds <= 0:
+                break
+            time.sleep(slice_seconds)
+            if process.poll() is not None:
+                # Reviewer 已退出: 立刻回到外层收尾, 让整组 SIGKILL 尽早落地,
+                # 缩短一个后台子进程可能改动目标的窗口.
+                break
+            tracker.observe()
     return_code = process.wait()
     if return_code < 0:
         return_code = 128 - return_code
@@ -1328,6 +1469,7 @@ def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
     error_file = runtime / "error.log"
     evidence_file = runtime / "evidence.txt"
     prompt_file = runtime / "prompt.txt"
+    stdin_file = runtime / "stdin.txt"
     process: subprocess.Popen[bytes] | None = None
     review_started = False
     tree_collection_attempted = False
@@ -1352,14 +1494,22 @@ def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
             task_context = f"Authoritative spec file: {snapshot}. Read it completely before reviewing."
 
         write_evidence(context, evidence_file)
-        prompt_file.write_text(build_prompt(context, evidence_file, task_context) + "\n", encoding="utf-8")
+        write_task_file(prompt_file, build_prompt(context, evidence_file, task_context))
+        stdin_file.write_text(
+            task_file_instruction(
+                f"Perform the {context.role} review.",
+                prompt_file,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         output_file.write_bytes(b"")
         stdout_file.write_bytes(b"")
         error_file.write_bytes(b"")
-        arguments, process_cwd, environment = reviewer_arguments(context, runtime, output_file, prompt_file)
+        invocation, process_cwd = reviewer_arguments(context, runtime, output_file, prompt_file)
         try:
             with (
-                prompt_file.open("rb") as prompt_stream,
+                stdin_file.open("rb") as prompt_stream,
                 stdout_file.open("wb") as stdout_stream,
                 error_file.open("wb") as error_stream,
             ):
@@ -1367,9 +1517,8 @@ def _execute_review_in_runtime(context: ReviewContext, runtime: Path) -> int:
                 reviewer_stdout = stdout_stream if output_stream is None else output_stream
                 try:
                     process = launch_process(
-                        arguments,
+                        invocation,
                         cwd=process_cwd,
-                        environment=environment,
                         stdin=prompt_stream,
                         stdout=reviewer_stdout,
                         stderr=error_stream,

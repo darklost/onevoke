@@ -47,12 +47,23 @@ agent = os.environ["FAKE_AGENT"]
 Path(os.environ["FAKE_ARGV"]).write_text(json.dumps(arguments), encoding="utf-8")
 Path(os.environ["FAKE_CWD"]).write_text(str(Path.cwd()), encoding="utf-8")
 Path(os.environ["FAKE_STATE_HOME"]).write_text(
-    os.environ[{"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR", "grok": "GROK_HOME"}[agent]],
+    os.environ[{
+        "codex": "CODEX_HOME",
+        "claude": "CLAUDE_CONFIG_DIR",
+        "grok": "GROK_HOME",
+        "cursor": "CURSOR_CONFIG_DIR",
+    }[agent]],
     encoding="utf-8",
 )
-prompt = sys.stdin.read()
+instruction = sys.stdin.read()
+prompt = instruction
 if "--prompt-file" in arguments:
     prompt = Path(arguments[arguments.index("--prompt-file") + 1]).read_text(encoding="utf-8")
+elif "task file at " in instruction:
+    prompt_path = instruction.split("task file at ", 1)[1].split(
+        "; read the complete file first", 1
+    )[0]
+    prompt = Path(prompt_path).read_text(encoding="utf-8")
 Path(os.environ["FAKE_PROMPT"]).write_text(prompt, encoding="utf-8")
 
 tamper = os.environ.get("FAKE_TAMPER")
@@ -79,7 +90,7 @@ report = os.environ.get("FAKE_REPORT", "REPORT BODY")
 if agent == "codex":
     output = Path(arguments[arguments.index("--output-last-message") + 1])
     output.write_text(report + "\n", encoding="utf-8")
-elif agent == "claude":
+elif agent in ("claude", "cursor"):
     print(json.dumps({
         "type": "result", "subtype": "success", "is_error": False, "result": report
     }, ensure_ascii=False))
@@ -193,7 +204,9 @@ class WindowsReviewGateTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.repo = self.root / "repo R&D"
         self.runtime = self.root / "runtime"
-        self.homes = {agent: self.root / agent for agent in ("codex", "claude", "grok")}
+        self.homes = {
+            agent: self.root / agent for agent in ("codex", "claude", "grok", "cursor")
+        }
         self.repo.mkdir()
         self.runtime.mkdir()
         for home in self.homes.values():
@@ -232,15 +245,19 @@ class WindowsReviewGateTest(unittest.TestCase):
                 "CODEX_HOME": str(self.homes["codex"]),
                 "CLAUDE_CONFIG_DIR": str(self.homes["claude"]),
                 "GROK_HOME": str(self.homes["grok"]),
+                "CURSOR_CONFIG_DIR": str(self.homes["cursor"]),
                 "CODEX_REVIEW_BIN": str(self.fake_command),
                 "CLAUDE_REVIEW_BIN": str(self.fake_command),
                 "GROK_REVIEW_BIN": str(self.fake_command),
+                "CURSOR_REVIEW_BIN": str(self.fake_command),
                 "CODEX_REVIEW_CHECK_INTERVAL_SECONDS": "1",
                 "CLAUDE_REVIEW_CHECK_INTERVAL_SECONDS": "1",
                 "GROK_REVIEW_CHECK_INTERVAL_SECONDS": "1",
+                "CURSOR_REVIEW_CHECK_INTERVAL_SECONDS": "1",
                 "CODEX_REVIEW_MAX_RUNTIME_SECONDS": "30",
                 "CLAUDE_REVIEW_MAX_RUNTIME_SECONDS": "30",
                 "GROK_REVIEW_MAX_RUNTIME_SECONDS": "30",
+                "CURSOR_REVIEW_MAX_RUNTIME_SECONDS": "30",
             }
         )
 
@@ -789,34 +806,48 @@ class WindowsReviewGateTest(unittest.TestCase):
         self.assertEqual(127, result.returncode)
         self.assertIn("Python 3 is required", result.stderr)
 
-    def test_gate_rejects_batch_reviewer_without_executing_it(self) -> None:
-        marker = self.root / "batch-executed.txt"
-        batch = self.root / "fake-reviewer.cmd"
-        batch.write_text(
-            '@echo off\r\n> "%BATCH_MARKER%" echo executed\r\nexit /b 0\r\n',
-            encoding="ascii",
-        )
+    def test_gate_launches_each_batch_reviewer_with_exact_arguments(self) -> None:
+        injection_marker = self.root / "batch-injection.txt"
+        model = f'model & echo injected > "{injection_marker}" ^%! "quoted" trailing\\'
 
-        result = self.review(
-            "codex",
-            CODEX_REVIEW_BIN=str(batch),
-            BATCH_MARKER=str(marker),
-        )
+        for index, agent in enumerate(("codex", "claude", "grok", "cursor")):
+            with self.subTest(agent=agent):
+                suffix = ".cmd" if index % 2 == 0 else ".bat"
+                batch = self.root / f"{agent} reviewer &()^%!{suffix}"
+                batch.write_text(
+                    '@echo off\r\n"%FAKE_BATCH_TARGET%" %*\r\n',
+                    encoding="ascii",
+                )
+                result = self.review(
+                    agent,
+                    **{
+                        f"{agent.upper()}_REVIEW_BIN": str(batch),
+                        f"{agent.upper()}_REVIEW_MODEL": model,
+                        "FAKE_BATCH_TARGET": str(self.fake_executable),
+                    },
+                )
 
-        self.assertEqual(127, result.returncode, result.stderr)
-        self.assertIn("must be a native .exe", result.stderr)
-        self.assertFalse(marker.exists())
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("REPORT BODY\n", result.stdout)
+                arguments = json.loads(self.argv_log.read_text(encoding="utf-8"))
+                self.assertEqual(model, arguments[arguments.index("--model") + 1])
+                self.assertNotIn("Authoritative task goal", " ".join(arguments))
+                self.assertIn(
+                    "You are the QA review agent",
+                    self.prompt_log.read_text(encoding="utf-8"),
+                )
+                self.assertFalse(injection_marker.exists())
 
-    def test_doctor_does_not_execute_batch_agents_for_version_detection(self) -> None:
+    def test_doctor_checks_batch_agent_versions_without_cwd_lookup(self) -> None:
         batch_dir = self.root / "batch-agents"
         batch_dir.mkdir()
         untrusted_cwd = self.root / "untrusted R&D repository"
         untrusted_cwd.mkdir()
         shutil.copy2(self.fake_executable, untrusted_cwd / "codex.exe")
         marker = self.root / "agent-version-executed.txt"
-        for agent in ("codex", "claude", "grok"):
+        for agent in ("codex", "claude", "grok", "cursor-agent"):
             (batch_dir / f"{agent}.cmd").write_text(
-                '@echo off\r\n> "%AGENT_MARKER%" echo executed\r\nexit /b 0\r\n',
+                f'@echo off\r\n> "%AGENT_MARKER%" echo executed\r\necho {agent} test-version\r\n',
                 encoding="ascii",
             )
         config = {
@@ -846,9 +877,9 @@ class WindowsReviewGateTest(unittest.TestCase):
             check=False,
         )
 
-        self.assertEqual(1, result.returncode)
-        self.assertIn("not a native .exe", result.stderr)
-        self.assertFalse(marker.exists())
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(marker.exists())
+        self.assertIn("Codex: codex test-version", result.stderr)
         self.assertFalse(self.argv_log.exists(), "doctor must not execute a native image planted in cwd")
 
     def test_timeout_kills_the_entire_reviewer_process_tree(self) -> None:
@@ -892,7 +923,13 @@ class WindowsReviewGateTest(unittest.TestCase):
         unsafe_log = self.root / "unsafe-cmd.txt"
         copied_bin = self.root / "installed R&D" / "bin"
         copied_bin.mkdir(parents=True)
-        for name in ("onevoke", "onevoke_config.py", "onevoke_fs.py", "onevoke_menu.py"):
+        for name in (
+            "onevoke",
+            "onevoke_config.py",
+            "onevoke_fs.py",
+            "onevoke_menu.py",
+            "onevoke_process.py",
+        ):
             shutil.copy2(PROJECT_ROOT / "bin" / name, copied_bin / name)
         (copied_bin / "onevoke_review.py").write_text(
             "import json, os, sys\n"
