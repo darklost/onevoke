@@ -534,7 +534,12 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertIn("a non-generated code file must not exceed 1000 physical lines", normalized_prompt)
         self.assertIn("creates such a file above 1000 lines", normalized_prompt)
         self.assertIn("from at most 1000 lines to above 1000 lines", normalized_prompt)
-        self.assertIn("adds code to a task-relevant file that was already above 1000 lines", normalized_prompt)
+        self.assertIn(
+            "increases the final physical-line count of a task-relevant file that was already above 1000 lines",
+            normalized_prompt,
+        )
+        self.assertIn("No net line increase means this rule does not trigger", normalized_prompt)
+        self.assertIn("replacement imports, adapters, or other glue code", normalized_prompt)
         self.assertIn("Do not inventory unrelated pre-existing oversized files", normalized_prompt)
         self.assertNotIn("realistic workload and code evidence", normalized_prompt)
         self.assertNotIn("universal line-count threshold", normalized_prompt)

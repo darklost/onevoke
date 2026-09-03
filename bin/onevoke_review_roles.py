@@ -38,9 +38,10 @@ ROLE_RULES = {
 
         Enforce this hard size rule: a non-generated code file must not exceed 1000 physical lines. Report a
         size-rule gate finding only when the review range (1) creates such a file above 1000 lines, (2) changes
-        such a file from at most 1000 lines to above 1000 lines, or (3) adds code to a task-relevant file that
-        was already above 1000 lines. Do not inventory unrelated pre-existing oversized files, and do not
-        report an already-oversized file when this range only removes code from it.
+        such a file from at most 1000 lines to above 1000 lines, or (3) increases the final physical-line count
+        of a task-relevant file that was already above 1000 lines. Do not inventory unrelated pre-existing
+        oversized files. No net line increase means this rule does not trigger for an already-oversized file,
+        even when the patch contains replacement imports, adapters, or other glue code.
 
         For every required behavior, assess controllable inputs, observable outputs, deterministic assertions,
         isolated state, and diagnosable failures. Recommend the cheapest effective test layer; missing tests
