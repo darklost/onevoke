@@ -59,11 +59,8 @@ from kanban_probe import (
     KanbanError,
     PANE_SESSION_OPTION,
     TMUX_GONE_MARKERS,
-    TmuxPaneFacts,
-    herdr_probe_pane,
     probe_herdr_pane,
     probe_tmux_pane,
-    tmux_pane_facts,
 )
 from kanban_liveness import (
     LIVENESS_DRIFTED,

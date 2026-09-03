@@ -14,8 +14,11 @@ from onevoke_config import language_text
 
 t = language_text
 TMUX_GONE_MARKERS = ("can't find", "no server running", "no sessions")
-TMUX_OPTION_MISSING_MARKERS = ("invalid option", "unknown option")
 PANE_SESSION_OPTION = "@onevoke_session"
+TMUX_OPTION_MISSING_DETAILS = (
+    f"invalid option: {PANE_SESSION_OPTION}",
+    f"unknown option: {PANE_SESSION_OPTION}",
+)
 
 
 class KanbanError(Exception):
@@ -139,9 +142,7 @@ def probe_tmux_pane(tmux: str, pane_id: str) -> TmuxPaneProbe:
         lowered = identity_detail.lower()
         if any(marker in lowered for marker in TMUX_GONE_MARKERS):
             return TmuxPaneProbe(None, identity_detail)
-        if identity_detail and not any(
-            marker in lowered for marker in TMUX_OPTION_MISSING_MARKERS
-        ):
+        if identity_detail and lowered not in TMUX_OPTION_MISSING_DETAILS:
             raise KanbanError(t(
                 f"tmux pane 探查失败: {identity_detail}",
                 f"Failed to probe the tmux pane: {identity_detail}",

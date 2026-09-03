@@ -55,6 +55,15 @@ class KanbanProbeTest(unittest.TestCase):
             with self.assertRaisesRegex(kanban_probe.KanbanError, "transport failed"):
                 kanban_probe.tmux_pane_facts("tmux", "%9")
 
+        for detail in ("invalid option: -p", "unknown option: -v"):
+            with self.subTest(detail=detail):
+                unsupported = subprocess.CompletedProcess([], 1, "", detail)
+                with mock.patch.object(
+                    kanban_probe.subprocess, "run", side_effect=(display, unsupported)
+                ):
+                    with self.assertRaisesRegex(kanban_probe.KanbanError, detail):
+                        kanban_probe.tmux_pane_facts("tmux", "%9")
+
     def test_herdr_gone_preserves_detail(self) -> None:
         detail = '{"error":{"code":"pane_not_found","message":"gone"}}'
         gone = subprocess.CompletedProcess([], 1, "", detail)
