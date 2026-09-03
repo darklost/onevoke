@@ -319,8 +319,12 @@ def cleanup_takeover_container(
         if facts.dead == "1":
             _close_error(operations.tmux_close_window(tmux, window_id))
             return _closed(old_window, launcher, window_id)
-        if facts.dead != "0" or facts.command != expected or (
-            old_session.reference and facts.session_marker != old_session.reference
+        if (
+            facts.dead != "0"
+            or facts.command != expected
+            or not old_session.reference
+            or not facts.session_marker
+            or facts.session_marker != old_session.reference
         ):
             raise KanbanError(t(
                 "原 tmux pane 的 Agent 或会话身份不匹配",

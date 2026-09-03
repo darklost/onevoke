@@ -350,6 +350,29 @@ class TakeoverTests:
         operations.tmux_send_agent_exit.assert_not_called()
         operations.tmux_close_window.assert_not_called()
 
+    def test_takeover_tmux_empty_reference_retains_unrelated_live_codex(self) -> None:
+        kanban = self.load_kanban_module()
+        facts = mock.Mock(
+            dead="0", command="codex", session_marker="unrelated-live-session",
+            in_mode="0",
+        )
+        operations = self.takeover_cleanup_operations(
+            kanban, probe_tmux_pane=mock.Mock(return_value=mock.Mock(facts=facts))
+        )
+        cleanup_shutil = kanban.cleanup_takeover_container.__globals__["shutil"]
+
+        with mock.patch.object(cleanup_shutil, "which", return_value="tmux"):
+            result = kanban.cleanup_takeover_container(
+                "tmux:$1:@1:%1", kanban.AgentSession("codex", ""),
+                "tmux:$2:@2:%2", 61, operations,
+            )
+
+        self.assertFalse(result.cleaned)
+        self.assertIn("身份不匹配", result.detail)
+        operations.tmux_send_agent_exit.assert_not_called()
+        operations.tmux_wait_agent_exit.assert_not_called()
+        operations.tmux_close_window.assert_not_called()
+
     def test_resume_uses_a_recorded_codex_session_without_scanning_rollouts(self) -> None:
         kanban = self.load_kanban_module()
         self.install_fake_launchers()
