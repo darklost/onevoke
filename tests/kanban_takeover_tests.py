@@ -292,6 +292,63 @@ class TakeoverTests:
         operations.herdr_agent_prompt.assert_not_called()
         operations.herdr_close_tab.assert_not_called()
 
+    def test_takeover_herdr_empty_reference_retains_unrelated_live_codex(self) -> None:
+        kanban = self.load_kanban_module()
+        pane = {
+            "pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "codex",
+            "agent_status": "idle",
+            "agent_session": {"value": "unrelated-live-session"},
+        }
+        operations = self.takeover_cleanup_operations(
+            kanban, probe_herdr_pane=mock.Mock(return_value=mock.Mock(pane=pane))
+        )
+        cleanup_shutil = kanban.cleanup_takeover_container.__globals__["shutil"]
+
+        with mock.patch.object(cleanup_shutil, "which", return_value="herdr"):
+            result = kanban.cleanup_takeover_container(
+                "herdr:w1:t1:w1:p1", kanban.AgentSession("codex", ""),
+                "herdr:w1:t2:w1:p2", 61, operations,
+            )
+
+        self.assertFalse(result.cleaned)
+        self.assertIn("身份不匹配", result.detail)
+        operations.herdr_agent_prompt.assert_not_called()
+        operations.herdr_wait_agent_exit.assert_not_called()
+        operations.herdr_close_tab.assert_not_called()
+
+    def test_herdr_wait_for_exit_rejects_a_disappeared_session_identity(self) -> None:
+        kanban = self.load_kanban_module()
+        response = mock.Mock(
+            returncode=0, stderr="",
+            stdout=(
+                '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1",'
+                '"agent":"codex","agent_status":"idle","agent_session":{}}}}'
+            ),
+        )
+
+        with mock.patch.object(kanban, "herdr_capture", return_value=response):
+            with self.assertRaisesRegex(kanban.KanbanError, "会话已变更"):
+                kanban.herdr_wait_agent_exit(
+                    "herdr", "w1:t1", "w1:p1",
+                    kanban.AgentSession("codex", "expected-session"), 61,
+                )
+
+    def test_tmux_wait_for_exit_rejects_an_empty_expected_session(self) -> None:
+        kanban = self.load_kanban_module()
+        process = mock.Mock(returncode=0, stdout="codex\t0\n", stderr="")
+        identity = mock.Mock(
+            returncode=0, stdout="unrelated-live-session\n", stderr=""
+        )
+
+        with mock.patch.object(
+            kanban, "tmux_capture", side_effect=(process, identity)
+        ):
+            with self.assertRaisesRegex(kanban.KanbanError, "会话已变更"):
+                kanban.tmux_wait_agent_exit(
+                    "tmux", "tmux", "$1", "@1", "%1",
+                    kanban.AgentSession("codex", ""), 61,
+                )
+
     def test_takeover_foreground_card_reports_no_old_container(self) -> None:
         self.install_fake_launchers()
         task_id, task = self.make_todo("takeover-foreground-old")

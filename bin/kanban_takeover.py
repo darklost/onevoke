@@ -275,8 +275,11 @@ def cleanup_takeover_container(
             if actual_agent:
                 identity = pane.get("agent_session")
                 actual_session = identity.get("value") if isinstance(identity, dict) else None
-                if actual_agent != old_session.agent or (
-                    old_session.reference and actual_session != old_session.reference
+                if (
+                    actual_agent != old_session.agent
+                    or not old_session.reference
+                    or not actual_session
+                    or actual_session != old_session.reference
                 ):
                     raise KanbanError(t(
                         "原 pane 的 Agent 或会话身份不匹配",
