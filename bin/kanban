@@ -1520,6 +1520,7 @@ def tmux_session_id(tmux: str) -> str:
 
 PROJECT_SESSION_OPTION = "@onevoke_project"
 PANE_SESSION_OPTION = "@onevoke_session"
+TMUX_GONE_MARKERS = ("can't find", "no server running", "no sessions")
 PROJECT_SESSION_CANDIDATES = 9
 
 
@@ -1934,6 +1935,14 @@ class AgentSession:
 
     def render(self) -> str:
         return f"{self.agent} {self.reference}".strip()
+
+
+@dataclass(frozen=True)
+class TmuxPaneFacts:
+    command: str
+    in_mode: str
+    dead: str
+    session_marker: str
 
 
 def cursor_create_chat(program: AgentProgram) -> str:
@@ -2598,8 +2607,19 @@ def resolved_task_session(entry: Entry, text: str) -> AgentSession:
 def herdr_pane_info(
     herdr: str, pane_id: str, *, timeout: Optional[float] = None
 ) -> dict:
+    pane = herdr_probe_pane(herdr, pane_id, timeout=timeout)
+    if pane is None:
+        raise KanbanError(t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}"))
+    return pane
+
+
+def herdr_probe_pane(
+    herdr: str, pane_id: str, *, timeout: Optional[float] = None
+) -> Optional[dict]:
     result = herdr_capture(herdr, "pane", "get", pane_id, timeout=timeout)
     if result.returncode != 0:
+        if herdr_error_code(result) == "pane_not_found":
+            return None
         raise KanbanError(t(
             f"pane 不存在: {pane_id}: {herdr_failure_detail(result)}",
             f"pane does not exist: {pane_id}: {herdr_failure_detail(result)}",
@@ -2618,7 +2638,9 @@ def herdr_session_reference(pane: dict) -> str | None:
 
 
 def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> dict:
-    pane = herdr_pane_info(herdr, pane_id)
+    pane = herdr_probe_pane(herdr, pane_id)
+    if pane is None:
+        raise KanbanError(t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}"))
     actual_agent = pane.get("agent")
     if actual_agent != session.agent:
         raise KanbanError(t(
@@ -2688,7 +2710,7 @@ def herdr_explicit_target(herdr: str, pane_id: str) -> tuple[str, str]:
     return tab_id, pane_id
 
 
-def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
+def tmux_pane_facts(tmux: str, pane_id: str) -> Optional[TmuxPaneFacts]:
     result = tmux_capture(
         tmux,
         "display-message",
@@ -2698,37 +2720,50 @@ def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
         "#{pane_current_command}\t#{pane_in_mode}\t#{pane_dead}",
     )
     if result.returncode != 0:
+        detail = result.stderr.strip()
+        if any(marker in detail.lower() for marker in TMUX_GONE_MARKERS):
+            return None
         raise KanbanError(t(
-            f"tmux pane 不存在: {pane_id}: {result.stderr.strip() or f'exit {result.returncode}'}",
-            f"tmux pane does not exist: {pane_id}: {result.stderr.strip() or f'exit {result.returncode}'}",
+            f"tmux pane 不存在: {pane_id}: {detail or f'exit {result.returncode}'}",
+            f"tmux pane does not exist: {pane_id}: {detail or f'exit {result.returncode}'}",
         ))
     fields = result.stdout.strip().split("\t")
     if len(fields) != 3:
         raise KanbanError(t("tmux pane 探查响应无效", "tmux pane probe returned an invalid response"))
     command, in_mode, dead = fields
-    if dead != "0":
-        raise KanbanError(t(f"tmux pane 已退出: {pane_id}", f"tmux pane is dead: {pane_id}"))
-    if in_mode != "0":
-        raise KanbanError(t(f"tmux pane 处于 copy-mode: {pane_id}", f"tmux pane is in copy mode: {pane_id}"))
-    expected = Path(agent_executable_name(session.agent)).name
-    if command != expected:
-        raise KanbanError(t(
-            f"tmux 前台进程不匹配: 期望={expected}, 实际={command or 'N/A'}",
-            f"tmux foreground process mismatch: expected={expected}, actual={command or 'N/A'}",
-        ))
     identity = tmux_capture(
         tmux, "show-options", "-p", "-v", "-t", pane_id, PANE_SESSION_OPTION
     )
-    actual_session = identity.stdout.strip() if identity.returncode == 0 else ""
-    if not actual_session:
+    session_marker = identity.stdout.strip() if identity.returncode == 0 else ""
+    return TmuxPaneFacts(command, in_mode, dead, session_marker)
+
+
+def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
+    facts = tmux_pane_facts(tmux, pane_id)
+    if facts is None:
+        raise KanbanError(t(
+            f"tmux pane 不存在: {pane_id}",
+            f"tmux pane does not exist: {pane_id}",
+        ))
+    if facts.dead != "0":
+        raise KanbanError(t(f"tmux pane 已退出: {pane_id}", f"tmux pane is dead: {pane_id}"))
+    if facts.in_mode != "0":
+        raise KanbanError(t(f"tmux pane 处于 copy-mode: {pane_id}", f"tmux pane is in copy mode: {pane_id}"))
+    expected = Path(agent_executable_name(session.agent)).name
+    if facts.command != expected:
+        raise KanbanError(t(
+            f"tmux 前台进程不匹配: 期望={expected}, 实际={facts.command or 'N/A'}",
+            f"tmux foreground process mismatch: expected={expected}, actual={facts.command or 'N/A'}",
+        ))
+    if not facts.session_marker:
         raise KanbanError(t(
             f"tmux pane 缺少会话标记: {pane_id}",
             f"tmux pane has no session marker: {pane_id}",
         ))
-    if actual_session != session.reference:
+    if facts.session_marker != session.reference:
         raise KanbanError(t(
-            f"tmux 会话不匹配: 卡片={session.reference}, pane={actual_session}",
-            f"tmux session mismatch: task={session.reference}, pane={actual_session}",
+            f"tmux 会话不匹配: 卡片={session.reference}, pane={facts.session_marker}",
+            f"tmux session mismatch: task={session.reference}, pane={facts.session_marker}",
         ))
 
 
@@ -2928,10 +2963,7 @@ def tmux_window_exists(tmux: str, window_id: str) -> bool:
     if result.returncode != 0:
         detail = result.stderr.strip()
         missing = detail.lower()
-        if any(
-            marker in missing
-            for marker in ("can't find window", "no server running", "no sessions")
-        ):
+        if any(marker in missing for marker in TMUX_GONE_MARKERS):
             return False
         raise KanbanError(t(
             f"tmux window 探查失败: {detail or f'exit {result.returncode}'}",
