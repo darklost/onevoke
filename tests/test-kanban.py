@@ -4950,6 +4950,17 @@ N/A
         bad = self.run_command("web", "--refresh", "0", succeeds=False)
         self.assertIn("扫描间隔", bad.stderr)
 
+    def test_tui_uses_in_review_label_without_changing_web_label(self) -> None:
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_tui_labels_test")
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual("审核中", kanban["tui_page_context"]()["state_labels"]["review"])
+        web_labels = json.loads(kanban["web_page_context"]()["status_labels_json"])
+        self.assertEqual("待审核", web_labels["review"])
+
     def test_tui_help_and_rejects_invalid_or_noninteractive_use(self) -> None:
         help_text = self.run_command("tui", "--help").stdout
         self.assertIn("--single", help_text)

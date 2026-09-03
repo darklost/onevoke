@@ -3644,7 +3644,10 @@ def tui_page_context() -> dict:
         "no_match": t("无匹配", "no match"),
         "terminal_init_failed": t("终端初始化失败", "failed to initialize terminal"),
         "unknown_theme": t("未知主题", "unknown theme"),
-        "state_labels": WEB_STATUS_LABELS[lang],
+        "state_labels": {
+            **WEB_STATUS_LABELS[lang],
+            "review": t("审核中", "Review"),
+        },
         "size_labels": WEB_SIZE_LABELS[lang],
     }
 
