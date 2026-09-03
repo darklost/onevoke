@@ -521,6 +521,23 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertIn("Tag each such item with [mechanical]", prompt)
         self.assertIn("Do not modify files", prompt)
 
+    def test_qa_prompt_focuses_architecture_quality_and_realistic_scope(self) -> None:
+        self.assertEqual(0, self.default_review().returncode)
+
+        prompt = self.stdin_log.read_text(encoding="utf-8")
+        normalized_prompt = " ".join(prompt.split())
+
+        self.assertIn("existing module responsibilities, dependency directions", normalized_prompt)
+        self.assertIn("clear ownership and single responsibility", normalized_prompt)
+        self.assertIn("realistic workload and code evidence", normalized_prompt)
+        self.assertIn("oversized single file or responsibility pile-up", normalized_prompt)
+        self.assertIn("never apply a universal line-count threshold", normalized_prompt)
+        self.assertIn("Do not enumerate contrived combinations, extreme edge cases", normalized_prompt)
+        self.assertIn(
+            "code and module boundaries directly affected by the review range",
+            normalized_prompt,
+        )
+
     def test_spec_file_is_passed_as_authoritative_context(self) -> None:
         spec = self.root / "spec.md"
         spec.write_text("# 任务契约\n", encoding="utf-8")
