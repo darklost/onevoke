@@ -64,11 +64,15 @@ from kanban_probe import (
     probe_tmux_pane,
 )
 from kanban_liveness import (
+    HERDR_WINDOW_RE,
     LIVENESS_DRIFTED,
     LIVENESS_STOPPED,
     LIVENESS_UNKNOWN,
+    SESSION_REFERENCE_RE,
+    TMUX_WINDOW_RE,
     LivenessReport,
     herdr_reverse_lookup,
+    parse_task_session,
     probe_task_liveness,
     reverse_lookup_stale,
     tmux_reverse_lookup,
@@ -1866,9 +1870,6 @@ def resolve_start_launcher(launcher: str) -> str:
 
 SESSION_FIELD = "会话"
 WINDOW_FIELD = "窗口"
-SESSION_REFERENCE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-HERDR_WINDOW_RE = re.compile(r"^herdr:([^:\s]+:[^:\s]+):([^:\s]+:[^:\s]+)$")
-TMUX_WINDOW_RE = re.compile(r"^(tmux|tmux-session):([^:\s]+):([^:\s]+):([^:\s]+)$")
 NOTIFY_DEFAULT_TIMEOUT = 120.0
 NOTIFY_POLL_INTERVAL = 0.1
 DISMISS_STATES = ("done", "archived")
@@ -1937,12 +1938,10 @@ def session_from(text: str) -> AgentSession:
             f"任务卡没有 `{SESSION_FIELD}` 记录, 无法带上下文唤醒; 只有经 kanban start 启动的卡可以 resume",
             f"Task has no `{SESSION_FIELD}` metadata; only tasks launched by kanban start can be resumed",
         ))
-    parts = value.split()
-    agent = parts[0]
-    reference = parts[1] if len(parts) > 1 else ""
-    if agent not in AGENT_NAMES or len(parts) > 2 or (reference and not SESSION_REFERENCE_RE.fullmatch(reference)):
+    session = parse_task_session(text)
+    if session is None:
         raise KanbanError(t(f"任务卡的会话记录无效: {value}", f"Task session metadata is invalid: {value}"))
-    return AgentSession(agent, reference)
+    return AgentSession(session.agent, session.reference)
 
 
 def codex_sessions_root() -> Path:

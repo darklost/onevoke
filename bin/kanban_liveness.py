@@ -62,7 +62,7 @@ def _metadata(text: str, name: str) -> str:
     return match.group(1) if match else ""
 
 
-def _session_from(text: str) -> TaskSession | None:
+def parse_task_session(text: str) -> TaskSession | None:
     value = _metadata(text, "会话")
     if not value:
         return None
@@ -223,13 +223,34 @@ def _stale_report(
             new_window = f"{launcher}:{tmux_container}:{location.window_id}:{location.pane_id}"
     except (KanbanError, OSError, UnicodeError, ValueError):
         return _report(entry, session, LIVENESS_STOPPED, channel, container, detail)
+    if channel == "herdr":
+        try:
+            pane_probe = probe_herdr_pane(program, pane_id)
+        except (KanbanError, OSError, UnicodeError, ValueError) as error:
+            return _report(entry, session, LIVENESS_UNKNOWN, channel, container, t(
+                f"反查 pane 探测失败: {error}",
+                f"failed to probe the reverse-looked-up pane: {error}",
+            ))
+        pane = pane_probe.pane
+        if pane is None or pane.get("agent") != session.agent:
+            return _report(entry, session, LIVENESS_STOPPED, channel, container, detail)
+        identity = pane.get("agent_session")
+        actual_session = identity.get("value") if isinstance(identity, dict) else None
+        if session.reference and actual_session and actual_session != session.reference:
+            return _report(entry, session, LIVENESS_STOPPED, channel, container, detail)
+        status = pane.get("agent_status")
+        if status not in ("idle", "working", "blocked", "done"):
+            return _report(entry, session, LIVENESS_UNKNOWN, channel, container, t(
+                f"反查 pane 的 Agent 状态不可判定: {status or 'N/A'}",
+                f"the reverse-looked-up pane Agent status cannot be classified: {status or 'N/A'}",
+            ))
     return _report(entry, session, LIVENESS_DRIFTED, channel, container, detail, new_window)
 
 
 def _probe_task_liveness(
     entry: TaskEntry, text: str, *, allow_reverse_lookup: bool = True
 ) -> LivenessReport:
-    session = _session_from(text)
+    session = parse_task_session(text)
     window = _metadata(text, "窗口")
     if session is None:
         return _report(entry, None, LIVENESS_UNKNOWN, "unknown", window, t(
@@ -343,7 +364,7 @@ def probe_task_liveness(
             entry, text, allow_reverse_lookup=allow_reverse_lookup
         )
     except (KanbanError, OSError, UnicodeError, ValueError) as error:
-        session = _session_from(text)
+        session = parse_task_session(text)
         return _report(
             entry,
             session,
