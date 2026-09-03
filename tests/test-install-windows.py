@@ -666,6 +666,25 @@ class WindowsInstallerTest(unittest.TestCase):
                 )
                 self.assertEqual(37, failed.returncode, failed.stderr)
 
+    def test_python_shims_query_path_with_where_exe_name_syntax(self) -> None:
+        for shim_name in (
+            "onevoke.cmd",
+            "kanban.cmd",
+            "merge-worktree-memory.cmd",
+            "onevoke-review.cmd",
+        ):
+            content = (PROJECT_ROOT / "bin" / shim_name).read_text(encoding="ascii")
+            with self.subTest(shim=shim_name):
+                for launcher in ("py.exe", "python.exe", "python3.exe"):
+                    self.assertIn(
+                        f'where.exe\" {launcher} ',
+                        content,
+                    )
+                    self.assertNotIn(
+                        f'where.exe\" \"$PATH:{launcher}',
+                        content,
+                    )
+
     def test_python_shims_do_not_resolve_launchers_from_current_directory(self) -> None:
         shim_dir = self.root / "shim R&D"
         shim_dir.mkdir()
