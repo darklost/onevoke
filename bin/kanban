@@ -65,6 +65,16 @@ from kanban_probe import (
     probe_tmux_pane,
     tmux_pane_facts,
 )
+from kanban_liveness import (
+    LIVENESS_DRIFTED,
+    LIVENESS_STOPPED,
+    LIVENESS_UNKNOWN,
+    LivenessReport,
+    TmuxPaneLocation,
+    herdr_reverse_lookup,
+    probe_task_liveness,
+    tmux_reverse_lookup,
+)
 import kanban_web
 from onevoke_fs import (
     UnsafePathError,
@@ -1902,14 +1912,6 @@ class AgentSession:
 
 
 @dataclass(frozen=True)
-class TmuxPaneLocation:
-    session_id: str
-    session_name: str
-    window_id: str
-    pane_id: str
-
-
-@dataclass(frozen=True)
 class NotifyTargetProbe:
     state: str
     detail: str
@@ -2661,42 +2663,6 @@ def herdr_notify_probe(herdr: str, pane_id: str, session: AgentSession) -> Notif
     return NotifyTargetProbe("ready", "", pane)
 
 
-def herdr_reverse_lookup(herdr: str, session: AgentSession) -> tuple[str, str]:
-    result = herdr_capture(herdr, "pane", "list")
-    if result.returncode != 0:
-        raise KanbanError(t(
-            f"herdr pane list 失败: {herdr_failure_detail(result)}",
-            f"herdr pane list failed: {herdr_failure_detail(result)}",
-        ))
-    data = herdr_json_result(result, "pane list")
-    panes = data.get("panes")
-    if not isinstance(panes, list):
-        raise KanbanError(t("herdr pane list 响应缺少 panes", "herdr pane list response has no panes"))
-    matches: list[tuple[str, str]] = []
-    for pane in panes:
-        if not isinstance(pane, dict):
-            continue
-        agent_session = pane.get("agent_session")
-        reference = agent_session.get("value") if isinstance(agent_session, dict) else None
-        if pane.get("agent") != session.agent or reference != session.reference:
-            continue
-        tab_id = herdr_public_id(pane.get("tab_id"))
-        pane_id = herdr_public_id(pane.get("pane_id"))
-        if tab_id and pane_id:
-            matches.append((tab_id, pane_id))
-    if not matches:
-        raise KanbanError(t(
-            f"herdr 会话反查无匹配: {session.reference}",
-            f"herdr session lookup found no match: {session.reference}",
-        ))
-    if len(matches) != 1:
-        raise KanbanError(t(
-            f"herdr 会话反查匹配不唯一: {session.reference}: {len(matches)} 个 pane",
-            f"herdr session lookup is ambiguous: {session.reference}: {len(matches)} panes",
-        ))
-    return matches[0]
-
-
 def herdr_explicit_target(herdr: str, pane_id: str) -> tuple[str, str]:
     pane = herdr_pane_info(herdr, pane_id)
     tab_id = herdr_public_id(pane.get("tab_id"))
@@ -2771,45 +2737,6 @@ def tmux_notify_probe(tmux: str, pane_id: str, session: AgentSession) -> NotifyT
             f"tmux pane 处于 copy-mode: {pane_id}", f"tmux pane is in copy mode: {pane_id}"
         ))
     return NotifyTargetProbe("ready", "")
-
-
-def tmux_reverse_lookup(tmux: str, session: AgentSession) -> TmuxPaneLocation:
-    result = tmux_capture(
-        tmux,
-        "list-panes",
-        "-a",
-        "-F",
-        "#{pane_id}\t#{session_id}\t#{session_name}\t#{window_id}\t#{pane_current_command}\t#{pane_dead}\t#{@onevoke_session}",
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        detail = result.stderr.strip() or t("输出为空", "empty output")
-        raise KanbanError(t(
-            f"tmux 会话反查不可用: {detail}",
-            f"tmux session lookup is unavailable: {detail}",
-        ))
-    expected = Path(agent_executable_name(session.agent)).name
-    matches: list[TmuxPaneLocation] = []
-    for line in result.stdout.splitlines():
-        fields = line.split("\t")
-        if len(fields) != 7:
-            raise KanbanError(t(
-                "tmux 会话反查输出无效", "tmux session lookup returned invalid output"
-            ))
-        pane_id, session_id, session_name, window_id, command, dead, marker = fields
-        if marker != session.reference or dead != "0" or command != expected:
-            continue
-        matches.append(TmuxPaneLocation(session_id, session_name, window_id, pane_id))
-    if not matches:
-        raise KanbanError(t(
-            f"tmux 会话反查无匹配: {session.reference}: 0 个 pane",
-            f"tmux session lookup found no match: {session.reference}: 0 panes",
-        ))
-    if len(matches) != 1:
-        raise KanbanError(t(
-            f"tmux 会话反查匹配不唯一: {session.reference}: {len(matches)} 个 pane",
-            f"tmux session lookup is ambiguous: {session.reference}: {len(matches)} panes",
-        ))
-    return matches[0]
 
 
 def render_tmux_window(launcher: str, location: TmuxPaneLocation) -> str:
@@ -3890,6 +3817,37 @@ def command_check(args: argparse.Namespace, root: Path) -> int:
         )
     for problem in all_problems:
         print(t(f"无效: {problem.message}", f"invalid: {problem.message}"), file=sys.stderr)
+    for entry in board.entries.values():
+        if entry.state != "working":
+            continue
+        try:
+            report = probe_task_liveness(entry, read_document(entry))
+        except (KanbanError, OSError, UnicodeError, ValueError) as error:
+            report = LivenessReport(
+                entry.task_id, "N/A", LIVENESS_UNKNOWN, "unknown", "N/A", str(error)
+            )
+        fields = [
+            t(f"存活: {report.task_id}", f"liveness: {report.task_id}"),
+            f"Agent={report.agent}",
+            t(f"状态={report.status}", f"status={report.status}"),
+            t(f"通道={report.channel}", f"channel={report.channel}"),
+            t(f"容器={report.container}", f"container={report.container}"),
+        ]
+        if report.new_window:
+            fields.append(t(f"新地址={report.new_window}", f"new-address={report.new_window}"))
+        if report.detail:
+            fields.append(t(f"原因={report.detail}", f"reason={report.detail}"))
+        if report.status == LIVENESS_STOPPED:
+            fields.append(t(
+                f"建议=kanban resume [--agent <其他>] {entry.task_id} --message <现状>",
+                f"suggestion=kanban resume [--agent <other>] {entry.task_id} --message <status>",
+            ))
+        elif report.status == LIVENESS_DRIFTED:
+            fields.append(t(
+                f"建议=kanban notify {entry.task_id} --message <现状>",
+                f"suggestion=kanban notify {entry.task_id} --message <status>",
+            ))
+        print("\t".join(fields))
     if all_problems:
         print(
             t(
@@ -3974,13 +3932,37 @@ def subscription_event(
     tasks: dict[str, str],
     watched: list[str],
     changed: Optional[list[dict[str, str]]] = None,
+    liveness: Optional[dict[str, dict[str, str]]] = None,
 ) -> dict:
     payload = {"event": event, "group_id": group_id, "tasks": tasks}
     if changed is not None:
         payload["changed"] = changed
     if watched:
         payload["watched"] = watched
+    if liveness:
+        payload["liveness"] = liveness
     return payload
+
+
+def subscription_liveness(board: Board, states: dict[str, str]) -> dict[str, dict[str, str]]:
+    reports: dict[str, dict[str, str]] = {}
+    for task_id, state in states.items():
+        if state != "working":
+            continue
+        entry = board.entries[task_id]
+        try:
+            report = probe_task_liveness(entry, read_document(entry))
+        except (KanbanError, OSError, UnicodeError, ValueError) as error:
+            report = LivenessReport(
+                task_id, "N/A", LIVENESS_UNKNOWN, "unknown", "N/A", str(error)
+            )
+        reports[task_id] = {
+            "agent": report.agent,
+            "status": report.status,
+            "channel": report.channel,
+            "detail": report.detail,
+        }
+    return reports
 
 
 def command_subscribe(args: argparse.Namespace, root: Path) -> None:
@@ -4014,7 +3996,7 @@ def command_subscribe(args: argparse.Namespace, root: Path) -> None:
         while True:
             heartbeat_remaining = args.heartbeat - (time.monotonic() - last_event)
             time.sleep(min(args.refresh, max(0.0, heartbeat_remaining)))
-            _, current = group_state_snapshot(root, monitored_ids)
+            current_board, current = group_state_snapshot(root, monitored_ids)
             changed = [
                 {"from": snapshot[task_id], "task_id": task_id, "to": current[task_id]}
                 for task_id in monitored_ids
@@ -4028,7 +4010,8 @@ def command_subscribe(args: argparse.Namespace, root: Path) -> None:
                 last_event = time.monotonic()
             elif time.monotonic() - last_event >= args.heartbeat:
                 emit_group_event(subscription_event(
-                    "heartbeat", args.group, current, watched
+                    "heartbeat", args.group, current, watched,
+                    liveness=subscription_liveness(current_board, current),
                 ))
                 last_event = time.monotonic()
     except KeyboardInterrupt:
