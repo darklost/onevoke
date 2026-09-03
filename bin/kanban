@@ -1945,6 +1945,25 @@ class TmuxPaneFacts:
     session_marker: str
 
 
+@dataclass(frozen=True)
+class TmuxPaneLocation:
+    session_id: str
+    session_name: str
+    window_id: str
+    pane_id: str
+
+
+@dataclass(frozen=True)
+class NotifyTargetProbe:
+    state: str
+    detail: str
+    pane: Optional[dict] = None
+
+
+class NotifyBusyError(KanbanError):
+    pass
+
+
 def cursor_create_chat(program: AgentProgram) -> str:
     invocation = process_invocation(program, ("create-chat",))
     try:
@@ -2676,6 +2695,33 @@ def herdr_notify_target(herdr: str, pane_id: str, session: AgentSession) -> dict
     return pane
 
 
+def herdr_notify_probe(herdr: str, pane_id: str, session: AgentSession) -> NotifyTargetProbe:
+    pane = herdr_probe_pane(herdr, pane_id)
+    if pane is None:
+        return NotifyTargetProbe(
+            "stale", t(f"pane 不存在: {pane_id}", f"pane does not exist: {pane_id}")
+        )
+    actual_agent = pane.get("agent")
+    if actual_agent != session.agent:
+        return NotifyTargetProbe("stale", t(
+            f"Agent 不匹配: 卡片={session.agent}, pane={actual_agent or 'N/A'}",
+            f"Agent mismatch: task={session.agent}, pane={actual_agent or 'N/A'}",
+        ))
+    actual_session = herdr_session_reference(pane)
+    if actual_session != session.reference:
+        return NotifyTargetProbe("stale", t(
+            f"会话不匹配: 卡片={session.reference}, pane={actual_session or 'N/A'}",
+            f"Session mismatch: task={session.reference}, pane={actual_session or 'N/A'}",
+        ))
+    status = pane.get("agent_status")
+    if status not in ("idle", "done"):
+        return NotifyTargetProbe("busy", t(
+            f"pane 状态不可投递: {pane_id}: {status or 'N/A'}",
+            f"pane status does not accept delivery: {pane_id}: {status or 'N/A'}",
+        ), pane)
+    return NotifyTargetProbe("ready", "", pane)
+
+
 def herdr_reverse_lookup(herdr: str, session: AgentSession) -> tuple[str, str]:
     result = herdr_capture(herdr, "pane", "list")
     if result.returncode != 0:
@@ -2778,6 +2824,98 @@ def tmux_notify_target(tmux: str, pane_id: str, session: AgentSession) -> None:
             f"tmux 会话不匹配: 卡片={session.reference}, pane={facts.session_marker}",
             f"tmux session mismatch: task={session.reference}, pane={facts.session_marker}",
         ))
+
+
+def tmux_notify_probe(tmux: str, pane_id: str, session: AgentSession) -> NotifyTargetProbe:
+    facts = tmux_pane_facts(tmux, pane_id)
+    if facts is None:
+        return NotifyTargetProbe("stale", t(
+            f"tmux pane 不存在: {pane_id}", f"tmux pane does not exist: {pane_id}"
+        ))
+    if facts.dead != "0":
+        return NotifyTargetProbe("stale", t(
+            f"tmux pane 已退出: {pane_id}", f"tmux pane is dead: {pane_id}"
+        ))
+    expected = Path(agent_executable_name(session.agent)).name
+    if facts.command != expected:
+        return NotifyTargetProbe("stale", t(
+            f"tmux 前台进程不匹配: 期望={expected}, 实际={facts.command or 'N/A'}",
+            f"tmux foreground process mismatch: expected={expected}, actual={facts.command or 'N/A'}",
+        ))
+    if not facts.session_marker:
+        return NotifyTargetProbe("fallback", t(
+            f"tmux pane 缺少会话标记: {pane_id}",
+            f"tmux pane has no session marker: {pane_id}",
+        ))
+    if facts.session_marker != session.reference:
+        return NotifyTargetProbe("stale", t(
+            f"tmux 会话不匹配: 卡片={session.reference}, pane={facts.session_marker}",
+            f"tmux session mismatch: task={session.reference}, pane={facts.session_marker}",
+        ))
+    if facts.in_mode != "0":
+        return NotifyTargetProbe("busy", t(
+            f"tmux pane 处于 copy-mode: {pane_id}", f"tmux pane is in copy mode: {pane_id}"
+        ))
+    return NotifyTargetProbe("ready", "")
+
+
+def tmux_reverse_lookup(tmux: str, session: AgentSession) -> TmuxPaneLocation:
+    result = tmux_capture(
+        tmux,
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{session_id}\t#{session_name}\t#{window_id}\t#{pane_current_command}\t#{pane_dead}\t#{@onevoke_session}",
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        detail = result.stderr.strip() or t("输出为空", "empty output")
+        raise KanbanError(t(
+            f"tmux 会话反查不可用: {detail}",
+            f"tmux session lookup is unavailable: {detail}",
+        ))
+    expected = Path(agent_executable_name(session.agent)).name
+    matches: list[TmuxPaneLocation] = []
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 7:
+            raise KanbanError(t(
+                "tmux 会话反查输出无效", "tmux session lookup returned invalid output"
+            ))
+        pane_id, session_id, session_name, window_id, command, dead, marker = fields
+        if marker != session.reference or dead != "0" or command != expected:
+            continue
+        matches.append(TmuxPaneLocation(session_id, session_name, window_id, pane_id))
+    if not matches:
+        raise KanbanError(t(
+            f"tmux 会话反查无匹配: {session.reference}: 0 个 pane",
+            f"tmux session lookup found no match: {session.reference}: 0 panes",
+        ))
+    if len(matches) != 1:
+        raise KanbanError(t(
+            f"tmux 会话反查匹配不唯一: {session.reference}: {len(matches)} 个 pane",
+            f"tmux session lookup is ambiguous: {session.reference}: {len(matches)} panes",
+        ))
+    return matches[0]
+
+
+def render_tmux_window(launcher: str, location: TmuxPaneLocation) -> str:
+    container = location.session_id if launcher == "tmux" else location.session_name
+    return f"{launcher}:{container}:{location.window_id}:{location.pane_id}"
+
+
+def wait_for_notify_target(probe: Callable[[], NotifyTargetProbe], timeout: float) -> tuple[NotifyTargetProbe, float]:
+    deadline = time.monotonic() + timeout
+    while True:
+        result = probe()
+        if result.state != "busy":
+            return result, max(0.0, deadline - time.monotonic())
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise NotifyBusyError(t(
+                f"目标 Agent 忙, 未投递: {result.detail}",
+                f"Target Agent is busy; nothing was delivered: {result.detail}",
+            ))
+        time.sleep(min(NOTIFY_POLL_INTERVAL, remaining))
 
 
 def agent_exit_command(agent: str) -> str:
@@ -3438,12 +3576,17 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
         target_window = ""
         direct_kind = ""
         pane_id = ""
+        direct_timeout = args.timeout
         if args.pane:
             herdr = shutil.which("herdr")
             if not herdr:
                 raise KanbanError(t("herdr 不在 PATH", "herdr is not in PATH"))
             tab_id, pane_id = herdr_explicit_target(herdr, args.pane)
-            herdr_notify_target(herdr, pane_id, session)
+            probe, direct_timeout = wait_for_notify_target(
+                lambda: herdr_notify_probe(herdr, pane_id, session), args.timeout
+            )
+            if probe.state != "ready":
+                raise KanbanError(probe.detail)
             target_window = f"herdr:{tab_id}:{pane_id}"
             direct_kind = "herdr"
         elif herdr_match:
@@ -3451,21 +3594,70 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
             herdr = shutil.which("herdr")
             if not herdr:
                 raise KanbanError(t("herdr 不在 PATH", "herdr is not in PATH"))
-            herdr_notify_target(herdr, pane_id, session)
+            probe, direct_timeout = wait_for_notify_target(
+                lambda: herdr_notify_probe(herdr, pane_id, session), args.timeout
+            )
+            if probe.state == "stale":
+                stale_detail = probe.detail
+                try:
+                    tab_id, pane_id = herdr_reverse_lookup(herdr, session)
+                    probe, direct_timeout = wait_for_notify_target(
+                        lambda: herdr_notify_probe(herdr, pane_id, session),
+                        direct_timeout,
+                    )
+                    if probe.state != "ready":
+                        raise KanbanError(probe.detail)
+                except NotifyBusyError:
+                    raise
+                except (KanbanError, OSError, UnicodeError, ValueError) as lookup_error:
+                    raise KanbanError(t(
+                        f"地址过期: {stale_detail}; 反查={lookup_error}",
+                        f"stale address: {stale_detail}; lookup={lookup_error}",
+                    )) from lookup_error
+                target_window = f"herdr:{tab_id}:{pane_id}"
+            elif probe.state != "ready":
+                raise KanbanError(probe.detail)
             direct_kind = "herdr"
         elif tmux_match:
-            _launcher, _tmux_session, _window_id, pane_id = tmux_match.groups()
+            launcher, _tmux_session, _window_id, pane_id = tmux_match.groups()
             tmux = shutil.which("tmux")
             if not tmux:
                 raise KanbanError(t("tmux 不在 PATH", "tmux is not in PATH"))
-            tmux_notify_target(tmux, pane_id, session)
+            probe, direct_timeout = wait_for_notify_target(
+                lambda: tmux_notify_probe(tmux, pane_id, session), args.timeout
+            )
+            if probe.state == "stale":
+                stale_detail = probe.detail
+                try:
+                    location = tmux_reverse_lookup(tmux, session)
+                    pane_id = location.pane_id
+                    probe, direct_timeout = wait_for_notify_target(
+                        lambda: tmux_notify_probe(tmux, pane_id, session),
+                        direct_timeout,
+                    )
+                    if probe.state != "ready":
+                        raise KanbanError(probe.detail)
+                except NotifyBusyError:
+                    raise
+                except (KanbanError, OSError, UnicodeError, ValueError) as lookup_error:
+                    raise KanbanError(t(
+                        f"地址过期: {stale_detail}; 反查={lookup_error}",
+                        f"stale address: {stale_detail}; lookup={lookup_error}",
+                    )) from lookup_error
+                target_window = render_tmux_window(launcher, location)
+            elif probe.state != "ready":
+                raise KanbanError(probe.detail)
             direct_kind = "tmux"
         elif not window:
             herdr = shutil.which("herdr")
             if not herdr:
                 raise KanbanError(t("herdr 不在 PATH, 无法反查 pane", "herdr is not in PATH; cannot look up a pane"))
             tab_id, pane_id = herdr_reverse_lookup(herdr, session)
-            herdr_notify_target(herdr, pane_id, session)
+            probe, direct_timeout = wait_for_notify_target(
+                lambda: herdr_notify_probe(herdr, pane_id, session), args.timeout
+            )
+            if probe.state != "ready":
+                raise KanbanError(probe.detail)
             target_window = f"herdr:{tab_id}:{pane_id}"
             direct_kind = "herdr"
         else:
@@ -3480,15 +3672,17 @@ def command_notify(args: argparse.Namespace, root: Path) -> None:
         instruction = notify_instruction(entry, message_path, marker)
         if direct_kind == "herdr":
             confirmed, acknowledgement_detail = herdr_direct_notify(
-                herdr, pane_id, instruction, marker, args.timeout
+                herdr, pane_id, instruction, marker, direct_timeout
             )
             direct_channel = "herdr-direct"
         else:
             confirmed, acknowledgement_detail = tmux_direct_notify(
-                tmux, pane_id, instruction, marker, args.timeout
+                tmux, pane_id, instruction, marker, direct_timeout
             )
             direct_channel = "tmux-direct"
         acknowledgement = t("已确认", "confirmed") if confirmed else t("未确认", "unconfirmed")
+    except NotifyBusyError:
+        raise
     except (KanbanError, OSError, UnicodeError, ValueError) as error:
         direct_error = str(error)
         if window_written:

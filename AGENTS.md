@@ -94,6 +94,8 @@ PowerShell 脚本使用 `$ErrorActionPreference = "Stop"`, 字符串路径经 `-
 
 新提交使用简短中文动宾 subject, 每个 commit 只包含一个关注点, 例如 `修复重复任务检测`. 改完后按本仓库特例完成合入 `main`、推送与本机平台安装器更新, 无需再等用户催促. PR 应说明行为变化、原因和实际验证命令; 关联任务或 issue. CLI 输出变化附终端示例, 无界面改动时无需截图.
 
+`bin/kanban` 的 notify 探查分类是实现契约: 已证明 Agent/会话身份的 herdr 非 `idle`/`done` 状态和 tmux copy-mode 属于「忙」, 在 `--timeout` 预算内重试, 超时不走恢复通道; pane 不存在/已死, Agent/会话或 tmux 前台进程不匹配属于「过期」, 卡片有地址时先反查再降级. herdr 用 Agent + `agent_session.value` 唯一反查; tmux 用 `list-panes -a -F` 的 `@onevoke_session`, 非死 pane 和 Agent 可执行名三重过滤, 并分别用 session id/name 渲染 `tmux`/`tmux-session` 地址. 唯一命中必须重跑完整 `*_notify_target` 校验才回写 `窗口` 并直投; 0 个/多个命中或复检失败才降级, 并同时保留原错误与反查错误. tmux marker 缺失不算忙或过期, 继续既有恢复; 空窗口 tmux 旧卡仍不反查.
+
 ## Security & Configuration
 
 `KANBAN_DIR` 仅用于测试、非 Git 项目或明确覆盖. 不提交 token、凭据、敏感服务地址、真实任务卡片或本机路径. 文件写入和状态迁移必须继续经过现有校验, 不得绕过 `scan()` 或 `validate_target()` 直接操作任务入口.
