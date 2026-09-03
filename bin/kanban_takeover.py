@@ -316,10 +316,10 @@ def cleanup_takeover_container(
             tmux, pane_id, launcher, session_id, window_id
         )
         expected = Path(agent_executable_name(old_session.agent)).name
-        if facts.dead == "1" or facts.command != expected:
+        if facts.dead == "1":
             _close_error(operations.tmux_close_window(tmux, window_id))
             return _closed(old_window, launcher, window_id)
-        if facts.dead != "0" or (
+        if facts.dead != "0" or facts.command != expected or (
             old_session.reference and facts.session_marker != old_session.reference
         ):
             raise KanbanError(t(

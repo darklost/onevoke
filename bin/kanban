@@ -90,6 +90,7 @@ from kanban_notify import (
 )
 from kanban_takeover import (
     CleanupOperations,
+    CleanupResult,
     cleanup_takeover_container,
     discover_new_codex_session,
     render_session_metadata,
@@ -2429,14 +2430,10 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
     plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "resume")
     agent_name = takeover_agent or old_session.agent
     program = require_agent_program(agent_name)
-    session = new_agent_session(agent_name, program) if takeover else old_session
-    if not takeover and session.agent == "codex":
-        session = AgentSession("codex", find_codex_session(entry.task_id))
-    elif not takeover and not session.reference:
-        raise KanbanError(t(
-            f"任务卡的 {session.agent} 会话缺少 id, 无法唤醒",
-            f"Task session for {session.agent} has no id; cannot resume",
-        ))
+    session = (
+        new_agent_session(agent_name, program)
+        if takeover else resolved_task_session(entry, text)
+    )
     previous_codex_sessions: set[str] = set()
     if takeover and session.agent == "codex" and plan.launcher in ("tmux", "tmux-session"):
         try:
@@ -2537,19 +2534,23 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
         )
         raise
     if takeover:
-        cleanup = cleanup_takeover_container(
-            old_window,
-            old_session,
-            metadata_from(read_document(moved), WINDOW_FIELD),
-            args.timeout,
-            CleanupOperations(
-                probe_herdr_pane, herdr_tab_panes, validate_herdr_dismiss_container,
-                herdr_close_tab, herdr_agent_prompt, herdr_wait_agent_exit,
-                probe_tmux_pane, validate_tmux_dismiss_container, tmux_close_window,
-                tmux_send_agent_exit, tmux_wait_agent_exit, tmux_window_exists,
-                agent_exit_command,
-            ),
-        )
+        try:
+            new_window = metadata_from(read_document(moved), WINDOW_FIELD)
+        except (KanbanError, OSError, UnicodeError, ValueError) as error:
+            cleanup = CleanupResult(
+                False, old_window or "N/A", "", "", " ".join(str(error).split())
+            )
+        else:
+            cleanup = cleanup_takeover_container(
+                old_window, old_session, new_window, args.timeout,
+                CleanupOperations(
+                    probe_herdr_pane, herdr_tab_panes, validate_herdr_dismiss_container,
+                    herdr_close_tab, herdr_agent_prompt, herdr_wait_agent_exit,
+                    probe_tmux_pane, validate_tmux_dismiss_container, tmux_close_window,
+                    tmux_send_agent_exit, tmux_wait_agent_exit, tmux_window_exists,
+                    agent_exit_command,
+                ),
+            )
         if cleanup.cleaned:
             print(t(
                 f"已清理原容器: {cleanup.old_window}\t通道={cleanup.channel}\t关闭容器={cleanup.container}",
