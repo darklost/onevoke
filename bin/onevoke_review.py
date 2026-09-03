@@ -767,10 +767,14 @@ ROLE_RULES = {
 
         Assess task-relevant code quality: clear ownership and single responsibility, readable and localized
         changes, stable contracts, coupling, duplication, error and resource handling, generated-source drift,
-        fixtures, and failure diagnostics. Check for material performance regressions or bottlenecks only when
-        a realistic workload and code evidence make them reachable; do not propose speculative optimizations.
-        Flag an oversized single file or responsibility pile-up only when project structure and
-        evidence show unreasonable concentration; never apply a universal line-count threshold.
+        fixtures, and failure diagnostics. Do not perform a general performance review or report performance
+        findings; explicit performance acceptance criteria remain PM contract checks.
+
+        Enforce this hard size rule: a non-generated code file must not exceed 1000 physical lines. Report a
+        size-rule gate finding only when the review range (1) creates such a file above 1000 lines, (2) changes
+        such a file from at most 1000 lines to above 1000 lines, or (3) adds code to a task-relevant file that
+        was already above 1000 lines. Do not inventory unrelated pre-existing oversized files, and do not
+        report an already-oversized file when this range only removes code from it.
 
         For every required behavior, assess controllable inputs, observable outputs, deterministic assertions,
         isolated state, and diagnosable failures. Recommend the cheapest effective test layer; missing tests
