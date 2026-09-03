@@ -72,6 +72,7 @@ from kanban_liveness import (
     TMUX_WINDOW_RE,
     LivenessReport,
     herdr_reverse_lookup,
+    metadata_from,
     parse_task_session,
     probe_task_liveness,
     reverse_lookup_stale,
@@ -710,11 +711,6 @@ def section_body(text: str, heading: str) -> Optional[str]:
 
 def result_from(text: str) -> str:
     match = re.search(r"(?m)^- 结果:\s*(.*?)\s*$", text)
-    return match.group(1) if match else ""
-
-
-def metadata_from(text: str, name: str) -> str:
-    match = re.search(rf"(?m)^- {re.escape(name)}:[ \t]*(.*?)[ \t]*$", text)
     return match.group(1) if match else ""
 
 

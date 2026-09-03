@@ -57,13 +57,13 @@ class LivenessReport:
     new_window: str = ""
 
 
-def _metadata(text: str, name: str) -> str:
+def metadata_from(text: str, name: str) -> str:
     match = re.search(rf"(?m)^- {re.escape(name)}:[ \t]*(.*?)[ \t]*$", text)
     return match.group(1) if match else ""
 
 
 def parse_task_session(text: str) -> TaskSession | None:
-    value = _metadata(text, "会话")
+    value = metadata_from(text, "会话")
     if not value:
         return None
     parts = value.split()
@@ -251,7 +251,7 @@ def _probe_task_liveness(
     entry: TaskEntry, text: str, *, allow_reverse_lookup: bool = True
 ) -> LivenessReport:
     session = parse_task_session(text)
-    window = _metadata(text, "窗口")
+    window = metadata_from(text, "窗口")
     if session is None:
         return _report(entry, None, LIVENESS_UNKNOWN, "unknown", window, t(
             "缺少或无法解析会话记录", "missing or invalid session metadata"
@@ -370,6 +370,6 @@ def probe_task_liveness(
             session,
             LIVENESS_UNKNOWN,
             "unknown",
-            _metadata(text, "窗口"),
+            metadata_from(text, "窗口"),
             str(error),
         )
