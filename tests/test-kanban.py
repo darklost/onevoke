@@ -1347,6 +1347,170 @@ exit 1
         self.assertTrue((self.root / "working" / task.name).exists())
         self.assertRegex(self.last_launch_command(), r"--resume [0-9a-f-]{36}")
 
+    def test_resume_with_agent_takes_over_with_a_fresh_session(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("takeover-fresh")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        old_session = re.search(r"(?m)^- 会话: claude (\S+)$", working.read_text(encoding="utf-8")).group(1)
+
+        result = self.run_command("resume", "--agent", "grok", task_id, "--message", "继续实现")
+
+        self.assertIn(f"已接管: {task_id}", result.stdout)
+        command = self.last_launch_command()
+        new_session = re.search(r"--session-id ([0-9a-f-]{36})", command).group(1)
+        self.assertNotEqual(old_session, new_session)
+        self.assertNotIn("--resume", command)
+
+    def test_takeover_rewrites_assignee_session_and_window_fields(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("takeover-fields")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        started = re.search(r"(?m)^- 开始时间: (.+)$", working.read_text(encoding="utf-8")).group(1)
+
+        self.run_command("resume", "--agent", "grok", task_id, "--message", "继续")
+
+        text = working.read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^- 负责人: grok$")
+        self.assertRegex(text, r"(?m)^- 会话: grok [0-9a-f-]{36}$")
+        self.assertIn("- 窗口: tmux:$42:@9:%9\n", text)
+        self.assertIn(f"- 开始时间: {started}\n", text)
+
+    def test_takeover_same_agent_name_still_allocates_a_new_session(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("takeover-same")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        old = re.search(r"(?m)^- 会话: claude (\S+)$", working.read_text(encoding="utf-8")).group(1)
+
+        self.run_command("resume", "--agent", "claude", task_id, "--message", "新会话接管")
+
+        new = re.search(r"(?m)^- 会话: claude (\S+)$", working.read_text(encoding="utf-8")).group(1)
+        self.assertNotEqual(old, new)
+        self.assertIn(f"--session-id {new}", self.last_launch_command())
+
+    def test_takeover_cursor_create_chat_failure_leaves_the_card_untouched(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("takeover-cursor-fail")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        before = working.read_bytes()
+        self.env["KANBAN_CURSOR_CHAT_FAIL"] = "1"
+
+        result = self.run_command(
+            "resume", "--agent", "cursor", task_id, "--message", "继续", succeeds=False
+        )
+
+        self.assertIn("create-chat", result.stderr)
+        self.assertEqual(before, working.read_bytes())
+
+    def test_takeover_launch_failure_restores_fields_and_review_state(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("takeover-launch-fail")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        self.set_branch(working, "takeover-launch-fail")
+        self.run_command("move", task_id, "review")
+        review = self.root / "review" / task.name
+        before = review.read_bytes()
+        self.env["KANBAN_TMUX_FAIL"] = "1"
+
+        self.run_command(
+            "resume", "--agent", "grok", task_id, "--message", "继续", succeeds=False
+        )
+
+        self.assertEqual(before, review.read_bytes())
+        self.assertFalse(working.exists())
+
+    def test_takeover_liveness_failure_cleans_new_container_and_rolls_back(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("takeover-liveness-fail")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        before = working.read_bytes()
+        args = argparse.Namespace(
+            task=task_id, agent="grok", message="继续", message_file=None,
+            launcher="tmux", timeout=61,
+        )
+        outcome = kanban.LaunchOutcome(window="@new", pane="%new")
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(kanban, "launch_agent", return_value=outcome):
+                with mock.patch.object(kanban, "validate_resumed_agent", side_effect=kanban.KanbanError("not alive")):
+                    with mock.patch.object(kanban, "cleanup_failed_resume") as cleanup:
+                        with self.assertRaisesRegex(kanban.KanbanError, "not alive"):
+                            kanban.command_resume(args, self.root)
+
+        cleanup.assert_called_once()
+        self.assertEqual(before, working.read_bytes())
+
+    def test_takeover_prompt_and_task_file_mark_the_previous_agent(self) -> None:
+        self.install_fake_launchers()
+        task_id, _task = self.make_todo("takeover-prompt")
+        self.run_command("start", "--agent", "claude", task_id)
+
+        self.run_command("resume", "--agent", "grok", task_id, "--message", "只处理剩余项")
+
+        command = self.last_launch_command()
+        self.assertIn(f"接管 Kanban 任务 {task_id}", command)
+        self.assertNotIn("只处理剩余项", command)
+        task_file = self.task_file_from_command(command)
+        self.assertIn("takeover-", task_file.name)
+        content = task_file.read_text(encoding="utf-8")
+        self.assertIn("原执行 Agent claude 已停止", content)
+        self.assertIn("本会话是全新会话", content)
+        self.assertIn("git status、git log", content)
+        self.assertIn("只处理剩余项", content)
+
+    def test_takeover_extends_codex_prompt_prefixes_for_rollout_lookup(self) -> None:
+        kanban = self.load_kanban_module()
+        task_id = "20260903-prefix-task"
+
+        prefixes = kanban.codex_prompt_prefixes(task_id)
+
+        self.assertIn(
+            f"接管 Kanban 任务 {task_id}; full instructions are in the UTF-8 task file at ",
+            prefixes,
+        )
+        self.assertIn(f"接管 Kanban 任务 {task_id}.", prefixes)
+
+    def test_takeover_tmux_codex_writes_the_discovered_session_id(self) -> None:
+        kanban = self.load_kanban_module()
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("takeover-codex-id")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        args = argparse.Namespace(
+            task=task_id, agent="codex", message="继续", message_file=None,
+            launcher="tmux", timeout=61,
+        )
+        discovered = "new-codex-session"
+
+        def launch(_plan, _root, _name, _invocation, location, **kwargs):
+            outcome = kanban.LaunchOutcome(window="@new", pane="%new")
+            location(outcome)
+            self.assertEqual(discovered, kwargs["pane_session_callback"]().reference)
+            return outcome
+
+        cleanup = mock.Mock(
+            cleaned=True, old_window="N/A", channel="N/A", container="N/A", detail=""
+        )
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(
+                kanban, "codex_sessions_for_task",
+                side_effect=(("old-codex-session",), ("old-codex-session", discovered)),
+            ):
+                with mock.patch.object(kanban, "launch_agent", side_effect=launch):
+                    with mock.patch.object(kanban, "validate_resumed_agent"):
+                        with mock.patch.object(kanban, "cleanup_takeover_container", return_value=cleanup):
+                            kanban.command_resume(args, self.root)
+
+        self.assertIn(
+            f"- 会话: codex {discovered}\n", working.read_text(encoding="utf-8")
+        )
+
     def test_start_prompt_for_group_cards_stops_at_review(self) -> None:
         self.install_fake_launchers()
         task_id, task = self.make_todo("group-prompt")
@@ -2082,6 +2246,16 @@ exit 1
             with mock.patch.object(kanban.time, "monotonic", return_value=0.0):
                 kanban.validate_resumed_agent(plan, outcome, session, 61)
 
+        # Herdr may report a Codex id even though takeover cannot discover and record it.
+        reported_codex = {
+            "agent": "codex", "agent_status": "idle",
+            "agent_session": {"value": "reported-after-launch"},
+        }
+        with mock.patch.object(kanban, "herdr_pane_info", return_value=reported_codex):
+            kanban.validate_resumed_agent(
+                plan, outcome, kanban.AgentSession("codex", ""), 61
+            )
+
         rejected = (
             ("session mismatch", {**matching, "agent_session": {"value": "other-session"}}),
             ("agent mismatch", {**matching, "agent": "codex"}),
@@ -2261,6 +2435,99 @@ exit 1
         order = self.herdr_arguments("order")
         last_get = max(index for index, item in enumerate(order) if item == "pane get")
         self.assertLess(order.index("agent prompt"), last_get)
+
+    def takeover_cleanup_operations(self, kanban, **overrides):
+        defaults = {
+            "probe_herdr_pane": mock.Mock(), "herdr_tab_panes": mock.Mock(return_value=["w1:p1"]),
+            "validate_herdr_container": mock.Mock(), "herdr_close_tab": mock.Mock(return_value=None),
+            "herdr_agent_prompt": mock.Mock(), "herdr_wait_agent_exit": mock.Mock(return_value=True),
+            "probe_tmux_pane": mock.Mock(), "validate_tmux_container": mock.Mock(),
+            "tmux_close_window": mock.Mock(return_value=None), "tmux_send_agent_exit": mock.Mock(),
+            "tmux_wait_agent_exit": mock.Mock(return_value=True), "tmux_window_exists": mock.Mock(return_value=False),
+            "agent_exit_command": mock.Mock(return_value="/exit"),
+        }
+        defaults.update(overrides)
+        return kanban.CleanupOperations(**defaults)
+
+    def test_takeover_closes_the_old_herdr_tab_of_a_dead_agent(self) -> None:
+        kanban = self.load_kanban_module()
+        pane = {"pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "unknown"}
+        operations = self.takeover_cleanup_operations(
+            kanban, probe_herdr_pane=mock.Mock(return_value=mock.Mock(pane=pane))
+        )
+        cleanup_shutil = kanban.cleanup_takeover_container.__globals__["shutil"]
+
+        with mock.patch.object(cleanup_shutil, "which", return_value="herdr"):
+            result = kanban.cleanup_takeover_container(
+                "herdr:w1:t1:w1:p1", kanban.AgentSession("claude", "old"),
+                "herdr:w1:t2:w1:p2", 61, operations,
+            )
+
+        self.assertTrue(result.cleaned)
+        operations.herdr_agent_prompt.assert_not_called()
+        operations.herdr_close_tab.assert_called_once_with("herdr", "w1:t1")
+
+    def test_takeover_gracefully_exits_a_live_matching_old_agent_before_close(self) -> None:
+        kanban = self.load_kanban_module()
+        pane = {
+            "pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "claude",
+            "agent_status": "idle", "agent_session": {"value": "old"},
+        }
+        operations = self.takeover_cleanup_operations(
+            kanban, probe_herdr_pane=mock.Mock(return_value=mock.Mock(pane=pane))
+        )
+        cleanup_shutil = kanban.cleanup_takeover_container.__globals__["shutil"]
+
+        with mock.patch.object(cleanup_shutil, "which", return_value="herdr"):
+            result = kanban.cleanup_takeover_container(
+                "herdr:w1:t1:w1:p1", kanban.AgentSession("claude", "old"),
+                "herdr:w1:t2:w1:p2", 61, operations,
+            )
+
+        self.assertTrue(result.cleaned)
+        operations.herdr_agent_prompt.assert_called_once_with("herdr", "w1:p1", "/exit")
+        operations.herdr_wait_agent_exit.assert_called_once()
+        operations.herdr_close_tab.assert_called_once()
+
+    def test_takeover_keeps_a_dirty_or_mismatched_old_container_and_reports(self) -> None:
+        kanban = self.load_kanban_module()
+        pane = {
+            "pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "claude",
+            "agent_status": "idle", "agent_session": {"value": "other"},
+        }
+        operations = self.takeover_cleanup_operations(
+            kanban, probe_herdr_pane=mock.Mock(return_value=mock.Mock(pane=pane))
+        )
+        cleanup_shutil = kanban.cleanup_takeover_container.__globals__["shutil"]
+
+        with mock.patch.object(cleanup_shutil, "which", return_value="herdr"):
+            result = kanban.cleanup_takeover_container(
+                "herdr:w1:t1:w1:p1", kanban.AgentSession("claude", "old"),
+                "herdr:w1:t2:w1:p2", 61, operations,
+            )
+
+        self.assertFalse(result.cleaned)
+        self.assertIn("身份不匹配", result.detail)
+        operations.herdr_agent_prompt.assert_not_called()
+        operations.herdr_close_tab.assert_not_called()
+
+    def test_takeover_foreground_card_reports_no_old_container(self) -> None:
+        self.install_fake_launchers()
+        task_id, task = self.make_todo("takeover-foreground-old")
+        self.run_command("start", "--agent", "claude", task_id)
+        working = self.root / "working" / task.name
+        text = re.sub(
+            r"(?m)^- 窗口:.*$", "- 窗口: foreground",
+            working.read_text(encoding="utf-8"), count=1,
+        )
+        working.write_text(text, encoding="utf-8")
+
+        result = self.run_command(
+            "resume", "--agent", "grok", task_id, "--message", "继续"
+        )
+
+        self.assertIn("已清理原容器: N/A\t通道=N/A\t关闭容器=N/A", result.stdout)
+        self.assertIn(f"已接管: {task_id}", result.stdout)
 
     def test_dismiss_tmux_uses_agent_command_and_closes_surviving_window(self) -> None:
         task_id, done = self.make_done(
@@ -7875,7 +8142,7 @@ class KanbanProjectInstallTest(unittest.TestCase):
             "kanban",
             "onevoke_config.py",
             "onevoke_fs.py",
-            "kanban_probe.py", "kanban_window.py", "kanban_liveness.py",
+            "kanban_probe.py", "kanban_window.py", "kanban_liveness.py", "kanban_takeover.py",
             "onevoke_process.py",
             "kanban_web.py",
             "kanban_tui.py",

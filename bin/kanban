@@ -72,6 +72,18 @@ from kanban_liveness import (
     probe_task_liveness,
     tmux_reverse_lookup,
 )
+from kanban_takeover import (
+    CleanupOperations,
+    cleanup_takeover_container,
+    discover_new_codex_session,
+    render_session_metadata,
+    render_takeover_metadata,
+    read_task_message,
+    resume_agent_prompt,
+    start_agent_prompt,
+    takeover_agent_prompt,
+    takeover_prompt_prefixes,
+)
 import kanban_web
 from onevoke_fs import (
     UnsafePathError,
@@ -264,37 +276,6 @@ def command_rules() -> None:
     sys.stdout.write(rules.read_text(encoding="utf-8"))
 
 
-def start_agent_prompt(task_id: str, paths: InstallPaths, task_group: str = "") -> str:
-    """生成 start 交给执行 Agent 的固定说明.
-
-    全局模式保持 PATH 中的 `kanban` 与相对的项目 AGENTS.md; 项目模式必须
-    给出命令根和主 worktree 规则入口的绝对路径, 避免 Agent 改走 PATH 里
-    的全局同名命令. 任务组卡只做到迁 review: 审核, 集成和收尾归主控.
-    """
-    if paths.mode == "project":
-        if paths.project_root is None:
-            raise KanbanError(
-                t(
-                    "项目安装路径缺少主 worktree",
-                    "project install paths are missing the main worktree",
-                )
-            )
-        kanban_cmd = str(paths.bin_dir / "kanban")
-        follow = f"遵守 {paths.project_root / 'AGENTS.md'}"
-    else:
-        kanban_cmd = "kanban"
-        follow = "遵守目标项目 AGENTS.md"
-    head = (
-        f"执行 Kanban 任务 {task_id}. 先运行 {kanban_cmd} rules, 再运行 "
-        f"{kanban_cmd} show {task_id}. 卡片已进入 working. {follow}, "
-    )
-    if task_group:
-        return head + (
-            f"补充任务分支, 按看板规则的任务组流程完成任务、验证, 提交 push 并汇入组集成分支, "
-            f"写好实施与验证后执行 {kanban_cmd} move {task_id} review 并退出; "
-            "审核、集成和看板收尾由任务组主控负责, 不要自行审核或合回 develop."
-        )
-    return head + "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
 def add_git_exclude(root: Path) -> Optional[Path]:
     try:
         git_root_result = subprocess.run(
@@ -1886,7 +1867,6 @@ AGENT_EXIT_COMMANDS = {
     "grok": "/quit",
     "cursor": "/quit",
 }
-START_SESSION_DISCOVERY_TIMEOUT = 10.0
 HERDR_SESSION_REPORT_BUDGET = 1.0
 HERDR_SESSION_REPORT_SOCKET_TIMEOUT = 0.25
 _HERDR_SESSION_REPORT_SEQ = 0
@@ -1971,7 +1951,7 @@ def codex_sessions_root() -> Path:
 
 
 def codex_prompt_prefixes(task_id: str) -> tuple[str, ...]:
-    """start/resume 交给执行 Agent 的 prompt 开头; 主控会话里只是提到任务 ID 的消息不算."""
+    """start/resume/takeover prompt 开头; 主控会话里只是提到任务 ID 的消息不算."""
     start = f"执行 Kanban 任务 {task_id}"
     resume = f"继续 Kanban 任务 {task_id}"
     return (
@@ -1979,6 +1959,7 @@ def codex_prompt_prefixes(task_id: str) -> tuple[str, ...]:
         f"{resume}; full instructions are in the UTF-8 task file at ",
         f"{start}.",
         f"{resume}.",
+        *takeover_prompt_prefixes(task_id),
     )
 
 
@@ -2406,28 +2387,10 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     def started_tmux_session() -> AgentSession:
         if session.reference:
             return session
-        deadline = time.monotonic() + START_SESSION_DISCOVERY_TIMEOUT
-        while True:
-            try:
-                candidates = set(codex_sessions_for_task(moved.task_id))
-            except KanbanError as resolve_error:
-                error = resolve_error
-            else:
-                new_sessions = candidates - previous_codex_sessions
-                if len(new_sessions) == 1:
-                    return AgentSession("codex", next(iter(new_sessions)))
-                if len(new_sessions) > 1:
-                    raise KanbanError(t(
-                        f"本次启动发现多个新 Codex 会话: {len(new_sessions)}",
-                        f"Multiple new Codex sessions appeared during start: {len(new_sessions)}",
-                    ))
-                error = KanbanError(t(
-                    "尚未发现本次新建的 Codex 会话",
-                    "The newly started Codex session has not appeared yet",
-                ))
-            if time.monotonic() >= deadline:
-                raise error
-            time.sleep(NOTIFY_POLL_INTERVAL)
+        reference = discover_new_codex_session(
+            moved.task_id, previous_codex_sessions, codex_sessions_for_task
+        )
+        return AgentSession("codex", reference)
     try:
         write_text_atomic(moved.document, updated, entry=moved)
         outcome = launch_agent(
@@ -2453,45 +2416,6 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
 RESUME_STATES = ("review", "working")
 
 
-def resume_agent_prompt(task_id: str, message: str, paths: InstallPaths) -> str:
-    """生成 resume 交给原执行 Agent 的说明: 先重读卡片, 再处理主控派回的事项."""
-    if paths.mode == "project":
-        if paths.project_root is None:
-            raise KanbanError(t("项目安装路径缺少主 worktree", "project install paths are missing the main worktree"))
-        kanban_cmd = str(paths.bin_dir / "kanban")
-        agents_md = str(paths.project_root / "AGENTS.md")
-    else:
-        kanban_cmd = "kanban"
-        agents_md = t("目标项目 AGENTS.md", "the target project's AGENTS.md")
-    return (
-        f"继续 Kanban 任务 {task_id}. 卡片已迁回 working. 先运行 {kanban_cmd} rules, 再运行 "
-        f"{kanban_cmd} show {task_id} 重新核对卡片, 然后处理以下事项:\n\n{message}\n\n"
-        f"遵守 {agents_md} 和看板规则; 处理完成后更新任务卡, 提交并 push, 再按规则迁移卡片状态."
-    )
-
-
-def read_task_message(args: argparse.Namespace, command: str) -> str:
-    if bool(args.message) == bool(args.message_file):
-        raise KanbanError(t(
-            f"{command} 必须且只能提供 --message 或 --message-file 之一",
-            f"{command} requires exactly one of --message or --message-file",
-        ))
-    if args.message:
-        message = args.message
-    else:
-        path = Path(args.message_file)
-        if is_reparse_point(path):
-            raise KanbanError(t(f"消息文件不得是符号链接/重解析点: {path}", f"Message file must not be a symlink/reparse point: {path}"))
-        try:
-            message = path.read_text(encoding="utf-8")
-        except OSError as error:
-            raise KanbanError(t(f"读取消息文件失败: {error}", f"Failed to read message file: {error}")) from error
-    message = message.strip()
-    if not message:
-        raise KanbanError(t(f"{command} 消息不得为空", f"{command} message must not be empty"))
-    return message
-
-
 def command_resume(args: argparse.Namespace, root: Path) -> None:
     entry = locate(load_board(root), args.task)
     if entry.state not in RESUME_STATES:
@@ -2502,30 +2426,75 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
     validate_liveness_timeout(args.timeout, "resume")
     message = read_task_message(args, "resume")
     text = read_document(entry)
-    session = session_from(text)
+    old_session = session_from(text)
+    old_window = metadata_from(text, WINDOW_FIELD)
+    takeover_agent = getattr(args, "agent", None)
+    takeover = takeover_agent is not None
     config = effective_config(load_config())
     plan = prepare_launch(args.launcher or config["launcher"], root.parent.resolve(), "resume")
-    program = require_agent_program(session.agent)
-    if session.agent == "codex":
+    agent_name = takeover_agent or old_session.agent
+    program = require_agent_program(agent_name)
+    session = new_agent_session(agent_name, program) if takeover else old_session
+    if not takeover and session.agent == "codex":
         session = AgentSession("codex", find_codex_session(entry.task_id))
-    elif not session.reference:
+    elif not takeover and not session.reference:
         raise KanbanError(t(
             f"任务卡的 {session.agent} 会话缺少 id, 无法唤醒",
             f"Task session for {session.agent} has no id; cannot resume",
         ))
-    task_file = create_task_file(
-        resume_agent_prompt(entry.task_id, message, current_install_paths()),
-        prefix=f"onevoke-{entry.task_id}-resume-",
+    previous_codex_sessions: set[str] = set()
+    if takeover and session.agent == "codex" and plan.launcher in ("tmux", "tmux-session"):
+        try:
+            previous_codex_sessions.update(codex_sessions_for_task(entry.task_id))
+        except KanbanError:
+            pass
+    instruction = (
+        takeover_agent_prompt(entry.task_id, message, current_install_paths(), old_session.agent)
+        if takeover else resume_agent_prompt(entry.task_id, message, current_install_paths())
     )
-    prompt = task_file_instruction(f"继续 Kanban 任务 {entry.task_id}.", task_file)
+    task_file = create_task_file(
+        instruction,
+        prefix=f"onevoke-{entry.task_id}-{'takeover' if takeover else 'resume'}-",
+    )
+    prompt = task_file_instruction(
+        f"{'接管' if takeover else '继续'} Kanban 任务 {entry.task_id}.", task_file
+    )
     model_entry = config["models"]["kanban"][session.agent]
     invocation = process_invocation(
-        program,
-        [*agent_arguments(session.agent, model_entry, entry.kind, session, resume=True), prompt],
+        program, [*agent_arguments(
+            session.agent, model_entry, entry.kind, session, resume=not takeover
+        ), prompt],
     )
     moved = move_entry(entry, root, "working") if entry.state != "working" else entry
+    effective_session = session
+
+    def launched_tmux_session() -> AgentSession:
+        nonlocal effective_session
+        if session.reference:
+            return session
+        reference = discover_new_codex_session(
+            moved.task_id, previous_codex_sessions, codex_sessions_for_task
+        )
+        effective_session = AgentSession("codex", reference)
+        if takeover:
+            current = read_document(moved)
+            updated_session = render_session_metadata(
+                current, effective_session.render(), KanbanError
+            )
+            write_text_atomic(moved.document, updated_session, entry=moved)
+        return effective_session
+
     try:
-        if plan.launcher in ("foreground", "console"):
+        if takeover:
+            updated = render_takeover_metadata(
+                read_document(moved),
+                session.agent,
+                session.render(),
+                "" if plan.launcher in ("herdr", "tmux", "tmux-session") else plan.launcher,
+                KanbanError,
+            )
+            write_text_atomic(moved.document, updated, entry=moved)
+        elif plan.launcher in ("foreground", "console"):
             write_text_atomic(
                 moved.document,
                 window_metadata(read_document(moved), plan.launcher),
@@ -2539,7 +2508,7 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
             record_window_location(plan, moved)
             if plan.launcher in ("herdr", "tmux", "tmux-session")
             else None,
-            pane_session_callback=(lambda: session)
+            pane_session_callback=launched_tmux_session
             if plan.launcher in ("tmux", "tmux-session")
             else None,
             agent_session=session,
@@ -2551,7 +2520,7 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
         rollback_launch(root, moved, entry.state, LaunchFailure(error, None), text)
         raise
     try:
-        validate_resumed_agent(plan, outcome, session, args.timeout)
+        validate_resumed_agent(plan, outcome, effective_session, args.timeout)
     except (KanbanError, OSError, UnicodeError, ValueError) as liveness_error:
         detail = resumed_agent_failure_output(plan, outcome)
         if detail:
@@ -2572,7 +2541,34 @@ def command_resume(args: argparse.Namespace, root: Path) -> None:
             text,
         )
         raise
-    report_launch(t("已唤醒", "resumed"), moved, session.agent, plan, outcome)
+    if takeover:
+        cleanup = cleanup_takeover_container(
+            old_window,
+            old_session,
+            metadata_from(read_document(moved), WINDOW_FIELD),
+            args.timeout,
+            CleanupOperations(
+                probe_herdr_pane, herdr_tab_panes, validate_herdr_dismiss_container,
+                herdr_close_tab, herdr_agent_prompt, herdr_wait_agent_exit,
+                probe_tmux_pane, validate_tmux_dismiss_container, tmux_close_window,
+                tmux_send_agent_exit, tmux_wait_agent_exit, tmux_window_exists,
+                agent_exit_command,
+            ),
+        )
+        if cleanup.cleaned:
+            print(t(
+                f"已清理原容器: {cleanup.old_window}\t通道={cleanup.channel}\t关闭容器={cleanup.container}",
+                f"cleaned old container: {cleanup.old_window}\tchannel={cleanup.channel}\tclosed-container={cleanup.container}",
+            ))
+        else:
+            print(t(
+                f"原容器保留: {cleanup.old_window}\t原因={cleanup.detail}",
+                f"old container retained: {cleanup.old_window}\treason={cleanup.detail}",
+            ))
+    report_launch(
+        t("已接管", "taken over") if takeover else t("已唤醒", "resumed"),
+        moved, effective_session.agent, plan, outcome,
+    )
 
 
 def resolved_task_session(entry: Entry, text: str) -> AgentSession:
@@ -2922,7 +2918,7 @@ def herdr_wait_agent_exit(
                 f"The pane changed to another Agent while waiting for exit: expected={session.agent}, actual={actual_agent}",
             ))
         actual_session = herdr_session_reference(pane)
-        if actual_session and actual_session != session.reference:
+        if session.reference and actual_session and actual_session != session.reference:
             raise KanbanError(t(
                 f"等待退出时 pane 会话已变更: 卡片={session.reference}, pane={actual_session}",
                 f"The pane session changed while waiting for exit: task={session.reference}, pane={actual_session}",
@@ -3023,7 +3019,7 @@ def tmux_wait_agent_exit(
             tmux, "show-options", "-p", "-v", "-t", pane_id, PANE_SESSION_OPTION
         )
         actual_session = identity.stdout.strip() if identity.returncode == 0 else ""
-        if actual_session != session.reference:
+        if session.reference and actual_session != session.reference:
             raise KanbanError(t(
                 f"等待退出时 tmux pane 会话已变更: 卡片={session.reference}, pane={actual_session or 'N/A'}",
                 f"The tmux pane session changed while waiting for exit: task={session.reference}, pane={actual_session or 'N/A'}",
@@ -3250,7 +3246,7 @@ def validate_resumed_agent(plan: LaunchPlan, outcome: LaunchOutcome, session: Ag
                 reference = herdr_session_reference(pane)
                 if (
                     pane.get("agent") == session.agent
-                    and (reference is None or reference == session.reference)
+                    and (not session.reference or reference is None or reference == session.reference)
                     and pane.get("agent_status") in ("idle", "working", "blocked")
                 ):
                     return
@@ -4059,9 +4055,13 @@ def parser() -> argparse.ArgumentParser:
 
     resume_parser = commands.add_parser(
         "resume",
-        help=t("用原会话唤醒 review 或 working 中任务的执行 Agent", "resume the execution Agent of a review or working task with its original session"),
+        help=t("用原会话唤醒执行 Agent, 或显式换 Agent 接管", "resume the original Agent session or explicitly choose a takeover Agent"),
     )
     resume_parser.add_argument("task", metavar=t("任务", "task"))
+    resume_parser.add_argument(
+        "--agent", choices=AGENT_NAMES,
+        help=t("显式指定接管任务的新 Agent", "explicitly choose a new Agent to take over the task"),
+    )
     resume_parser.add_argument("--message", help=t("交给执行 Agent 处理的事项", "the items for the execution Agent to handle"))
     resume_parser.add_argument("--message-file", help=t("从 UTF-8 文件读取事项", "read the items from a UTF-8 file"))
     resume_parser.add_argument(
@@ -4074,7 +4074,7 @@ def parser() -> argparse.ArgumentParser:
         type=float,
         default=NOTIFY_DEFAULT_TIMEOUT,
         metavar=t("秒", "seconds"),
-        help=t("等待恢复存活的超时秒数, 默认 120", "seconds to wait for resumed-agent liveness; default 120"),
+        help=t("等待存活的超时秒数, 默认 120; 接管清理可再使用同等时长", "seconds to wait for liveness; default 120; takeover cleanup may use the same duration again"),
     )
 
     notify_parser = commands.add_parser(

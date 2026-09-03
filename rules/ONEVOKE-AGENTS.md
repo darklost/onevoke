@@ -52,7 +52,7 @@
 ### 执行 Agent
 
 - `kanban start` 按任务卡规模选执行 Agent: 大任务 (含 `spec.md` 的目录卡) 取配置 `kanban_agents.large`, 小任务 (单文件卡) 取 `kanban_agents.small`; 两者缺省都等于 `kanban_agent`, 用 `onevoke welcome` 菜单「执行 Agent」分别设置. `--agent` 只覆盖本次. 模型与推理档位按 `models.kanban.<agent>` 的大, 小任务档位取值.
-- `kanban resume` 用卡片记录的原会话唤醒同一执行 Agent, 不换 Agent; 机制见 `KANBAN-RULES.md`「命令契约」.
+- `kanban resume` 默认用卡片记录的原会话唤醒同一执行 Agent; 显式 `--agent` 表示用户授权由指定 Agent 以全新会话接管. 机制见 `KANBAN-RULES.md`「命令契约」.
 
 ### Launcher
 
