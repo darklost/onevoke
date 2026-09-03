@@ -1989,7 +1989,14 @@ def codex_sessions_root() -> Path:
 
 def codex_prompt_prefixes(task_id: str) -> tuple[str, ...]:
     """start/resume 交给执行 Agent 的 prompt 开头; 主控会话里只是提到任务 ID 的消息不算."""
-    return (f"执行 Kanban 任务 {task_id}.", f"继续 Kanban 任务 {task_id}.")
+    start = f"执行 Kanban 任务 {task_id}"
+    resume = f"继续 Kanban 任务 {task_id}"
+    return (
+        f"{start}; full instructions are in the UTF-8 task file at ",
+        f"{resume}; full instructions are in the UTF-8 task file at ",
+        f"{start}.",
+        f"{resume}.",
+    )
 
 
 def codex_rollout_mentions_task(path: Path, task_id: str) -> Optional[str]:

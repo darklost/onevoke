@@ -295,7 +295,7 @@ if [ "$1" = "respawn-pane" ]; then
             printf '%s\\n' \
                 '{"type":"session_meta","payload":{"id":"fake-codex-session"}}' \
                 > "$session_dir/rollout-$task.jsonl"
-            printf '{"type":"event_msg","payload":{"type":"user_message","message":"执行 Kanban 任务 %s."}}\\n' \
+            printf '{"type":"event_msg","payload":{"type":"user_message","message":"执行 Kanban 任务 %s; full instructions are in the UTF-8 task file at /tmp/task.md; read the complete file first and follow it exactly."}}\\n' \
                 "$task" >> "$session_dir/rollout-$task.jsonl"
         fi
     fi
@@ -1129,7 +1129,12 @@ exit 1
         decoy = rollout("rollout-2026-09-01T10-00-00-aaaa.jsonl", "aaaaaaaa-0000-0000-0000-000000000001", f"执行 Kanban 任务 {other_id}.")
         # 主控自己的会话只是提到任务 ID, 不是 start prompt, 即使更新也不能被选中.
         orchestrator = rollout("rollout-2026-09-01T11-00-00-cccc.jsonl", "cccccccc-0000-0000-0000-000000000003", f"请用 kanban start 启动 {task_id} 并跟踪")
-        target = rollout("rollout-2026-09-01T09-00-00-bbbb.jsonl", "bbbbbbbb-0000-0000-0000-000000000002", f"执行 Kanban 任务 {task_id}. 先运行 kanban rules")
+        target = rollout(
+            "rollout-2026-09-01T09-00-00-bbbb.jsonl",
+            "bbbbbbbb-0000-0000-0000-000000000002",
+            f"执行 Kanban 任务 {task_id}; full instructions are in the UTF-8 task file at "
+            "/tmp/onevoke-task.md; read the complete file first and follow it exactly.",
+        )
         os.utime(target, (1_700_000_000, 1_700_000_000))
         os.utime(decoy, (1_700_000_500, 1_700_000_500))
         os.utime(orchestrator, (1_700_000_900, 1_700_000_900))
