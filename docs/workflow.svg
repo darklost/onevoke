@@ -25,6 +25,7 @@
       .panel { fill: #ffffff; stroke: #e6eaf0; stroke-width: 1.5; }
       .flow { fill: none; stroke: #94a3b8; stroke-width: 2.5; stroke-linecap: round; marker-end: url(#a-slate); }
       .col { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1.5; }
+      .cmd { font-size: 15px; font-weight: 600; fill: #334155; font-family: "SFMono-Regular", "Cascadia Mono", "Noto Sans Mono", "DejaVu Sans Mono", monospace; }
       .coltitle { font-size: 16px; font-weight: 700; fill: #475569; }
       .cardtitle { font-size: 15px; fill: #334155; }
     </style>
@@ -96,6 +97,8 @@
   <text x="1250" y="320" class="s bt">统一看全部任务进度</text>
   <circle cx="1234" cy="347" r="4" fill="#c4b5fd"/>
   <text x="1250" y="352" class="s bt">只看状态, 不在 TUI 改卡</text>
+  <rect x="1224" y="366" width="280" height="34" rx="10" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1.5"/>
+  <text x="1242" y="389" class="cmd">kanban tui  启动看板</text>
 
   <!-- board preview -->
   <rect x="64" y="452" width="1472" height="268" rx="16" class="panel" filter="url(#card)"/>
