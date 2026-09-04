@@ -4,123 +4,71 @@
 
 ![Onevoke 工作流](docs/workflow.svg)
 
-## 1. 安装
+## 1. 新手指引
 
-需要 Python 3, Git, 以及 Codex, Claude, Grok 或 Cursor 中至少一个. POSIX 系统还需要 POSIX shell; 原生 Windows 使用 PowerShell.
+安装完成后即可使用.
 
-Onevoke 有两种安装作用域, 共用同一套规则和程序, 不维护两套模板, 安装时也不改写 Markdown 正文. 当前读取的 `ONEVOKE-AGENTS.md` 入口位置决定作用域; 两种安装同时存在时, 项目入口和项目绝对命令优先.
+4 步上手:
 
-### 1.1 全局安装
+1. 新建一个 Agent 会话, 在里面讨论需求或者任务, 说清楚目标和验收条件. 推荐使用 Agent 的 Plan 模式.
+2. 任务确认后, 在该会话里要求 Agent 用看板流程完成任务:
 
-POSIX:
+```text
+用 kanban new & start 创建任务卡并启动
+```
+
+3. 有多个需求时, 对每个需求重复步骤 1-2, 不断安排并启动任务.
+4. 用命令行界面查看任务状态:
+
+```sh
+kanban tui
+```
+
+## 2. 安装
+
+需要 Python 3, Git, 以及 Codex, Claude, Grok 或 Cursor 中至少一个.
+
+Onevoke 有两种安装作用域, 共用同一套规则和程序.
+
+### 2.1 全局安装
+
+macOS/Linux:
 
 ```sh
 ./install.sh
 ```
 
-原生 Windows (PowerShell):
+Windows (PowerShell):
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+.\install.ps1
 ```
 
-Windows 安装器把命令装到 `~/.local/bin`, 规则装到 `~/.agents`, 但不会修改用户 `PATH`. 请把 `~/.local/bin` (通常是 `%USERPROFILE%\.local\bin`) 加入 `PATH` 并重新打开终端; `onevoke`, `kanban`, 审核和记忆合并分别提供对应的 `.cmd` 交互入口. 安装器和这些入口都会实际验证 Python 3: `py -3` 存在但不可用时继续尝试 `python.exe`, 再尝试 `python3.exe`. 0 字节的 WindowsApps 商店重定向别名会被跳过, 不会弹出商店; 已安装的商店版 Python 从其 AppX 安装目录解析. Windows 批处理无法为任意参数提供无损 argv 边界: 自动化若要传 `&|<>^%!`, 引号或结尾反斜杠等数据, 必须用进程 API 的 argv 数组直接调用当前 Python 和安装目录里的 Python 入口, 例如 Python 调用方使用 `subprocess.run([sys.executable, str(Path.home() / ".local/bin/onevoke"), ...])`; 不得再经过 `.cmd` 或 PowerShell/cmd 命令字符串.
+安装完成后会显示配置菜单, 根据需要配置各个角色要使用的 Agent 和模型.
 
-安装过程会显示当前配置菜单, 可按需修改默认 Agent、各角色 Reviewer、启动方式、模型与推理档位、MemSearch 或审核环节; 直接回车保存当前值, 输入 `q` 退出且不保存.
-审核在 POSIX 通过 `onevoke-review.sh`, Windows 人工显式调用可通过 `onevoke-review.cmd`; `onevoke review` 在 Windows 内部直接进入同目录的 `onevoke_review.py`. 这些路径共享唯一门禁实现; 新增 Reviewer 时扩展该实现, 不新增按 Agent 命名的脚本. 执行 Agent 与 Reviewer 在所有平台都把完整任务内容写入 UTF-8 临时文件, 启动参数只保留 CLI 必需的控制参数和一句文件路径指令; 文件内要求 Agent 完成后尝试删除, 删除失败或遗留不影响结果. 这类任务文件不做 POSIX 权限或 Windows ACL 检查与收紧. 原生 Windows 上优先使用 PATH 中 Codex, Claude, Grok 与 Cursor 的 `.exe`; 只有 `.cmd`/`.bat` 时则通过显式 `cmd.exe /d /s /v:off /c` 启动, 并由 Onevoke 的四种 Agent 适配层编码剩余控制参数, 不提供任意批处理脚本的通用调用契约.
+### 2.2 项目本地安装
 
-如果 `~/.agents/AGENTS.md` 不存在, 安装器会将其链接到 `ONEVOKE-AGENTS.md`; 已有文件不会修改.
-
-如果 welcome 提示 Agent 尚未接入规则:
-
-- Claude: 在 `~/.claude/CLAUDE.md` 加 `@~/.agents/ONEVOKE-AGENTS.md`.
-- Codex: 将 `~/.codex/AGENTS.md` 软链接到该入口, 或把入口内容合入现有文件.
-- Grok: 将 `~/.grok/AGENTS.md` 软链接到该入口, 或把入口内容合入现有文件.
-- Cursor: 将 `~/.cursor/AGENTS.md` 软链接到该入口, 或把入口内容合入现有文件.
-
-### 1.2 项目本地安装
-
-把载荷装到目标 Git 项目主 worktree 的 `.onevoke/`, 完全跳过 HOME 下的全局 Onevoke 路径.
-
-POSIX:
+macOS/Linux:
 
 ```sh
 ./install.sh --project <项目目录>
 ```
 
-原生 Windows (PowerShell):
+Windows (PowerShell):
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --project <项目目录>
+.\install.ps1 --project <项目目录>
 ```
 
-目标从任一 worktree 指定时都归一到主 worktree. 布局:
+## 3. 常用命令
 
-- 规则根: `<主 worktree>/.onevoke/rules`
-- 命令根: `<主 worktree>/.onevoke/bin`
-- 配置文件: `<主 worktree>/.onevoke/config.json`
-- 资源目录: `<主 worktree>/.onevoke/share`
-
-限制:
-
-- `.onevoke/` 写入该仓库本地 `.git/info/exclude`, 不进 Git, 也不改项目 `.gitignore`.
-- 任务 worktree 共享主 worktree 的 `.onevoke/`, 不建副本, 镜像或符号链接.
-- 零全局写入: 不创建, 修改或探测 `~/.agents`, `~/.local/bin`, `~/.config/onevoke` 等全局 Onevoke 路径, 也不迁移或卸载既有全局安装.
-- 项目模式必须用命令根下的绝对入口, 例如 `<主 worktree>/.onevoke/bin/kanban` 和 `<主 worktree>/.onevoke/bin/onevoke`; Windows 人工交互可用对应 `.cmd`. 禁止改用 PATH 中的全局同名命令, 也不要把项目命令根加入 PATH 以免与全局安装混淆.
-- Agent 规则接入指向项目入口 `<主 worktree>/.onevoke/rules/ONEVOKE-AGENTS.md`, 不要指向全局入口.
-
-## 2. 使用
-
-下文 `kanban` 与 `onevoke` 指当前作用域命令根下的入口. 全局安装可使用已加入 PATH 的命令名; 项目安装必须使用绝对入口, 例如 `<主 worktree>/.onevoke/bin/kanban`, 禁止改用 PATH 中的全局同名命令.
-
-在项目目录首次使用时初始化看板:
-
-```sh
-kanban init
-```
-
-先在 Agent 中讨论需求, 明确目标, 验收条件和不做的范围.
-
-讨论完成后, 让 Agent 创建并启动任务卡:
-
-```text
-需求已确认. 请用 kanban new & start 创建任务卡并启动.
-```
-
-Agent 会填完整任务卡, 再执行:
-
-```sh
-kanban new feature login-retry 登录重试
-kanban pick 20260813-login-retry-task
-kanban start 20260813-login-retry-task
-kanban check 20260813-login-retry-task
-kanban subscribe 20260813-login-group 20260813-login-retry-task
-```
-
-`kanban start` 支持 `auto`, `tmux`, `tmux-session`, `herdr`, `foreground`, `console` 六种 launcher. POSIX 默认 `auto`, 原生 Windows 默认 `console`; `auto` 在启动当时解析: 处于 herdr 则后台新建 herdr tab, 否则处于 tmux 则后台新建 tmux window, 两者都不在则失败且不领取, 不回落到 `tmux-session` 或 `foreground`. tmux 与 `tmux-session` 创建任务 window 时不切换当前 client; herdr 创建任务 tab 时不改变当前 tab 的焦点. `console` 仅支持 Windows, 会在独立控制台窗口启动 Agent 并立即返回 PID. 它不创建或复用 tmux session, 也不提供 attach 或输出抓取能力; 需要在当前终端等待 Agent 时使用 `foreground`. `herdr` 仅支持 POSIX, 要求当前处于 herdr (`HERDR_ENV=1`), 会在当前 workspace 新建 tab, 等该 tab 的 shell 就绪后启动 Agent. Windows 拒绝 `auto` 和 `herdr`.
-
-`kanban check` 不带参数时默认检查除 `done` 与 `archived` 外的看板, `--all` 才纳入这两栏; 传入一个或多个任务 ID 时只检查这些目标及其跨状态冲突. `kanban subscribe <task-group> <task-id>...` 校验成员归属后输出 JSON Lines: 每行含 `event`, `group_id` 和 `tasks`; 启动时输出当前 `snapshot`, 状态变化时输出带 `changed` (`task_id`/`from`/`to`) 的 `state-change`, 默认无变化 15 分钟后输出 `heartbeat`. 可用 `--refresh` 和 `--heartbeat` 调整间隔.
-
-大型任务由 Agent 拆成多张可并行执行的任务卡, 再按依赖启动.
-
-查看看板状态:
-
-```sh
-kanban list
-kanban tui
-kanban tui --single
-kanban web
-```
-
-`kanban tui` 在当前终端启动全功能只读看板, 支持多栏浏览、搜索、任务详情、鼠标操作与剪贴板复制; 详情内可用 vim 风格翻页和文本选择. 栏宽用 `-`/`=` 调节, `--single` 单栏显示, 默认每 30 秒自动刷新. 原生 Windows 第一阶段保证 `kanban web`; `kanban tui` 仍要求当前 Python 提供可用的 `curses` 后端, 不属于本阶段的 Windows 可用性保证, 无法加载时请使用 Web 看板.
-
-终端看板:
+`kanban tui` 用命令行界面查看任务状态. 支持多栏浏览、搜索、任务详情、鼠标操作与剪贴板复制.
 
 ![终端看板](docs/onevoke-tui-01.png)
 
-`kanban web` 默认在 `http://127.0.0.1:8080` 启动只读看板. 服务端每 60 秒扫描任务, 仅在数据变化时通过 SSE 推送; 客户端原位更新对应卡片.
+也可以启动 Web 看板, 在浏览器中查看:
 
-Windows 后端拒绝看板、Git exclude 及记忆合并边界中的符号链接, junction 和其他 reparse point, 并通过已校验的 Win32 句柄完成任务读写、迁移、Git exclude 去重追加、记忆读取和追加; Git exclude 保持既有 ACL. 配置路径也从卷根逐级拒绝 reparse point; 读取期间固定配置文件句柄并拒绝写入/替换, schema 通过后在同一句柄上迁移 DACL; 保存时只收紧新建配置目录, 临时文件先变为私有再写入并通过固定父句柄原子替换. 在 Windows 上, 新看板目录、配置文件、审核运行目录及目标记忆目录/文件在创建瞬间即使用只允许当前用户访问的受保护 DACL; 审核运行目录的不共享 WRITE/DELETE 句柄会一直持有到 Reviewer 进程树收集和敏感文件 no-follow 清理完成, 同时阻止改名和原地 reparse 切换, 清理失败时审核失败. 记忆合并和 Git exclude 更新使用文件锁. 这些改动不改变 POSIX 现有的 no-follow 文件操作、`0600`/`0700` 权限和 `flock` 边界.
+`kanban web` 默认在 `http://127.0.0.1:8080` 启动.
 
 看板总览:
 
@@ -130,27 +78,61 @@ Windows 后端拒绝看板、Git exclude 及记忆合并边界中的符号链接
 
 ![任务详情](docs/onevoke-web-02.png)
 
-只看某个状态:
+## 4. 工作流程
 
-```sh
-kanban list working
-kanban list done
-```
+每个任务都按下面的流程进行:
 
-完整规则:
+### 4.1 任务拆分
 
-```sh
-kanban rules
-```
+Agent 会根据任务的复杂度和可拆分情况, 将任务拆分为尽可能独立的任务卡. 每个任务卡对应一个或多个 Markdown 文件.
 
-## 3. 审核
+如果一个任务拆分为多个任务卡, 则视为一个任务卡组.
 
-任务命中审核白名单后, 由平台审核入口分两阶段审核, PM 与 QA 基于同一 commit 并行首轮, 都通过后安全角色进入第二阶段: POSIX 使用 `onevoke-review.sh`; Windows 的人工包装入口是 `onevoke-review.cmd`, `onevoke review` 的程序化分发则直接进入 `onevoke_review.py`. 两者使用同一门禁实现. Codex, Claude 与 Grok 的只读 sandbox, 权限和工具隔离参数在两个平台保持不变; Cursor 用 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR` 隔离会话, 不做 `--sandbox` 事前阻断. 各角色是否运行由 `review_stages` 与项目规则决定. 每次修复只对提出必修项的角色做增量复审: 把该角色上一轮审过的 commit 作为 `reviewed-commit` 传给审核入口, reviewer 只核实上轮 finding 是否闭环并检查修复范围, 不重新全量审计. 两个例外: 某角色只剩机械必修项 (注释不一致, 死代码, 重复测试) 时由主代理机械核实闭环, 不重跑该角色; 安全角色的修复提交还要由 QA (改变功能行为时含 PM) 增量复审, 反过来 PM/QA 的修复实质改动安全代码时安全角色也增量复审. 只有经主代理核实的 `blocking`, `high`, `medium` 必须修复, 其余档位不阻塞集成, 但要在闭环结束时逐项展示.
+### 4.2 单个任务卡独立完成
 
-默认哪些环节运行可在配置文件的 `review_stages` 配置 (`auto` / `skip` / `required`), 项目规则或当前任务指令可覆盖. 全局安装的配置文件是 `~/.config/onevoke/config.json`, 项目安装是 `<主 worktree>/.onevoke/config.json`. 用命令根下的 `onevoke config` 查看当前值.
+对于单个任务卡, 会启动一个独立的 Agent 完成任务. 这个 Agent 称为任务 Agent.
 
-![Onevoke 审核流程](docs/review.svg)
+任务 Agent 的工作步骤:
 
-## 4. 许可
+- 创建一个 git worktree, 避免和其他 Agent 的工作互相干扰.
+- 生成代码或文档.
+- 启动独立的审核 Agent 对成果进行审核.
+- 审核通过后, 将 worktree 合回到 develop 分支.
+- 输出任务总结, 结束.
+
+### 4.3 多个任务卡组成的任务卡组
+
+启动任务卡组的 Agent 会转变为主控 Agent, 并负责编排任务和审核流程.
+
+主控 Agent 会根据任务卡的依赖关系, 确保所有任务卡按照正确的顺序完成. 在可能的情况下, 也会同时启动多个任务卡, 提高效率.
+
+与单个任务卡的流程有所区别, 每个任务 Agent 现在只负责生成代码或文档.
+
+- 当整个任务卡组完成代码或文档的生成后, 主控 Agent 会启动审核流程.
+- 收到审核 Agent 返回的结果, 主控 Agent 负责对汇总, 再将修改意见发给适当的任务 Agent.
+- 重复整个过程, 直到整个任务卡组完成. 最后合回 develop 分支.
+- 输出任务总结, 结束.
+
+### 4.4 审核
+
+Onevoke 中定义了四种审核角色, 每个角色在审核时侧重点不同:
+
+- PM: 产品经理只关注功能实现是否符合目标, 不会随意扩大功能范围.
+- QA: 关注功能实现是否符合项目整体架构要求, 以及代码质量和可维护性.
+- CSA: 关注代码内在安全性.
+- Hacker: 用对抗性视角从外部审查是否存在攻击弱点.
+
+用户可以配置四种审核角色是否启用. 大多数任务启用 PM 和 QA 就足够了.
+
+## 5. 配置
+
+使用命令 `onevoke welcome --reset` 可以随时修改配置:
+
+- 选择执行任务卡的 Agent
+- 选择四种审核角色使用的 Agent
+- 启用哪些审核角色
+- 默认语言等
+
+## 6. 许可
 
 本项目使用 MIT License, 见 [LICENSE](LICENSE).

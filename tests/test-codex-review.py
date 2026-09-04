@@ -521,6 +521,34 @@ class CodexReviewGateTest(unittest.TestCase):
         self.assertIn("Tag each such item with [mechanical]", prompt)
         self.assertIn("Do not modify files", prompt)
 
+    def test_qa_prompt_focuses_architecture_quality_and_incremental_size_rule(self) -> None:
+        self.assertEqual(0, self.default_review().returncode)
+
+        prompt = self.stdin_log.read_text(encoding="utf-8")
+        normalized_prompt = " ".join(prompt.split())
+
+        self.assertIn("existing module responsibilities, dependency directions", normalized_prompt)
+        self.assertIn("clear ownership and single responsibility", normalized_prompt)
+        self.assertIn("Do not perform a general performance review", normalized_prompt)
+        self.assertIn("explicit performance acceptance criteria remain PM contract checks", normalized_prompt)
+        self.assertIn("a non-generated code file must not exceed 1000 physical lines", normalized_prompt)
+        self.assertIn("creates such a file above 1000 lines", normalized_prompt)
+        self.assertIn("from at most 1000 lines to above 1000 lines", normalized_prompt)
+        self.assertIn(
+            "increases the final physical-line count of a task-relevant file that was already above 1000 lines",
+            normalized_prompt,
+        )
+        self.assertIn("No net line increase means this rule does not trigger", normalized_prompt)
+        self.assertIn("replacement imports, adapters, or other glue code", normalized_prompt)
+        self.assertIn("Do not inventory unrelated pre-existing oversized files", normalized_prompt)
+        self.assertNotIn("realistic workload and code evidence", normalized_prompt)
+        self.assertNotIn("universal line-count threshold", normalized_prompt)
+        self.assertIn("Do not enumerate contrived combinations, extreme edge cases", normalized_prompt)
+        self.assertIn(
+            "code and module boundaries directly affected by the review range",
+            normalized_prompt,
+        )
+
     def test_spec_file_is_passed_as_authoritative_context(self) -> None:
         spec = self.root / "spec.md"
         spec.write_text("# 任务契约\n", encoding="utf-8")
