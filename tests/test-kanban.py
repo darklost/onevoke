@@ -27,7 +27,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from unittest import mock
-
+from kanban_dismiss_tests import DismissTests
+from kanban_notify_liveness_tests import NotifyLivenessTests
+from kanban_takeover_tests import TakeoverTests
+from kanban_window_writeback_tests import WindowWritebackTests
 if os.name == "posix":
     import fcntl
     import pty
@@ -48,7 +51,6 @@ INSTALLED_ZH = "Onevoke 已安装\n"
 INSTALLED_EN = "Onevoke installed\n"
 _LOCALE_VARS = ("ONEVOKE_LANG", "LC_ALL", "LC_MESSAGES", "LANG")
 
-
 def install_env(home: Path, **extra: str) -> dict[str, str]:
     env = {
         key: value
@@ -66,7 +68,10 @@ STATES = ("backlog", "todo", "working", "review", "done", "archived", "trash")
 
 
 @unittest.skipUnless(os.name == "posix", "PTY, flock, tmux, and shell tests require POSIX")
-class KanbanCommandTest(unittest.TestCase):
+class KanbanCommandTest(
+    DismissTests, NotifyLivenessTests, TakeoverTests, WindowWritebackTests,
+    unittest.TestCase,
+):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -184,8 +189,21 @@ class KanbanCommandTest(unittest.TestCase):
         tmux = fake_bin / "tmux"
         tmux.write_text(
             """#!/bin/sh
+if [ "$1" = "list-panes" ] && [ "$2" = "-a" ] && [ "$3" = "-F" ]; then
+    printf '%s\n' "$@" > "$KANBAN_TMUX_LOG.list-panes"
+    if [ "${KANBAN_TMUX_LIST_PANES_FAIL:-}" = "1" ]; then
+        printf '%s\n' 'fake tmux list-panes failure' >&2
+        exit 1
+    fi
+    printf '%s\n' "${KANBAN_TMUX_LIST_PANES:-}"
+    exit 0
+fi
 if [ "$1" = "display-message" ]; then
     if [ "${5:-}" = '#{pane_current_command}\t#{pane_in_mode}\t#{pane_dead}' ]; then
+        if [ -n "${KANBAN_TMUX_STALE_PANE:-}" ] && [ "$4" = "$KANBAN_TMUX_STALE_PANE" ]; then
+            printf '%s\n' "can't find pane: $4" >&2
+            exit 1
+        fi
         current="${KANBAN_TMUX_CURRENT_COMMAND:-}"
         if [ -z "$current" ] && [ -f "$KANBAN_TMUX_LOG.current" ]; then
             current=$(sed -n '1p' "$KANBAN_TMUX_LOG.current")
@@ -215,10 +233,10 @@ if [ "$1" = "display-message" ]; then
     fi
     if [ "${5:-}" = '#{window_id}' ]; then
         if [ "${KANBAN_TMUX_WINDOW_GONE:-}" = "1" ]; then
-            printf '%s\\n' "can't find window: @9" >&2
+            printf '%s\\n' "can't find window: ${KANBAN_TMUX_TARGET_WINDOW:-@9}" >&2
             exit 1
         fi
-        printf '%s\\n' '@9'
+        printf '%s\\n' "${KANBAN_TMUX_TARGET_WINDOW:-@9}"
         exit 0
     fi
     printf '%s\\n' '$42'
@@ -413,6 +431,10 @@ fi
 if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
     printf '%s\n' "$@" > "$KANBAN_HERDR_LOG.get"
     printf '%s\n' "$1 $2" >> "$KANBAN_HERDR_LOG.order"
+    if [ -n "${KANBAN_HERDR_STALE_PANE:-}" ] && [ "$3" = "$KANBAN_HERDR_STALE_PANE" ]; then
+        printf '%s\n' '{"id":"cli:pane:get","error":{"code":"pane_not_found","message":"gone"}}' >&2
+        exit 1
+    fi
     if [ "${KANBAN_HERDR_GET_FAIL:-}" = "1" ]; then
         printf '%s\n' 'fake pane not found' >&2
         exit 1
@@ -431,8 +453,13 @@ if [ "$1" = "pane" ] && [ "$2" = "get" ]; then
             "$3" "${KANBAN_HERDR_TAB_ID:-w1:t9}"
         exit 0
     fi
+    status="${KANBAN_HERDR_STATUS:-idle}"
+    if [ "${KANBAN_HERDR_BUSY_ONCE:-}" = "1" ] && [ ! -f "$KANBAN_HERDR_LOG.busy-once" ]; then
+        status=working
+        : > "$KANBAN_HERDR_LOG.busy-once"
+    fi
     printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"pane_id":"%s","tab_id":"%s","agent":"%s","agent_status":"%s","agent_session":{"value":"%s"}}}}\n' \
-        "$3" "${KANBAN_HERDR_TAB_ID:-w1:t9}" "${KANBAN_HERDR_AGENT:-codex}" "${KANBAN_HERDR_STATUS:-idle}" "${KANBAN_HERDR_SESSION:-}"
+        "$3" "${KANBAN_HERDR_TAB_ID:-w1:t9}" "${KANBAN_HERDR_AGENT:-codex}" "$status" "${KANBAN_HERDR_SESSION:-}"
     exit 0
 fi
 if [ "$1" = "pane" ] && [ "$2" = "read" ]; then
@@ -1521,7 +1548,6 @@ exit 1
         cases = (
             ("notify-no-pane", "KANBAN_HERDR_GET_FAIL", "1", "pane 不存在"),
             ("notify-agent", "KANBAN_HERDR_AGENT", "codex", "Agent 不匹配"),
-            ("notify-busy", "KANBAN_HERDR_STATUS", "running", "状态不可投递"),
             ("notify-session", "KANBAN_HERDR_SESSION", "wrong-session", "会话不匹配"),
         )
         for slug, variable, value, expected in cases:
@@ -1539,12 +1565,9 @@ exit 1
                 self.env.pop(variable, None)
                 self.env.pop("KANBAN_HERDR_RUN_FAIL", None)
 
-    def test_notify_tmux_rejects_dead_and_copy_mode_panes(self) -> None:
+    def test_notify_tmux_rejects_dead_panes(self) -> None:
         self.install_fake_launchers()
-        for slug, variable, expected in (
-            ("notify-dead", "KANBAN_TMUX_DEAD", "tmux pane 已退出"),
-            ("notify-copy", "KANBAN_TMUX_IN_MODE", "copy-mode"),
-        ):
+        for slug, variable, expected in (("notify-dead", "KANBAN_TMUX_DEAD", "tmux pane 已退出"),):
             with self.subTest(expected=expected):
                 task_id, task = self.make_todo(slug)
                 self.run_command("start", "--launcher", "tmux", "--agent", "claude", task_id)
@@ -7508,6 +7531,8 @@ class KanbanProjectInstallTest(unittest.TestCase):
             "kanban",
             "onevoke_config.py",
             "onevoke_fs.py",
+            "kanban_probe.py", "kanban_window.py", "kanban_liveness.py", "kanban_notify.py",
+            "kanban_takeover.py",
             "onevoke_process.py",
             "kanban_web.py",
             "kanban_tui.py",
